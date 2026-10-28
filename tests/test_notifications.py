@@ -156,6 +156,26 @@ class InAppNotificationTests(unittest.TestCase):
         )
         self.assertTrue(updated["read"])
 
+    def test_secret_gift_claim_is_silent_and_creator_cancel_only_notifies_claimant(self) -> None:
+        gift = self.store.create_wishlist_item(
+            {"text": "想要的礼物", "note": "公开款式", "item_kind": "gift"}, DEMO_USER,
+        )
+        creator_before = self.store.list_in_app_notifications(DEMO_USER)["items"]
+        claimant_before = self.store.list_in_app_notifications(DEMO_PARTNER)["items"]
+        claim = self.store.claim_wishlist_item(
+            gift["id"], "私密购买备注", False, gift["version"], "notification-claim-0001", DEMO_PARTNER,
+        )
+        self.assertEqual(self.store.list_in_app_notifications(DEMO_USER)["items"], creator_before)
+        self.assertEqual(self.store.list_in_app_notifications(DEMO_PARTNER)["items"], claimant_before)
+
+        self.store.toggle_wishlist_item(gift["id"], True, DEMO_USER)
+        creator_after = self.store.list_in_app_notifications(DEMO_USER)["items"]
+        claimant_after = self.store.list_in_app_notifications(DEMO_PARTNER)["items"]
+        self.assertEqual(creator_after, creator_before)
+        cancellation = next(item for item in claimant_after if item["resource_id"] == gift["id"])
+        self.assertEqual(cancellation["event_type"], "wishlist.claim_cancelled")
+        self.assertNotIn("私密准备备注", cancellation["body"])
+
     def test_call_and_trip_changes_are_durable_partner_notifications(self) -> None:
         call = self.store.start_call(DEMO_USER)
         self.store.cancel_call(call["id"], DEMO_USER)

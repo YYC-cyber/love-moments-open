@@ -97,6 +97,17 @@ function render(data) {
     return `<article class="quota-card ${item.exhausted ? "exhausted" : item.warning ? "warning" : ""}"><div><strong>${escapeHtml(item.label)}</strong><span>${state}</span></div><b>${amount}</b><small>${detail}</small><div class="capacity-track"><i class="${capacityClass(ratio)}"></i></div></article>`;
   }).join("");
 
+  const vault = data.data_vault;
+  const policy = vault.account_export_policy;
+  const backup = vault.latest_backup;
+  document.getElementById("dataVaultState").innerHTML = [
+    ["数据库与外键", vault.database.integrity === "ok" && vault.database.foreign_key_violations === 0 && vault.database.schema_ok, `Schema ${vault.database.schema_actual}/${vault.database.schema_expected} · 外键异常 ${vault.database.foreign_key_violations}`],
+    ["账号导出权限", policy.ok, `规则 ${policy.version} · 已覆盖 ${policy.covered}/${policy.required} 张表`],
+    ["媒体文件树", vault.media.available && vault.media.missing_files === 0 && vault.media.orphan_files === 0, `缺失 ${vault.media.missing_files} · 孤立 ${vault.media.orphan_files}`],
+    ["最近恢复演练", backup.verified, backup.exists ? `${backup.age_hours ?? "未知"} 小时前 · ${backup.restore_drill === "passed" ? "校验与恢复演练通过" : "尚未全部通过"}` : "尚无备份"],
+    ["异盘镜像", vault.mirror.configured, vault.mirror.configured ? "已配置第二存储位置" : "未配置；本机磁盘损坏时备份可能一起丢失"]
+  ].map(([label, ok, detail]) => `<article class="list-row"><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><span class="severity ${ok ? "" : "warning"}">${ok ? "正常" : "待完善"}</span></article>`).join("");
+
   document.getElementById("backupCount").textContent = `${data.backups.count} 份`;
   const backupLocation = `<p class="panel-note">${data.configured.backup_mirror ? "数据库备份已配置到第二存储位置。" : "当前数据库备份仍在本机同一磁盘；七牛云只保存媒体，不能替代 SQLite 异盘备份。"}</p>`;
   document.getElementById("backupList").innerHTML = backupLocation + (data.backups.items.length ? data.backups.items.map(item => `<article class="list-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(dateTime(item.created_at))} · ${item.source === "automatic" ? "自动" : "手动"} · 媒体 ${item.media_files} 个 / ${bytes(item.media_bytes)} · ${item.verification_ok ? "恢复演练通过" : "待验证"}</small></div><div class="row-actions"><span class="severity ${item.verification_ok ? "" : "warning"}">${item.verification_ok ? "已验证" : "待验证"}</span><button data-verify-backup="${escapeHtml(item.name)}">重新验证</button></div></article>`).join("") : `<div class="empty">还没有备份，建议立即创建第一份。</div>`);

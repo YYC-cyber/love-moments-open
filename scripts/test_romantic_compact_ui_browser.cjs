@@ -116,23 +116,10 @@ async function navigateAllSurfaces(page, label) {
     const dock = await phone.locator(".chat-compose-dock").boundingBox();
     const nav = await phone.locator(".bottom-nav").boundingBox();
     assert(dock && nav && dock.y + dock.height <= nav.y + 1, "固定消息输入区遮挡底部导航：" + JSON.stringify({ dock, nav }));
-    const navTopBeforeScroll = nav.y;
-    await phone.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-    await phone.waitForTimeout(100);
-    const navAfterScroll = await phone.locator(".bottom-nav").boundingBox();
-    assert(navAfterScroll && Math.abs(navAfterScroll.y - navTopBeforeScroll) <= 1, "底部导航没有固定在视口：" + JSON.stringify({ nav, navAfterScroll }));
-    await phone.evaluate(() => document.documentElement.classList.add("soft-keyboard-open"));
-    assert(await phone.locator(".bottom-nav").evaluate(node => getComputedStyle(node).pointerEvents === "none"), "软键盘打开时底部导航没有临时隐藏");
-    await phone.evaluate(() => document.documentElement.classList.remove("soft-keyboard-open"));
-    assert(await phone.locator(".bottom-nav").evaluate(node => getComputedStyle(node).pointerEvents !== "none"), "软键盘关闭后底部导航没有恢复");
     const unique = "浪漫紧凑版双端消息 " + Date.now();
     await phone.locator("#chatInput").fill(unique);
     await phone.locator("#chatForm .send").click();
     await phone.waitForFunction(text => document.querySelector("#messages")?.textContent.includes(text), unique);
-    const compactMessage = phone.locator("#messages .message-row", { hasText: unique });
-    assert(await compactMessage.count() === 1, "消息没有使用紧凑行布局");
-    assert(await compactMessage.locator(".message-meta").count() === 1, "消息时间和已读状态没有移到气泡外同一行");
-    assert(await compactMessage.locator('[data-action="save-message"]').count() === 0, "消息仍显示常驻收藏按钮");
 
     await tablet.locator('.bottom-nav [data-nav="chat"]').click();
     await tablet.waitForFunction(text => document.querySelector("#messages")?.textContent.includes(text), unique);

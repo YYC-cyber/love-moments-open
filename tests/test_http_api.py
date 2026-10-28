@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import http.cookiejar
 import base64
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -9,10 +11,11 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -36,7 +39,8 @@ from love_moments.schema import SCHEMA_VERSION
 from love_moments.weather import OpenMeteoWeather
 from love_moments.shengwang import ShengwangRtcProvider
 from love_moments.travel_assistant import RuleBasedTravelAssistant
-from love_moments.store import DEMO_PARTNER, DEMO_TRIP, DEMO_USER
+from love_moments.expression_assistant import RuleBasedExpressionAssistant
+from love_moments.store import DEMO_COUPLE, DEMO_PARTNER, DEMO_TRIP, DEMO_USER
 from tests import VALID_PNG
 
 
@@ -65,7 +69,7 @@ class HttpApiTests(unittest.TestCase):
         cls.original_rtc = main.RTC
         cls.original_auth_limiter = main.AUTH_LIMITER
         cls.original_push_test_limiter = main.PUSH_TEST_LIMITER
-        main.STORE = LoveMomentsStore(Path(cls.temp.name) / "http-test.db", travel_assistant=RuleBasedTravelAssistant(), seed_demo_data=True)
+        main.STORE = LoveMomentsStore(Path(cls.temp.name) / "http-test.db", travel_assistant=RuleBasedTravelAssistant(), expression_assistant=RuleBasedExpressionAssistant(), seed_demo_data=True)
         main.WEATHER = OpenMeteoWeather(enabled=False)
         main.RTC = ShengwangRtcProvider("shengwang", "a" * 32, "b" * 32, 600)
         main.AUTH_LIMITER = main.RequestLimiter(limit=1_000, window_seconds=60)
@@ -139,21 +143,21 @@ class HttpApiTests(unittest.TestCase):
         )
         return subscription
 
-    def post(self, opener: urllib.request.OpenerDirector, path: str, payload: dict) -> dict:
+    def post(self, opener: urllib.request.OpenerDirector, path: str, payload: dict, headers: dict | None = None) -> dict:
         req = urllib.request.Request(
             self.base + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
         with opener.open(req) as response:
             return json.load(response)
 
-    def patch(self, opener: urllib.request.OpenerDirector, path: str, payload: dict) -> dict:
+    def patch(self, opener: urllib.request.OpenerDirector, path: str, payload: dict, headers: dict | None = None) -> dict:
         req = urllib.request.Request(
             self.base + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
             method="PATCH",
         )
         with opener.open(req) as response:
@@ -187,6 +191,564 @@ class HttpApiTests(unittest.TestCase):
             error.close()
         else:
             self.fail("未登录请求应返回 401")
+
+    def test_trip_expense_http_contract_is_shared_versioned_and_atomic(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        trip_id = f"trip-expense-http-{uuid.uuid4().hex}"
+        with main.STORE.connection() as db:
+            db.execute(
+                """INSERT INTO trips(
+                       id,couple_id,title,destination,start_date,end_date,budget_cents,currency,status,version
+                   ) VALUES (?,?,?,?,?,?,?,'CNY','confirmed',1)""",
+                (trip_id, DEMO_COUPLE, "HTTP 旅行花费", "杭州", "2026-11-01", "2026-11-03", 200000),
+            )
+
+        first_payload = {
+            "amount_cents": 1001, "payer_id": DEMO_USER, "category": "food",
+            "split_mode": "equal", "occurred_on": "2026-11-01", "note": "HTTP 晚餐",
+            "idempotency_key": "body-key-must-not-win",
+        }
+        first = self.post(
+            tang, f"/trips/{trip_id}/expenses", first_payload,
+            {"Idempotency-Key": "http:expense:create:first"},
+        )
+        replay = self.post(
+            tang, f"/trips/{trip_id}/expenses", {**first_payload, "idempotency_key": "another-body-key"},
+            {"Idempotency-Key": "http:expense:create:first"},
+        )
+        self.assertEqual(first, replay)
+        with self.assertRaises(urllib.error.HTTPError) as changed_key:
+            self.post(
+                tang, f"/trips/{trip_id}/expenses", {**first_payload, "amount_cents": 1002},
+                {"Idempotency-Key": "http:expense:create:first"},
+            )
+        self.assertEqual(changed_key.exception.code, 409)
+
+        second = self.post(chao, f"/trips/{trip_id}/expenses", {
+            "amount_cents": 999, "payer_id": DEMO_PARTNER, "category": "transport",
+            "split_mode": "equal", "occurred_on": "2026-11-02", "note": "HTTP 车费",
+            "idempotency_key": "http:expense:create:second",
+        })
+        with tang.open(self.base + f"/trips/{trip_id}/expenses") as response:
+            tang_view = json.load(response)
+        with chao.open(self.base + f"/trips/{trip_id}/expenses") as response:
+            chao_view = json.load(response)
+        self.assertEqual({item["id"] for item in tang_view["items"]}, {first["id"], second["id"]})
+        self.assertEqual(tang_view["balance"]["net_cents"], -chao_view["balance"]["net_cents"])
+
+        updated = self.patch(tang, f"/trips/{trip_id}/expenses/{first['id']}", {
+            "note": "HTTP 晚餐已修正", "expected_version": first["version"],
+            "idempotency_key": "http:expense:update:first",
+        })
+        with self.assertRaises(urllib.error.HTTPError) as stale_edit:
+            self.patch(chao, f"/trips/{trip_id}/expenses/{first['id']}", {
+                "note": "过期修改", "expected_version": first["version"],
+                "idempotency_key": "http:expense:update:stale",
+            })
+        self.assertEqual(stale_edit.exception.code, 409)
+
+        deleted = self.delete(chao, f"/trips/{trip_id}/expenses/{first['id']}", {
+            "expected_version": updated["version"], "idempotency_key": "http:expense:delete:first",
+        })
+        restored = self.post(tang, f"/trips/{trip_id}/expenses/{first['id']}/restore", {
+            "expected_version": deleted["version"], "idempotency_key": "http:expense:restore:first",
+        })
+        with self.assertRaises(urllib.error.HTTPError) as atomic_failure:
+            self.post(tang, f"/trips/{trip_id}/expenses/settle", {
+                "expenses": [
+                    {"id": first["id"], "expected_version": restored["version"]},
+                    {"id": second["id"], "expected_version": 99},
+                ],
+                "idempotency_key": "http:expense:settle:stale",
+            })
+        self.assertEqual(atomic_failure.exception.code, 409)
+        with tang.open(self.base + f"/trips/{trip_id}/expenses") as response:
+            after_failure = json.load(response)
+        self.assertEqual(after_failure["balance"]["unsettled_count"], 2)
+
+        settled = self.post(tang, f"/trips/{trip_id}/expenses/settle", {
+            "expenses": [
+                {"id": first["id"], "expected_version": restored["version"]},
+                {"id": second["id"], "expected_version": second["version"]},
+            ],
+            "idempotency_key": "http:expense:settle:valid",
+        })
+        self.assertEqual(settled["settled_count"], 2)
+        with chao.open(self.base + f"/trips/{trip_id}/expenses") as response:
+            settled_view = json.load(response)
+        self.assertEqual(settled_view["balance"]["net_cents"], 0)
+        self.assertEqual(len([item for item in settled_view["items"] if item["settled_at"]]), 2)
+
+        with self.assertRaises(urllib.error.HTTPError) as invalid_amount:
+            self.post(tang, f"/trips/{trip_id}/expenses", {
+                **first_payload, "amount_cents": 12.34,
+            }, {"Idempotency-Key": "http:expense:create:invalid"})
+        self.assertEqual(invalid_amount.exception.code, 400)
+    def test_memory_search_and_completion_http_contract_preserves_visibility(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        marker = f"HTTP回忆-{uuid.uuid4().hex}"
+        shared = main.STORE.create_moment({
+            "title": marker, "body": "双方可查正文", "visibility": "shared",
+            "occurred_at": "2024-02-14T12:00:00+00:00",
+        }, DEMO_USER)
+        private = main.STORE.create_moment({
+            "title": marker + "-私密", "body": "不可泄露", "visibility": "private",
+            "occurred_at": "2024-02-14T13:00:00+00:00",
+        }, DEMO_USER)
+
+        partner_result = self.post(chao, "/memories/search", {"q": marker, "limit": 20})
+        self.assertEqual([item["resource_id"] for item in partner_result["items"]], [shared["id"]])
+        self.assertEqual(partner_result["total"], len(partner_result["items"]))
+        self.assertNotIn(private["id"], json.dumps(partner_result, ensure_ascii=False))
+
+        private_phrase = f"私密描述-{uuid.uuid4().hex}"
+        saved = self.put(tang, f"/memories/moment/{shared['id']}/descriptions/me", {
+            "body": private_phrase, "visibility": "private", "expected_version": 0,
+        })
+        self.assertEqual(saved["visibility"], "private")
+        hidden_description = self.post(chao, "/memories/search", {"q": private_phrase})
+        self.assertEqual(hidden_description["total"], 0)
+        own_description = self.post(tang, "/memories/search", {"q": private_phrase})
+        self.assertEqual([item["resource_id"] for item in own_description["items"]], [shared["id"]])
+
+        refreshed = self.post(tang, "/memories/completion/refresh", {})
+        self.assertIn("created", refreshed)
+        with tang.open(self.base + "/memories/completion") as response:
+            completion = json.load(response)
+        self.assertIn("items", completion)
+
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM memory_completion_suggestions WHERE moment_id IN (?,?)", (shared["id"], private["id"]))
+            db.execute("DELETE FROM memory_descriptions WHERE moment_id IN (?,?)", (shared["id"], private["id"]))
+            db.execute("DELETE FROM memory_provenance WHERE moment_id IN (?,?)", (shared["id"], private["id"]))
+            db.execute("DELETE FROM moments WHERE id IN (?,?)", (shared["id"], private["id"]))
+
+    def test_memory_search_query_is_redacted_from_access_logs(self) -> None:
+        tang = self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        secret = f"私密检索词-{uuid.uuid4().hex}"
+        encoded = urllib.parse.quote_plus(secret)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            with tang.open(self.base + f"/memories/search?q={encoded}") as response:
+                json.load(response)
+            result = self.post(tang, "/memories/search", {"q": secret, "limit": 20})
+        self.assertIn("items", result)
+        logs = captured.getvalue()
+        self.assertNotIn(secret, logs)
+        self.assertNotIn(encoded, logs)
+        self.assertNotIn("?q=", logs)
+
+    def test_voice_memory_and_future_letter_http_contract(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        media = main.STORE.save_media(
+            b"RIFF" + (36).to_bytes(4, "little") + b"WAVEfmt " +
+            (16).to_bytes(4, "little") + b"\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00",
+            "http-voice.wav", "audio/wav", "private", DEMO_USER,
+        )
+        voice = self.post(tang, "/voice-memories", {
+            "media_id": media["id"], "title": "HTTP 语音回忆", "note": "",
+            "occurred_at": "2026-10-27T20:30:00+08:00", "location": "", "mood": "想念",
+            "visibility": "shared", "reveal_at": None, "duration_ms": 1200,
+            "transcript": {"body": "可校正的转写", "language": "zh-CN", "method": "manual", "status": "ready"},
+        }, {"Idempotency-Key": f"http-voice-{uuid.uuid4().hex}"})
+        with chao.open(self.base + f"/voice-memories/{voice['moment']['id']}") as response:
+            partner_voice = json.load(response)
+        self.assertEqual(partner_voice["transcript"]["body"], "可校正的转写")
+
+        letter = self.post(tang, "/future-letters", {
+            "title": "HTTP 未来信", "body": "暂不公开",
+        }, {"Idempotency-Key": f"http-letter-{uuid.uuid4().hex}"})
+        deliver_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
+        sealed = self.post(tang, f"/future-letters/{letter['id']}/seal", {
+            "deliver_at": deliver_at, "expected_version": letter["version"],
+        })
+        self.assertIsNone(sealed["body"])
+        with chao.open(self.base + "/future-letters?scope=delivered") as response:
+            self.assertEqual(json.load(response)["total"], 0)
+        cancelled = self.post(tang, f"/future-letters/{letter['id']}/cancel", {
+            "expected_version": sealed["version"],
+        })
+        self.assertEqual(cancelled["body"], "暂不公开")
+
+    def test_album_export_http_preview_job_and_protected_download(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        moment = main.STORE.create_moment({
+            "title": "HTTP 纪念册", "body": "只走受保护的本地 PDF", "visibility": "shared",
+            "occurred_at": "2024-02-14T12:00:00+00:00",
+        }, DEMO_USER)
+        preview = self.post(tang, "/album-exports/preview", {
+            "template": "year", "year": 2024, "audience": "shared",
+        })
+        chosen = next(item for item in preview["items"] if item["resource_id"] == moment["id"])
+        job = self.post(tang, "/album-exports", {
+            "template": "year", "year": 2024, "audience": "shared",
+            "selection": [{"resource_type": "moment", "resource_id": moment["id"]}],
+            "expected_versions": {f"moment:{moment['id']}": chosen["version"]},
+        }, {"Idempotency-Key": f"http-album-{uuid.uuid4().hex}"})
+        self.assertEqual(job["status"], "queued")
+        for malformed_version in (True, 1.0, "1", None):
+            with self.subTest(expected_version=malformed_version):
+                request = urllib.request.Request(
+                    self.base + f"/album-exports/{job['id']}/cancel",
+                    data=json.dumps({"expected_version": malformed_version}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as invalid:
+                    tang.open(request)
+                self.assertEqual(invalid.exception.code, 400)
+                invalid.exception.close()
+        claimed = main.STORE.claim_album_export_job()
+        completed = main.STORE.run_album_export_job(claimed)
+        self.assertEqual(completed["status"], "completed")
+
+        request = urllib.request.Request(self.base + f"/album-exports/{job['id']}/download")
+        with tang.open(request) as response:
+            data = response.read()
+            self.assertEqual(response.headers.get_content_type(), "application/pdf")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.headers["Cross-Origin-Resource-Policy"], "same-origin")
+            self.assertTrue(data.startswith(b"%PDF-"))
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            chao.open(self.base + f"/album-exports/{job['id']}")
+        self.assertEqual(denied.exception.code, 404)
+        denied.exception.close()
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM album_export_jobs WHERE id=?", (job["id"],))
+            db.execute("DELETE FROM memory_provenance WHERE moment_id=?", (moment["id"],))
+            db.execute("DELETE FROM moments WHERE id=?", (moment["id"],))
+        main.STORE._delete_album_artifacts(job["id"])
+
+    def test_memory_merge_http_binds_proposal_id_and_returns_public_dto(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        moment = main.STORE.create_moment({
+            "title": "HTTP 合并", "body": "旧正文", "visibility": "shared",
+            "occurred_at": "2024-02-14T12:00:00+00:00",
+        }, DEMO_USER)
+        first = self.put(tang, f"/memories/moment/{moment['id']}/descriptions/me", {
+            "body": "演示甲的视角", "visibility": "shared", "expected_version": 0,
+        })
+        second = self.put(chao, f"/memories/moment/{moment['id']}/descriptions/me", {
+            "body": "演示乙的视角", "visibility": "shared", "expected_version": 0,
+        })
+        proposal = self.post(tang, f"/memories/moments/{moment['id']}/merge-proposal", {
+            "body": "共同确认的正文", "expected_parent_version": moment["version"],
+            "expected_versions": {DEMO_USER: first["version"], DEMO_PARTNER: second["version"]},
+        })
+        confirmed = self.post(chao, f"/memories/moments/{moment['id']}/merge-confirm", {
+            "proposal_id": proposal["proposal_id"], "expected_version": proposal["version"],
+        })
+        self.assertEqual(confirmed["body"], "共同确认的正文")
+        for internal in ("couple_id", "creator_id", "deleted_at", "purged_at", "media_id", "source_message_id"):
+            self.assertNotIn(internal, confirmed)
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM memory_descriptions WHERE moment_id=?", (moment["id"],))
+            db.execute("DELETE FROM memory_provenance WHERE moment_id=?", (moment["id"],))
+            db.execute("DELETE FROM moments WHERE id=?", (moment["id"],))
+
+    def test_decision_http_contract_is_shared_versioned_and_private_until_reveal(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        deadline = (datetime.now(timezone.utc) + timedelta(hours=6)).replace(microsecond=0).isoformat()
+
+        created = self.post(tang, "/decisions", {
+            "title": "HTTP 周末安排", "selection_mode": "single",
+            "options": ["看展", "散步"], "closes_at": deadline,
+        })
+        decision_id = created["id"]
+        with chao.open(self.base + "/decisions") as response:
+            self.assertIn(decision_id, {item["id"] for item in json.load(response)["items"]})
+        with chao.open(self.base + f"/decisions/{decision_id}") as response:
+            self.assertEqual(json.load(response)["title"], "HTTP 周末安排")
+
+        changed = self.patch(tang, f"/decisions/{decision_id}", {
+            "title": "HTTP 周日安排", "expected_version": 1,
+        })
+        selected = changed["options"][0]["id"]
+        first_request = urllib.request.Request(
+            self.base + f"/decisions/{decision_id}/vote",
+            data=json.dumps({
+                "option_ids": [selected], "expected_version": changed["version"],
+                "idempotency_key": "payload-key-must-not-win",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "header-vote-key-001"},
+            method="PUT",
+        )
+        with tang.open(first_request) as response:
+            hidden = json.load(response)
+        self.assertNotIn("votes", hidden)
+        self.assertNotIn("resolution", hidden)
+
+        revealed = self.put(chao, f"/decisions/{decision_id}/vote", {
+            "option_ids": [selected], "expected_version": hidden["version"],
+            "idempotency_key": "partner-vote-key-001",
+        })
+        self.assertEqual(revealed["resolution"]["kind"], "agreement")
+
+        cancellable = self.post(chao, "/decisions", {
+            "title": "HTTP 可取消", "selection_mode": "multiple",
+            "options": ["甲", "乙"], "closes_at": deadline,
+        })
+        cancelled = self.delete(tang, f"/decisions/{cancellable['id']}", {"expected_version": 1})
+        self.assertEqual(cancelled["status"], "cancelled")
+
+        stale = urllib.request.Request(
+            self.base + f"/decisions/{decision_id}",
+            data=json.dumps({"title": "过期修改", "expected_version": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="PATCH",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            tang.open(stale)
+        self.assertEqual(caught.exception.code, 409)
+        caught.exception.close()
+
+    def test_private_vote_emits_nothing_and_reveal_uses_generic_realtime_http_and_sse(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        with chao.open(self.base + "/realtime/events?after=0") as response:
+            cursor = json.load(response)["latest_sequence"]
+        deadline = (datetime.now(timezone.utc) + timedelta(hours=6)).replace(microsecond=0).isoformat()
+        decision = self.post(tang, "/decisions", {
+            "title": "实时隐私测试", "selection_mode": "single",
+            "options": ["绝密路线甲", "绝密路线乙"], "closes_at": deadline,
+        })
+        selected = decision["options"][1]["id"]
+        self.put(tang, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [selected], "expected_version": 1,
+            "idempotency_key": "http-private-sse-vote",
+        })
+        with chao.open(self.base + f"/realtime/events?after={cursor}") as response:
+            payload = json.load(response)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertIn(decision["id"], serialized)
+        self.assertNotIn("decision.vote_submitted", serialized)
+        self.assertNotIn("decision.revealed", serialized)
+        self.assertNotIn(selected, serialized)
+        self.assertNotIn("绝密路线乙", serialized)
+        self.assertNotIn("option", serialized.casefold())
+
+        private_cursor = payload["latest_sequence"]
+        self.put(chao, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [decision["options"][0]["id"]], "expected_version": 1,
+            "idempotency_key": "http-private-sse-reveal",
+        })
+        with chao.open(self.base + f"/realtime/events?after={private_cursor}") as response:
+            revealed_payload = json.load(response)
+        revealed_serialized = json.dumps(revealed_payload, ensure_ascii=False)
+        self.assertIn("decision.revealed", revealed_serialized)
+        self.assertNotIn(selected, revealed_serialized)
+        self.assertNotIn("绝密路线乙", revealed_serialized)
+        self.assertNotIn("option", revealed_serialized.casefold())
+
+        with chao.open(self.base + f"/realtime/stream?after={private_cursor}", timeout=3) as response:
+            lines = []
+            for _ in range(30):
+                line = response.readline().decode("utf-8").strip()
+                lines.append(line)
+                if line.startswith("data:") and "decision.revealed" in "\n".join(lines):
+                    break
+        stream = "\n".join(lines)
+        self.assertIn("event: decision.revealed", stream)
+        self.assertNotIn(selected, stream)
+        self.assertNotIn("绝密路线乙", stream)
+        self.assertNotIn("option", stream.casefold())
+
+    def test_confirmed_decision_conversion_http_is_repeatable_pure_preview(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        deadline = (datetime.now(timezone.utc) + timedelta(hours=6)).replace(microsecond=0).isoformat()
+        decision = self.post(tang, "/decisions", {
+            "title": "HTTP 转换预填", "selection_mode": "single",
+            "options": ["菌汤火锅", "家常炒菜"], "closes_at": deadline,
+        })
+        selected = decision["options"][0]["id"]
+        self.put(tang, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [selected], "expected_version": decision["version"],
+            "idempotency_key": f"http-conversion-a-{uuid.uuid4().hex}",
+        })
+        revealed = self.put(chao, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [selected], "expected_version": decision["version"],
+            "idempotency_key": f"http-conversion-b-{uuid.uuid4().hex}",
+        })
+        pending = self.post(chao, f"/decisions/{decision['id']}/resolve", {
+            "action": "confirm", "option_id": selected,
+            "expected_version": revealed["version"],
+        })
+        confirmed = self.post(tang, f"/decisions/{decision['id']}/resolve", {
+            "action": "confirm", "option_id": selected,
+            "expected_version": pending["version"],
+        })
+        self.assertEqual(confirmed["status"], "confirmed")
+
+        with main.STORE.connection() as db:
+            before = {
+                "meal_wishes": db.execute("SELECT COUNT(*) FROM meal_wishes").fetchone()[0],
+                "calendar": db.execute("SELECT COUNT(*) FROM calendar_entries").fetchone()[0],
+                "audit": db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+                "events": db.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0],
+            }
+        first = self.post(tang, f"/decisions/{decision['id']}/conversion-preview", {
+            "target": "meal_wish", "option_id": selected,
+        })
+        second = self.post(tang, f"/decisions/{decision['id']}/conversion-preview", {
+            "target": "meal_wish", "option_id": selected,
+        })
+        self.assertEqual(first, second)
+        self.assertFalse(first["saved"])
+        self.assertTrue(first["requires_confirmation"])
+        self.assertEqual(first["values"]["title"], "菌汤火锅")
+        self.assertIn("尚未保存", first["notice"])
+        with main.STORE.connection() as db:
+            after = {
+                "meal_wishes": db.execute("SELECT COUNT(*) FROM meal_wishes").fetchone()[0],
+                "calendar": db.execute("SELECT COUNT(*) FROM calendar_entries").fetchone()[0],
+                "audit": db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+                "events": db.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0],
+            }
+        self.assertEqual(after, before)
+        saved = self.post(tang, "/meal-wishes", {
+            "title": first["values"]["title"], "note": first["values"]["note"],
+        })
+        self.assertEqual(saved["title"], "菌汤火锅")
+        with main.STORE.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM meal_wishes").fetchone()[0], before["meal_wishes"] + 1)
+        # Keep this class-level HTTP database isolated for later meal tests.
+        # The ordinary delete endpoint is part of the same public lifecycle.
+        self.delete(tang, f"/meal-wishes/{saved['id']}", {"expected_version": saved["version"]})
+
+    def test_decision_http_extend_and_resolve_routes_preserve_state_machine(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
+        decision = self.post(tang, "/decisions", {
+            "title": "HTTP 处理分歧", "selection_mode": "single",
+            "options": ["甲", "乙", "丙"], "closes_at": deadline,
+        })
+        ids = [item["id"] for item in decision["options"]]
+        one = self.put(tang, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[0]], "expected_version": 1,
+            "idempotency_key": "http-resolve-vote-01",
+        })
+        split = self.put(chao, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[1]], "expected_version": one["version"],
+            "idempotency_key": "http-resolve-vote-02",
+        })
+        restarted = self.post(tang, f"/decisions/{decision['id']}/resolve", {
+            "action": "revote", "expected_version": split["version"],
+        })
+        self.assertEqual(restarted["voting_round"], 2)
+        with main.STORE.connection() as db:
+            db.execute(
+                "UPDATE decisions SET closes_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                (decision["id"],),
+            )
+        extended = self.post(chao, f"/decisions/{decision['id']}/extend", {
+            "deadline_at": (datetime.now(timezone.utc) + timedelta(hours=8)).replace(microsecond=0).isoformat(),
+            "expected_version": restarted["version"],
+        })
+        self.assertEqual(extended["status"], "open")
+
+    def test_decision_http_revote_rejects_candidate_replacement_without_side_effects(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        deadline = (datetime.now(timezone.utc) + timedelta(hours=6)).replace(microsecond=0).isoformat()
+        decision = self.post(tang, "/decisions", {
+            "title": "HTTP 候选永久锁定", "selection_mode": "single",
+            "options": ["原候选甲", "原候选乙", "原候选丙"], "closes_at": deadline,
+        })
+        ids = [item["id"] for item in decision["options"]]
+        self.put(tang, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[0]], "expected_version": 1,
+            "idempotency_key": "http-permanent-lock-round-one-a",
+        })
+        revealed = self.put(chao, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[1]], "expected_version": 1,
+            "idempotency_key": "http-permanent-lock-round-one-b",
+        })
+        restarted = self.post(tang, f"/decisions/{decision['id']}/resolve", {
+            "action": "revote", "expected_version": revealed["version"],
+        })
+        renamed = self.patch(tang, f"/decisions/{decision['id']}", {
+            "title": "HTTP 只改安全元数据", "expected_version": restarted["version"],
+        })
+
+        def snapshot() -> dict:
+            with main.STORE.connection() as db:
+                return {
+                    "root": tuple(db.execute(
+                        "SELECT title,selection_mode,version,voting_round,options_locked_at FROM decisions WHERE id=?",
+                        (decision["id"],),
+                    ).fetchone()),
+                    "options": [tuple(row) for row in db.execute(
+                        "SELECT id,label,position FROM decision_options WHERE decision_id=? ORDER BY position",
+                        (decision["id"],),
+                    ).fetchall()],
+                    "votes": [tuple(row) for row in db.execute(
+                        "SELECT voting_round,user_id,option_id FROM decision_votes WHERE decision_id=? ORDER BY voting_round,user_id,option_id",
+                        (decision["id"],),
+                    ).fetchall()],
+                    "audit": db.execute(
+                        "SELECT COUNT(*) FROM audit_events WHERE target_id=?", (decision["id"],),
+                    ).fetchone()[0],
+                    "events": db.execute(
+                        "SELECT COUNT(*) FROM realtime_events WHERE resource_id=?", (decision["id"],),
+                    ).fetchone()[0],
+                    "inbox": db.execute(
+                        "SELECT COUNT(*) FROM in_app_notifications WHERE resource_id=?", (decision["id"],),
+                    ).fetchone()[0],
+                }
+
+        before = snapshot()
+        with self.assertRaises(urllib.error.HTTPError) as locked:
+            self.patch(tang, f"/decisions/{decision['id']}", {
+                "options": ["替换甲", "替换乙"], "expected_version": renamed["version"],
+            })
+        self.assertEqual(locked.exception.code, 400)
+        locked.exception.close()
+        self.assertEqual(snapshot(), before)
+        with tang.open(self.base + f"/decisions/{decision['id']}") as response:
+            self.assertTrue(json.load(response)["options_locked"])
+
+        with self.assertRaises(urllib.error.HTTPError) as stale:
+            self.patch(tang, f"/decisions/{decision['id']}", {
+                "options": ["替换甲", "替换乙"], "expected_version": restarted["version"],
+            })
+        self.assertEqual(stale.exception.code, 409)
+        stale.exception.close()
+        self.assertEqual(snapshot(), before)
+
+        self.put(tang, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[2]], "expected_version": renamed["version"],
+            "idempotency_key": "http-permanent-lock-round-two-a",
+        })
+        round_two = self.put(chao, f"/decisions/{decision['id']}/vote", {
+            "option_ids": [ids[0]], "expected_version": renamed["version"],
+            "idempotency_key": "http-permanent-lock-round-two-b",
+        })
+        self.assertEqual(
+            {tuple(item["option_ids"]) for item in round_two["votes"]},
+            {(ids[0],), (ids[2],)},
+        )
+        with main.STORE.connection() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM decision_votes WHERE decision_id=? AND voting_round=1",
+                (decision["id"],),
+            ).fetchone()[0], 2)
 
     def test_travel_assistant_is_shared_between_both_accounts(self) -> None:
         tang = self.opener()
@@ -723,6 +1285,83 @@ class HttpApiTests(unittest.TestCase):
         removed = self.delete(second, f"/shared-comments/{reply['id']}", {"expected_version": reply["version"]})
         self.assertTrue(removed["deleted"])
 
+    def test_shared_content_http_denies_invalid_delayed_release_and_comments(self) -> None:
+        partner = self.opener()
+        self.post(partner, "/auth/login", {"username": "test1", "password": "test123"})
+        for invalid in ("author", "couple"):
+            with self.subTest(invalid=invalid):
+                moment = main.STORE.create_moment({"title": "delayed secret", "visibility": "delayed"}, DEMO_USER)
+                with main.STORE.connection() as db:
+                    db.execute("UPDATE moments SET reveal_at='2020-01-01T00:00:00+00:00' WHERE id=?", (moment["id"],))
+                    if invalid == "author":
+                        db.execute("UPDATE users SET deleted_at='2020-01-01T00:00:00+00:00' WHERE id=?", (DEMO_USER,))
+                    else:
+                        db.execute("UPDATE couples SET status='unlinked' WHERE id=?", (moment["couple_id"],))
+                try:
+                    for method in ("GET", "POST"):
+                        path = f"/shared-content/moment/{moment['id']}" + ("/comments" if method == "POST" else "")
+                        with self.assertRaises(urllib.error.HTTPError) as denied:
+                            if method == "GET":
+                                partner.open(self.base + path)
+                            else:
+                                self.post(partner, path, {"body": "must not publish"})
+                        self.assertIn(denied.exception.code, (400, 404))
+                        denied.exception.close()
+                finally:
+                    with main.STORE.connection() as db:
+                        db.execute("UPDATE users SET deleted_at=NULL WHERE id=?", (DEMO_USER,))
+                        db.execute("UPDATE couples SET status='active' WHERE id=?", (moment["couple_id"],))
+
+    def test_pending_media_and_private_moments_never_reach_partner_realtime_http(self) -> None:
+        owner, partner = self.opener(), self.opener()
+        self.post(owner, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(partner, "/auth/login", {"username": "test1", "password": "test123"})
+        with partner.open(self.base + "/realtime/events?after=0") as response:
+            cursor = json.load(response)["latest_sequence"]
+        upload = urllib.request.Request(self.base + "/media", data=b"RIFF\x24\x00\x00\x00WAVEfmt " + uuid.uuid4().bytes, headers={"Content-Type": "audio/wav", "X-Filename": "private.wav"}, method="POST")
+        with owner.open(upload) as response:
+            media = json.load(response)
+        moment = self.post(owner, "/moments", {"title": "private event", "visibility": "private", "media_id": media["id"]})
+        private_ids = {media["id"], moment["id"]}
+        with owner.open(self.base + f"/realtime/events?after={cursor}") as response:
+            self.assertTrue(private_ids.issubset({item["resource_id"] for item in json.load(response)["items"]}))
+        with partner.open(self.base + f"/realtime/events?after={cursor}") as response:
+            self.assertFalse(private_ids.intersection(item["resource_id"] for item in json.load(response)["items"]))
+
+    def test_replay_http_cursor_and_sse_advance_across_hidden_chunks(self) -> None:
+        partner = self.opener()
+        self.post(partner, "/auth/login", {"username": "test1", "password": "test123"})
+        with main.STORE.connection() as db:
+            cursor = db.execute("SELECT COALESCE(MAX(sequence),0) FROM realtime_events").fetchone()[0]
+            db.executemany("INSERT INTO realtime_events(couple_id,actor_id,event_type,resource_id,payload_json,created_at) VALUES (?,?, 'moment.created',?, '{\"owner_only\":true}', '2026-10-27T00:00:00+00:00')", [("demo-couple", DEMO_USER, f"private-http-{index}") for index in range(1100)])
+        try:
+            shared = main.STORE.create_message({"content": "shared beyond bounded hidden chunk"}, DEMO_USER)
+            with main.STORE.connection() as db:
+                shared_sequence = db.execute("SELECT sequence FROM realtime_events WHERE resource_id=?", (shared["id"],)).fetchone()[0]
+            with partner.open(self.base + f"/realtime/events?after={cursor}") as response:
+                first = json.load(response)
+            self.assertEqual(first["items"], [])
+            self.assertGreater(first["latest_sequence"], cursor)
+            self.assertLess(first["latest_sequence"], shared_sequence)
+            with partner.open(self.base + f"/realtime/events?after={first['latest_sequence']}") as response:
+                second = json.load(response)
+            self.assertEqual([item["resource_id"] for item in second["items"]], [shared["id"]])
+            with partner.open(self.base + f"/realtime/stream?after={cursor}", timeout=3) as response:
+                lines = []
+                try:
+                    for _ in range(30):
+                        line = response.readline().decode("utf-8").strip()
+                        lines.append(line)
+                        if line.startswith("data:") and shared["id"] in line:
+                            break
+                except TimeoutError:
+                    self.fail("SSE did not advance beyond the examined hidden chunk")
+            self.assertTrue(any(line.startswith("event: message.created") for line in lines))
+            self.assertTrue(any(shared["id"] in line for line in lines))
+        finally:
+            with main.STORE.connection() as db:
+                db.execute("DELETE FROM realtime_events WHERE sequence>?", (cursor,))
+
     def test_realtime_sse_stream_emits_scoped_event(self) -> None:
         opener = self.opener()
         self.post(opener, "/auth/login", {"username": "test", "password": "test123"})
@@ -776,12 +1415,73 @@ class HttpApiTests(unittest.TestCase):
         cancelled = self.post(opener, f"/ui/actions/{action['id']}/cancel", {})
         self.assertEqual(cancelled["status"], "cancelled")
 
+    def test_task6_private_gift_status_and_expression_http_contract(self) -> None:
+        creator, partner = self.opener(), self.opener()
+        self.post(creator, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(partner, "/auth/login", {"username": "test1", "password": "test123"})
+
+        gift = self.post(creator, "/lists/wishlist/items", {
+            "text": f"秘密礼物-{uuid.uuid4().hex[:8]}", "note": "想收到的款式", "item_kind": "gift",
+        })
+        with creator.open(self.base + "/lists/wishlist") as response:
+            creator_before = next(item for item in json.load(response)["items"] if item["id"] == gift["id"])
+        self.assertNotIn("can_claim", creator_before)
+        self.assertNotIn("my_claim", creator_before)
+        with creator.open(self.base + f"/shared-content/wishlist_item/{gift['id']}") as response:
+            detail_before = json.load(response)
+
+        claimed = self.post(partner, f"/lists/items/{gift['id']}/claim", {
+            "expected_version": gift["version"], "private_note": "周五去准备", "reveal_claimant": False,
+        }, {"Idempotency-Key": "http-gift-claim-0001"})
+        self.assertEqual(claimed["status"], "active")
+        self.assertEqual(claimed["private_note"], "周五去准备")
+        with creator.open(self.base + "/lists/wishlist") as response:
+            creator_after = next(item for item in json.load(response)["items"] if item["id"] == gift["id"])
+        with creator.open(self.base + f"/shared-content/wishlist_item/{gift['id']}") as response:
+            detail_after = json.load(response)
+        self.assertEqual(creator_before, creator_after)
+        self.assertEqual(detail_before, detail_after)
+
+        with self.assertRaises(urllib.error.HTTPError) as changed_key:
+            self.post(partner, f"/lists/items/{gift['id']}/claim", {
+                "expected_version": gift["version"], "private_note": "另一份内容", "reveal_claimant": False,
+            }, {"Idempotency-Key": "http-gift-claim-0001"})
+        self.assertEqual(changed_key.exception.code, 409)
+        changed_key.exception.close()
+
+        status = self.put(creator, "/me/status", {
+            "status_code": "need_company", "text": "今天想有人陪", "duration_minutes": 30,
+        })
+        self.assertEqual(status["status_code"], "need_company")
+        self.assertNotEqual(status["expires_at"], None)
+        with self.assertRaises(urllib.error.HTTPError) as invalid_status:
+            self.put(creator, "/me/status", {"status_code": "happy", "duration_minutes": 30})
+        self.assertEqual(invalid_status.exception.code, 400)
+        invalid_status.exception.close()
+
+        own_message = self.post(creator, "/messages", {
+            "type": "text", "content": "我现在有点烦你先别说了", "idempotency_key": f"http-message-{uuid.uuid4().hex}",
+        })
+        before_count = len(main.STORE.list_messages(user_id="demo-user-a"))
+        suggestion = self.post(creator, "/expression/suggestions", {
+            "mode": "gentle", "message_id": own_message["id"],
+        }, {"Idempotency-Key": "http-expression-0001"})
+        self.assertEqual(suggestion["source"], "message")
+        self.assertEqual(suggestion["provider"], "rules")
+        self.assertEqual(len(main.STORE.list_messages(user_id="demo-user-a")), before_count)
+        with self.assertRaises(urllib.error.HTTPError) as partner_denied:
+            self.post(partner, "/expression/suggestions", {
+                "mode": "summary", "message_id": own_message["id"],
+            }, {"Idempotency-Key": "http-expression-denied-0001"})
+        self.assertEqual(partner_denied.exception.code, 403)
+        partner_denied.exception.close()
+
     def test_phase_two_dual_account_http_flow(self) -> None:
         first, second = self.opener(), self.opener()
         self.post(first, "/auth/login", {"username": "test", "password": "test123"})
         self.post(second, "/auth/login", {"username": "test1", "password": "test123"})
 
-        status = self.put(first, "/me/status", {"status_code": "miss_you", "text": "下班见", "expires_at": None})
+        status = self.put(first, "/me/status", {"status_code": "want_chat", "text": "下班见", "duration_minutes": 120})
         self.assertEqual(status["text"], "下班见")
         with second.open(self.base + "/couple/context") as response:
             context = json.load(response)
@@ -796,10 +1496,18 @@ class HttpApiTests(unittest.TestCase):
         )
         with first.open(upload) as response:
             media = json.load(response)
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            second.open(self.base + f"/media/{media['id']}")
+        self.assertEqual(denied.exception.code, 403)
+        denied.exception.close()
+        self.post(first, "/moments", {"title": "分享附件", "media_id": media["id"], "visibility": "shared"})
         with second.open(self.base + f"/media/{media['id']}") as response:
             self.assertTrue(response.read().startswith(b"\x89PNG\r\n\x1a\n"))
 
-        plan = self.post(first, "/date-plans", {"title": "周末约会", "plan_date": "2026-10-18", "city": "杭州", "start_time": "14:00", "end_time": "21:00", "budget": 500, "preferences": {"interest": "美食"}})
+        candidate = self.post(first, "/places/search", {
+            "query": "西湖", "region_hint": "杭州市", "include_global": False,
+        })["items"][0]
+        plan = self.post(first, "/date-plans", {"title": "周末约会", "plan_date": "2026-10-18", "city": "杭州", "place_candidate_id": candidate["candidate_id"], "start_time": "14:00", "end_time": "21:00", "budget": 500, "preferences": {"interest": "美食"}})
         mine, theirs = plan["variants"][0]["id"], plan["variants"][1]["id"]
         self.put(first, f"/date-plans/{plan['id']}/vote", {"variant_id": mine})
         revealed = self.put(second, f"/date-plans/{plan['id']}/vote", {"variant_id": theirs})
@@ -812,6 +1520,25 @@ class HttpApiTests(unittest.TestCase):
         with second.open(self.base + "/realtime/events?after=0") as response:
             events = json.load(response)["items"]
         self.assertTrue(any(item["event_type"] == "date_plan.confirmed" for item in events))
+
+    def test_date_plan_http_requires_an_explicit_server_place_candidate(self) -> None:
+        first = self.opener()
+        self.post(first, "/auth/login", {"username": "test", "password": "test123"})
+        payload = {
+            "title": "不能自动挑地点", "plan_date": "2026-11-18", "city": "迪士尼",
+            "start_time": "14:00", "end_time": "21:00", "budget": 500,
+        }
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            self.post(first, "/date-plans", payload)
+        self.assertEqual(missing.exception.code, 400)
+        self.assertIn("具体地点", json.load(missing.exception)["error"])
+        missing.exception.close()
+
+        candidate = self.post(first, "/places/search", {
+            "query": "上海迪士尼", "region_hint": "上海市", "include_global": False,
+        })["items"][0]
+        created = self.post(first, "/date-plans", {**payload, "place_candidate_id": candidate["candidate_id"]})
+        self.assertEqual(created["location"]["name"], "上海迪士尼")
 
     def test_private_media_thumbnail_ticket_and_recycle_bin_http_flow(self) -> None:
         owner, partner = self.opener(), self.opener()
@@ -909,6 +1636,11 @@ class HttpApiTests(unittest.TestCase):
             self.assertEqual(json.load(response)["received_size"], len(video))
         completed = self.post(owner, f"/media/uploads/{session['id']}/complete", {})
         self.assertEqual(completed["kind"], "video")
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            partner.open(self.base + f"/media/{completed['id']}?thumbnail=1")
+        self.assertEqual(denied.exception.code, 403)
+        denied.exception.close()
+        self.post(owner, "/moments", {"title": "分享视频", "media_id": completed["id"], "visibility": "shared"})
         with partner.open(self.base + f"/media/{completed['id']}?thumbnail=1") as response:
             self.assertEqual(response.headers.get_content_type(), "image/jpeg")
             self.assertTrue(response.read().startswith(b"\xff\xd8\xff"))
@@ -1236,6 +1968,474 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["code"], "EXTERNAL_QUOTA_EXCEEDED")
         self.assertEqual(body["provider"], "amap")
         self.assertEqual(body["limit"], 0)
+
+    def test_kitchen_profile_pantry_and_stocking_http_flow_for_two_accounts(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+
+        profile = self.put(tang, "/food-profiles/me", {
+            "allergies": [{"allergen_key": "乳制品", "severity": "avoid"}],
+            "avoidances": [], "preferences": {"liked_tags": ["清淡"], "disliked_tags": []},
+            "expected_version": 0, "idempotency_key": f"http-profile-{uuid.uuid4().hex}",
+        })
+        self.assertEqual(profile["allergies"], [{"allergen_key": "乳制品", "severity": "avoid"}])
+        with chao.open(self.base + "/food-profiles") as response:
+            profiles = json.load(response)
+        self.assertEqual(next(item for item in profiles["profiles"] if item["user_id"] == DEMO_USER)["version"], 1)
+
+        pantry = self.post(tang, "/pantry/items", {
+            "name": f"HTTP番茄{uuid.uuid4().hex[:6]}", "state": "have", "expected_version": 0,
+            "idempotency_key": f"http-pantry-{uuid.uuid4().hex}",
+        })
+        changed = self.patch(chao, f"/pantry/items/{pantry['id']}", {
+            "state": "low", "expected_version": pantry["version"],
+            "idempotency_key": f"http-pantry-low-{uuid.uuid4().hex}",
+        })
+        self.assertEqual(changed["state"], "low")
+
+        shopping = self.post(tang, "/shopping-lists/items", {
+            "name": f"HTTP土豆{uuid.uuid4().hex[:6]}", "quantity": 1, "unit": "个", "category": "produce",
+        })
+        checked = self.patch(tang, f"/shopping-lists/items/{shopping['id']}", {
+            "checked": True, "expected_version": shopping["version"],
+        })
+        stocked = self.post(chao, f"/shopping-lists/items/{shopping['id']}/stock", {
+            "expected_version": checked["version"],
+            "idempotency_key": f"http-stock-{uuid.uuid4().hex}",
+        })
+        self.assertTrue(stocked["changed"])
+        with tang.open(self.base + "/pantry/items") as response:
+            pantry_list = json.load(response)
+        self.assertTrue(any(item["id"] == stocked["pantry_item"]["id"] for item in pantry_list["items"]))
+
+    def test_kitchen_http_rejects_cross_couple_and_returns_409_for_stale_version(self) -> None:
+        tang = self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        pantry = self.post(tang, "/pantry/items", {
+            "name": f"HTTP跨情侣{uuid.uuid4().hex[:6]}", "state": "have", "expected_version": 0,
+            "idempotency_key": f"cross-pantry-{uuid.uuid4().hex}",
+        })
+        changed = self.patch(tang, f"/pantry/items/{pantry['id']}", {
+            "state": "low", "expected_version": pantry["version"],
+            "idempotency_key": f"cross-pantry-low-{uuid.uuid4().hex}",
+        })
+        stale_request = urllib.request.Request(
+            self.base + f"/pantry/items/{pantry['id']}",
+            data=json.dumps({
+                "state": "out", "expected_version": pantry["version"],
+                "idempotency_key": f"cross-pantry-stale-{uuid.uuid4().hex}",
+            }).encode(), headers={"Content-Type": "application/json"}, method="PATCH",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as stale_error:
+            tang.open(stale_request)
+        self.assertEqual(stale_error.exception.code, 409)
+        stale_error.exception.close()
+        self.assertEqual(changed["state"], "low")
+
+        username_a = f"http_out_a_{uuid.uuid4().hex[:8]}"
+        username_b = f"http_out_b_{uuid.uuid4().hex[:8]}"
+        outsider_a = main.STORE.register(username_a, "Outside-pass-123!", "外甲")
+        outsider_b = main.STORE.register(username_b, "Outside-pass-456!", "外乙")
+        invite = main.STORE.create_user_invite(outsider_a["id"])
+        main.STORE.accept_user_invite(outsider_b["id"], invite["code"], "2026-01-01")
+        outside = self.opener()
+        self.post(outside, "/auth/login", {"username": username_a, "password": "Outside-pass-123!"})
+        with outside.open(self.base + "/pantry/items") as response:
+            self.assertEqual(json.load(response)["items"], [])
+        cross_request = urllib.request.Request(
+            self.base + f"/pantry/items/{pantry['id']}",
+            data=json.dumps({
+                "state": "out", "expected_version": changed["version"],
+                "idempotency_key": f"outside-pantry-{uuid.uuid4().hex}",
+            }).encode(), headers={"Content-Type": "application/json"}, method="PATCH",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as cross_error:
+            outside.open(cross_request)
+        self.assertEqual(cross_error.exception.code, 404)
+        cross_error.exception.close()
+
+    def test_complete_shopping_and_stock_is_atomic_over_http(self) -> None:
+        tang = self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        food = self.post(tang, "/shopping-lists/items", {
+            "name": f"HTTP入库食品{uuid.uuid4().hex[:6]}", "quantity": 1, "unit": "个", "category": "produce",
+        })
+        household = self.post(tang, "/shopping-lists/items", {
+            "name": f"HTTP厨房纸{uuid.uuid4().hex[:6]}", "quantity": 1, "unit": "包", "category": "household",
+        })
+        food = self.patch(tang, f"/shopping-lists/items/{food['id']}", {"checked": True, "expected_version": food["version"]})
+        household = self.patch(tang, f"/shopping-lists/items/{household['id']}", {"checked": True, "expected_version": household["version"]})
+        with tang.open(self.base + "/shopping-lists/active") as response:
+            active = json.load(response)
+        invalid = urllib.request.Request(
+            self.base + "/shopping-lists/complete",
+            data=json.dumps({
+                "expected_version": active["version"], "allow_incomplete": True,
+                "stock_checked_item_ids": [food["id"], household["id"]],
+                "stock_item_versions": {food["id"]: food["version"], household["id"]: household["version"]},
+                "confirm_food_item_ids": [], "idempotency_key": f"http-complete-invalid-{uuid.uuid4().hex}",
+            }).encode(), headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as invalid_error:
+            tang.open(invalid)
+        self.assertEqual(invalid_error.exception.code, 409)
+        invalid_error.exception.close()
+        with tang.open(self.base + "/shopping-lists/active") as response:
+            still_active = json.load(response)
+        self.assertEqual(still_active["status"], "active")
+        with tang.open(self.base + "/pantry/items") as response:
+            before_names = {item["canonical_name"] for item in json.load(response)["items"]}
+        self.assertNotIn(food["display_name"], before_names)
+
+        completed = self.post(tang, "/shopping-lists/complete", {
+            "expected_version": still_active["version"], "allow_incomplete": True,
+            "stock_checked_item_ids": [food["id"]], "stock_item_versions": {food["id"]: food["version"]},
+            "confirm_food_item_ids": [], "idempotency_key": f"http-complete-valid-{uuid.uuid4().hex}",
+        })
+        self.assertEqual((completed["completed"], completed["stocked_count"]), (True, 1))
+        with tang.open(self.base + "/pantry/items") as response:
+            after_names = {item["canonical_name"] for item in json.load(response)["items"]}
+        self.assertIn(food["display_name"], after_names)
+
+    def test_weekly_meal_plan_two_account_create_read_confirm_and_cancel_flow(self) -> None:
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM mutation_idempotency WHERE operation LIKE 'weekly_plan.%'")
+            db.execute("DELETE FROM weekly_meal_plan_drafts")
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        start = (datetime.now().date() + timedelta(days=1)).isoformat()
+        end = (datetime.now().date() + timedelta(days=2)).isoformat()
+        key = f"http-weekly-create-{uuid.uuid4().hex}"
+        created = self.post(tang, "/weekly-meal-plans/drafts", {
+            "schema_version": 1, "starts_on": start, "ends_on": end,
+            "meal_slots": [{"meal_slot": "dinner", "planned_time": "19:00", "max_active_minutes": 120}],
+            "servings": 2, "availability_mode": "either_partner",
+        }, {"Idempotency-Key": key})
+        with chao.open(self.base + "/weekly-meal-plans/active") as response:
+            partner = json.load(response)
+        self.assertEqual((partner["id"], partner["items"]), (created["id"], created["items"]))
+        confirmed = self.post(tang, f"/weekly-meal-plans/drafts/{created['id']}/confirm", {
+            "expected_version": created["version"],
+        }, {"Idempotency-Key": f"http-weekly-confirm-{uuid.uuid4().hex}"})
+        self.assertEqual(confirmed["status"], "pending_confirmation")
+        cancelled = self.post(chao, f"/weekly-meal-plans/drafts/{created['id']}/cancel", {
+            "expected_version": confirmed["version"],
+        }, {"Idempotency-Key": f"http-weekly-cancel-{uuid.uuid4().hex}"})
+        self.assertEqual(cancelled["status"], "cancelled")
+
+        mismatch = urllib.request.Request(
+            self.base + "/weekly-meal-plans/drafts",
+            data=json.dumps({
+                "schema_version": 1, "starts_on": start, "ends_on": end,
+                "meal_slots": [{"meal_slot": "dinner", "planned_time": "19:00", "max_active_minutes": 120}],
+                "servings": 2, "availability_mode": "either_partner", "idempotency_key": "body-weekly-key-0001",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "header-weekly-key-0001"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            tang.open(mismatch)
+        self.assertEqual(error.exception.code, 400)
+        error.exception.close()
+
+    def test_ingredient_substitution_http_preview_privacy_and_header_contract(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        meal_id = f"meal-http-substitution-{uuid.uuid4().hex}"
+        planned_date = (datetime.now().date() + timedelta(days=1)).isoformat()
+        snapshot = {
+            "id": "http-substitution-recipe", "name": "HTTP 替代测试菜",
+            "cooking_method": "汤羹", "method_tags": ["汤羹"], "base_servings": 2,
+            "ingredients": [{
+                "id": "http-milk-row", "name": "牛奶", "canonical_name": "牛奶",
+                "quantity_milli": 250_000, "quantity_text": "", "canonical_unit": "ml",
+                "unit_family": "volume", "specification": "", "preparation": "直接使用",
+                "ingredient_group": "main", "optional": 0, "position": 1,
+            }],
+            "source_type": "real_api",
+        }
+        with main.STORE.connection() as db:
+            couple, _ = main.STORE._couple_context(db, DEMO_USER)
+            cart = main.STORE._active_cart(db, couple["id"], create=True)
+            db.execute(
+                """
+                INSERT INTO meal_cart_items(
+                    id,cart_id,couple_id,recipe_id,recipe_snapshot_json,planned_date,meal_slot,
+                    planned_time,servings,ordered_by,status,course_type,note,created_at,updated_at
+                ) VALUES (?,?,?,NULL,?,?,'dinner','19:00',2,?,'accepted','main','','now','now')
+                """,
+                (meal_id, cart["id"], couple["id"], json.dumps(snapshot, ensure_ascii=False), planned_date, DEMO_USER),
+            )
+        self.addCleanup(self._cleanup_substitution_http_fixture, meal_id)
+        with chao.open(self.base + f"/meal-cart/items/{meal_id}/ingredient-substitutions") as response:
+            partner_before = json.load(response)
+        preview = self.post(tang, f"/meal-cart/items/{meal_id}/ingredient-substitutions/preview", {
+            "snapshot_ingredient_ref": "http-milk-row",
+            "expected_meal_version": 1,
+            "expected_shopping_list_version": 0,
+        }, {"Idempotency-Key": f"http-substitution-preview-{uuid.uuid4().hex}"})
+        self.assertEqual(preview["meal_item_id"], meal_id)
+        self.assertGreaterEqual(len(preview["items"]), 2)
+        self.assertTrue(all(item["source_type"] == "rules" for item in preview["items"]))
+        with chao.open(self.base + f"/meal-cart/items/{meal_id}/ingredient-substitutions") as response:
+            partner_after = json.load(response)
+        self.assertEqual(partner_after, partner_before)
+        self.assertEqual(partner_after["items"], [])
+        self.assertNotIn(preview["items"][0]["id"], json.dumps(partner_after, ensure_ascii=False))
+
+        mismatch = urllib.request.Request(
+            self.base + f"/meal-cart/items/{meal_id}/ingredient-substitutions/preview",
+            data=json.dumps({
+                "snapshot_ingredient_ref": "http-milk-row", "expected_meal_version": 1,
+                "expected_shopping_list_version": 0, "idempotency_key": "body-substitution-key-0001",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "header-substitution-key-0001"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as mismatch_error:
+            tang.open(mismatch)
+        self.assertEqual(mismatch_error.exception.code, 400)
+        mismatch_error.exception.close()
+
+    def test_cooking_http_shared_resume_steps_timers_and_complete(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        started = self.post(tang, "/cook-sessions", {
+            "recipe_id": "recipe_builtin_kungpao_chicken", "visibility": "shared",
+        }, {"Idempotency-Key": f"http-cook-start-{uuid.uuid4().hex}"})
+        self.addCleanup(self._cleanup_cooking_http_fixture, started["id"])
+        with chao.open(self.base + f"/cook-sessions/{started['id']}") as response:
+            partner = json.load(response)
+        self.assertEqual(partner["recipe_snapshot"], started["recipe_snapshot"])
+        moved = self.patch(chao, f"/cook-sessions/{started['id']}/step", {
+            "step_index": 1, "expected_version": started["version"],
+        }, {"Idempotency-Key": f"http-cook-step-{uuid.uuid4().hex}"})
+        timer = self.post(tang, f"/cook-sessions/{started['id']}/timers", {
+            "step_index": 1, "duration_seconds": 90, "label": "HTTP 计时",
+        }, {"Idempotency-Key": f"http-cook-timer-{uuid.uuid4().hex}"})
+        self.assertEqual(timer["status"], "running")
+        completed = self.post(tang, f"/cook-sessions/{started['id']}/complete", {
+            "expected_version": moved["version"],
+        }, {"Idempotency-Key": f"http-cook-complete-{uuid.uuid4().hex}"})
+        self.assertEqual(completed["status"], "completed")
+        self.assertTrue(completed["pantry_suggestions"])
+        with tang.open(self.base + "/cook-sessions?status=completed") as response:
+            listing = json.load(response)
+        self.assertIn(started["id"], {item["id"] for item in listing["items"]})
+
+    def test_all_cook_mutations_require_header_idempotency_and_reject_mismatch(self) -> None:
+        tang = self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        missing = urllib.request.Request(
+            self.base + "/cook-sessions",
+            data=json.dumps({"recipe_id": "recipe_builtin_kungpao_chicken", "visibility": "private"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as missing_error:
+            tang.open(missing)
+        self.assertEqual(missing_error.exception.code, 400)
+        missing_error.exception.close()
+        mismatch = urllib.request.Request(
+            self.base + "/cook-sessions",
+            data=json.dumps({
+                "recipe_id": "recipe_builtin_kungpao_chicken", "visibility": "private",
+                "idempotency_key": "body-cook-idempotency-0001",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "header-cook-idempotency-0001"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as mismatch_error:
+            tang.open(mismatch)
+        self.assertEqual(mismatch_error.exception.code, 400)
+        mismatch_error.exception.close()
+
+    def test_private_meal_cooking_request_is_rejected_without_partner_visible_change(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        item = main.STORE.add_meal_cart_item({
+            "recipe_id": "recipe_builtin_kungpao_chicken",
+            "planned_date": (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat(),
+            "meal_slot": "dinner", "servings": 2,
+            "idempotency_key": f"http-private-meal-create-{uuid.uuid4().hex}",
+        }, DEMO_USER)
+        meal = main.STORE.update_meal_cart_item(item["id"], {
+            "status": "accepted", "expected_version": item["version"],
+        }, DEMO_USER)
+        self.addCleanup(self._cleanup_cooking_meal_fixture, meal["id"])
+        with chao.open(self.base + "/meal-cart") as response:
+            partner_before = json.load(response)
+        request = urllib.request.Request(
+            self.base + "/cook-sessions",
+            data=json.dumps({
+                "meal_item_id": meal["id"], "visibility": "private",
+                "expected_meal_version": meal["version"],
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "http-private-meal-rejected-0001"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            tang.open(request)
+        self.assertEqual(rejected.exception.code, 400)
+        rejected.exception.close()
+        with chao.open(self.base + "/meal-cart") as response:
+            self.assertEqual(json.load(response), partner_before)
+        with chao.open(self.base + "/cook-sessions?status=all") as response:
+            self.assertNotIn(meal["id"], {entry.get("meal_item_id") for entry in json.load(response)["items"]})
+
+    @staticmethod
+    def _cleanup_cooking_http_fixture(session_id: str) -> None:
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM cook_sessions WHERE id=?", (session_id,))
+            db.execute("DELETE FROM mutation_idempotency WHERE operation LIKE 'cook.%'")
+
+    @staticmethod
+    def _cleanup_cooking_meal_fixture(meal_id: str) -> None:
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM cook_sessions WHERE meal_item_id=?", (meal_id,))
+            db.execute("DELETE FROM meal_cart_items WHERE id=?", (meal_id,))
+            db.execute("DELETE FROM mutation_idempotency WHERE operation LIKE 'cook.%'")
+
+    @staticmethod
+    def _cleanup_substitution_http_fixture(meal_id: str) -> None:
+        with main.STORE.connection() as db:
+            db.execute("DELETE FROM mutation_idempotency WHERE operation LIKE 'ingredient_substitution.%'")
+            db.execute("DELETE FROM ingredient_substitutions WHERE meal_item_id=?", (meal_id,))
+            db.execute("DELETE FROM meal_cart_items WHERE id=?", (meal_id,))
+    def test_trip_negotiation_and_realism_http_contract(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        with tang.open(self.base + f"/trips/{DEMO_TRIP}/negotiation") as response:
+            initial = json.load(response)
+        self.assertEqual(initial["state"], "open")
+        preferences = [{
+            "item_id": item["id"],
+            "preference": "must" if index == 0 else "okay",
+            "expected_item_version": item["version"],
+        } for index, item in enumerate(initial["candidates"])]
+        first_request = urllib.request.Request(
+            self.base + f"/trips/{DEMO_TRIP}/negotiation/preferences",
+            data=json.dumps({
+                "expected_trip_version": initial["trip_version"], "expected_round": initial["round"],
+                "start_new_round": False, "preferences": preferences,
+                "client_request_id": "body-key-must-not-win",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": "http-negotiation-header-001"},
+            method="PUT",
+        )
+        with tang.open(first_request) as response:
+            waiting = json.load(response)
+        self.assertEqual(waiting["state"], "waiting_for_partner")
+        with chao.open(self.base + f"/trips/{DEMO_TRIP}/negotiation") as response:
+            partner_hidden = json.load(response)
+        self.assertNotIn("my_preferences", partner_hidden)
+        self.assertNotIn("proposal", partner_hidden)
+
+        revealed = self.put(chao, f"/trips/{DEMO_TRIP}/negotiation/preferences", {
+            "expected_trip_version": initial["trip_version"], "expected_round": initial["round"],
+            "start_new_round": False, "preferences": preferences,
+            "client_request_id": "http-negotiation-partner-001",
+        })
+        self.assertEqual(revealed["state"], "revealed")
+        with tang.open(self.base + f"/trips/{DEMO_TRIP}/negotiation") as response:
+            self.assertEqual(json.load(response), revealed)
+
+        checked = self.post(tang, f"/trips/{DEMO_TRIP}/realism-checks", {
+            "expected_trip_version": initial["trip_version"],
+            "client_request_id": "http-realism-body-key",
+        }, {"Idempotency-Key": "http-realism-header-0001"})
+        self.assertEqual(checked["effective_status"], "current")
+        with chao.open(self.base + f"/trips/{DEMO_TRIP}/realism-checks/current") as response:
+            current = json.load(response)
+        self.assertEqual(current["id"], checked["id"])
+        self.assertTrue(all("apply_allowed" in item for item in current["findings"]))
+
+    def test_trip_packing_emergency_and_offline_snapshot_http_contract(self) -> None:
+        tang, chao = self.opener(), self.opener()
+        self.post(tang, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with main.STORE.connection() as db:
+            trip = db.execute("SELECT version,current_revision FROM trips WHERE id=?", (DEMO_TRIP,)).fetchone()
+            couple = db.execute("SELECT member_a,member_b FROM couples WHERE id=(SELECT couple_id FROM trips WHERE id=?)", (DEMO_TRIP,)).fetchone()
+            db.execute("DELETE FROM approvals WHERE trip_id=? AND revision=?", (DEMO_TRIP, trip["current_revision"]))
+            db.executemany(
+                "INSERT INTO approvals(trip_id,revision,user_id,status,updated_at) VALUES (?,?,?,'approved',?)",
+                [
+                    (DEMO_TRIP, trip["current_revision"], couple["member_a"], now),
+                    (DEMO_TRIP, trip["current_revision"], couple["member_b"], now),
+                ],
+            )
+            trip_version = int(trip["version"])
+
+        key = f"http-packing-header-{uuid.uuid4().hex}"
+        request = urllib.request.Request(
+            self.base + f"/trips/{DEMO_TRIP}/packing",
+            data=json.dumps({
+                "label": "HTTP 双端充电线", "assigned_to": "shared", "expected_trip_version": trip_version,
+                "idempotency_key": "body-key-must-not-win",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": key},
+            method="POST",
+        )
+        with tang.open(request) as response:
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            created = json.load(response)
+        replay_request = urllib.request.Request(
+            self.base + f"/trips/{DEMO_TRIP}/packing",
+            data=json.dumps({
+                "label": "HTTP 双端充电线", "assigned_to": "shared", "expected_trip_version": trip_version,
+                "idempotency_key": "another-body-key",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": key},
+            method="POST",
+        )
+        with tang.open(replay_request) as response:
+            self.assertEqual(json.load(response), created)
+        conflict_request = urllib.request.Request(
+            self.base + f"/trips/{DEMO_TRIP}/packing",
+            data=json.dumps({"label": "不同物品", "assigned_to": "shared", "expected_trip_version": trip_version}).encode(),
+            headers={"Content-Type": "application/json", "Idempotency-Key": key},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as conflict:
+            tang.open(conflict_request)
+        self.assertEqual(conflict.exception.code, 409)
+        conflict.exception.close()
+
+        updated = self.patch(chao, f"/trips/{DEMO_TRIP}/packing/{created['id']}", {"checked": True, "expected_version": created["version"]})
+        stale = urllib.request.Request(
+            self.base + f"/trips/{DEMO_TRIP}/packing/{created['id']}",
+            data=json.dumps({"checked": False, "expected_version": created["version"]}).encode(),
+            headers={"Content-Type": "application/json"}, method="PATCH",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as stale_error:
+            tang.open(stale)
+        self.assertEqual(stale_error.exception.code, 409)
+        stale_error.exception.close()
+        self.assertTrue(updated["checked"])
+
+        sentinel = f"PRIVATE-HTTP-{uuid.uuid4().hex}"
+        private = self.post(tang, f"/trips/{DEMO_TRIP}/emergency", {
+            "entry_type": "booking", "title": "HTTP 私密订单", "visibility": "private",
+            "details": {"booking_reference": sentinel}, "expected_trip_version": trip_version,
+        }, {"Idempotency-Key": f"http-emergency-{uuid.uuid4().hex}"})
+        self.assertEqual(private["visibility"], "private")
+        with chao.open(self.base + f"/trips/{DEMO_TRIP}/emergency") as response:
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertNotIn(sentinel, json.dumps(json.load(response), ensure_ascii=False))
+        with tang.open(self.base + f"/trips/{DEMO_TRIP}/offline-snapshot") as response:
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            owner_snapshot = json.load(response)
+        with chao.open(self.base + f"/trips/{DEMO_TRIP}/offline-snapshot") as response:
+            partner_snapshot = json.load(response)
+        self.assertIn(sentinel, json.dumps(owner_snapshot, ensure_ascii=False))
+        self.assertNotIn(sentinel, json.dumps(partner_snapshot, ensure_ascii=False))
 
 
 if __name__ == "__main__":

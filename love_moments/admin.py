@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .schema import SCHEMA_VERSION
+from .intelligent_ui import ConflictError
+from .schema import SCHEMA_VERSION, account_export_policy_status, schema_inventory
 from .store import LoveMomentsStore, new_id, parse_json, utc_now
 from .maintenance import verify_backup
 from .ocr import real_ocr_configured
@@ -355,6 +356,12 @@ class AdminService:
                         "verified_at": verification.get("verified_at"),
                         "verification_ok": bool(verification.get("ok", False)),
                         "restore_drill": verification.get("restore_drill", "not-run"),
+                        "database_checksum_ok": bool(verification.get("database_checksum_ok", False)),
+                        "export_policy_ok": bool(
+                            isinstance(verification.get("account_export_policy"), dict)
+                            and verification["account_export_policy"].get("ok", False)
+                        ),
+                        "service_secrets_included": bool(data.get("service_secrets_included", True)),
                     })
                 except (OSError, ValueError, TypeError):
                     continue
@@ -437,6 +444,47 @@ class AdminService:
             for value in (row["storage_key"], row["thumbnail_path"]):
                 if value:
                     referenced.add(str(value).replace("\\", "/"))
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        album_rows = db.execute(
+            """SELECT * FROM album_export_jobs
+               WHERE status IN ('queued','running','completed') AND expires_at>?""",
+            (now,),
+        ).fetchall()
+        active_album_bytes = 0
+        active_album_count = 0
+        stored_album_count = 0
+        stored_album_bytes = 0
+        album_work_files: set[str] = set()
+        for row in album_rows:
+            if row["status"] == "completed" and row["artifact_relative_path"]:
+                referenced.add(str(row["artifact_relative_path"]).replace("\\", "/"))
+                stored_album_count += 1
+                stored_album_bytes += int(row["size_bytes"] or 0)
+                try:
+                    self.store._read_verified_album_artifact(db, row)
+                except (KeyError, ValueError, OSError, json.JSONDecodeError, ConflictError):
+                    pass
+                else:
+                    active_album_count += 1
+                    active_album_bytes += int(row["size_bytes"] or 0)
+            elif row["status"] == "running":
+                # A claimed job may not have created its work file yet.  Existing
+                # work files are expected, but an absent one is not a missing
+                # user-media object.
+                album_work_files.add(f"temp/album_exports/{row['id']}.tmp")
+                try:
+                    self.store._revalidate_album_job(db, row)
+                except (KeyError, ValueError, OSError, json.JSONDecodeError, ConflictError):
+                    pass
+                else:
+                    active_album_count += 1
+            else:
+                try:
+                    self.store._revalidate_album_job(db, row)
+                except (KeyError, ValueError, OSError, json.JSONDecodeError, ConflictError):
+                    pass
+                else:
+                    active_album_count += 1
         ignored_files = {".media-access-key", ".web-push-vapid-private.pem"}
         configured_vapid_path = os.getenv("WEB_PUSH_PRIVATE_KEY_PATH", "").strip()
         if configured_vapid_path:
@@ -456,12 +504,21 @@ class AdminService:
                 except OSError:
                     continue
         missing = referenced - set(existing)
-        orphan = set(existing) - referenced
+        orphan = set(existing) - referenced - album_work_files
         return {
             "available": True,
             "missing_files": len(missing),
             "orphan_files": len(orphan),
             "orphan_bytes": sum(existing[path] for path in orphan),
+            "album_exports": {
+                "active": active_album_count,
+                "downloadable_bytes": active_album_bytes,
+                "stored_count": stored_album_count,
+                "stored_bytes": stored_album_bytes,
+                "orphan_bytes": sum(
+                    existing[path] for path in orphan if path.startswith("temp/album_exports/")
+                ),
+            },
         }
 
     def _capture_metrics(self, db: Any, values: dict[str, Any]) -> dict:
@@ -498,10 +555,16 @@ class AdminService:
         sessions: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
         audits: list[dict[str, Any]] = []
+        schema_health: dict[str, Any] = {
+            "actual_version": 0,
+            "expected_version": SCHEMA_VERSION,
+            "ok": False,
+        }
         with store.connection() as db:
             self._reconcile_recovered_events(db)
             integrity = str(db.execute("PRAGMA integrity_check").fetchone()[0])
             foreign_key_violations = len(db.execute("PRAGMA foreign_key_check").fetchall())
+            schema_health = schema_inventory(db, expected_version=SCHEMA_VERSION)
             users = [dict(row) for row in db.execute(
                 """
                 SELECT u.id,u.username,u.nickname,u.created_at,u.deleted_at,
@@ -545,6 +608,7 @@ class AdminService:
         media_files, media_bytes = _folder_metrics(media_root)
         disk = shutil.disk_usage(database.parent)
         backups = self._backup_summary()
+        export_policy = account_export_policy_status()
         maintenance = self._maintenance_state()
         free_ratio = disk.free / disk.total if disk.total else 0
         try:
@@ -623,11 +687,41 @@ class AdminService:
         cookie_mode = os.getenv("COOKIE_SECURE", "false").strip().lower()
         public_https = os.getenv("PUBLIC_BASE_URL", "").strip().startswith("https://")
         secure_cookie_configured = cookie_mode in {"1", "true", "yes", "on"} or (cookie_mode == "auto" and public_https)
+        latest_backup = backups.get("latest") or {}
+        backup_verified = bool(
+            latest_backup.get("verification_ok")
+            and latest_backup.get("restore_drill") == "passed"
+            and latest_backup.get("database_checksum_ok")
+            and latest_backup.get("export_policy_ok")
+            and not latest_backup.get("service_secrets_included", True)
+        )
+        database_ready = integrity == "ok" and foreign_key_violations == 0 and bool(schema_health["ok"])
+        media_ready = bool(media_integrity["available"]) and not media_integrity["missing_files"] and not media_integrity["orphan_files"]
+        vault_status = (
+            "critical" if not database_ready or not export_policy["ok"] or not media_ready
+            else "ok" if backup_verified
+            else "warning"
+        )
+        vault_message = (
+            "数据库、媒体或导出权限清单异常"
+            if vault_status == "critical"
+            else "数据库、媒体、导出权限和最近恢复演练均通过"
+            if vault_status == "ok"
+            else "在线数据正常，但尚无通过校验的最近恢复演练"
+        )
         checks = [
-            {"id": "database", "label": "数据库完整性", "status": "ok" if integrity == "ok" and foreign_key_violations == 0 else "critical", "message": "完整性正常" if integrity == "ok" and foreign_key_violations == 0 else "数据库完整性或外键检查异常"},
+            {
+                "id": "database", "label": "数据库完整性",
+                "status": "ok" if integrity == "ok" and foreign_key_violations == 0 and schema_health["ok"] else "critical",
+                "message": "完整性正常" if integrity == "ok" and foreign_key_violations == 0 and schema_health["ok"] else "数据库完整性、外键或结构清单异常",
+            },
             {"id": "disk", "label": "磁盘空间", "status": "ok" if disk.free >= 2 * 1024**3 and free_ratio >= 0.1 else "warning", "message": f"可用 {disk.free / 1024**3:.1f} GB（{free_ratio:.0%}）"},
             {"id": "backup", "label": "最近备份", "status": "ok" if backups["latest_age_hours"] is not None and backups["latest_age_hours"] <= 48 and backups["latest"].get("verification_ok") else "warning", "message": "尚无可验证备份" if backups["latest"] is None else f"{backups['latest_age_hours']} 小时前 · {'恢复验证通过' if backups['latest'].get('verification_ok') else '待恢复验证'}"},
             {"id": "media", "label": "媒体完整性", "status": "critical" if media_integrity["missing_files"] else "warning" if media_integrity["orphan_files"] else "ok", "message": "远程存储需由提供方核验" if not media_integrity["available"] else f"缺失 {media_integrity['missing_files']} · 孤立 {media_integrity['orphan_files']}"},
+            {
+                "id": "data_vault", "label": "数据保险箱", "status": vault_status,
+                "message": vault_message,
+            },
             {
                 "id": "push_outbox", "label": "消息与来电推送队列",
                 "status": "warning" if push_outbox["counts"].get("failed", 0) else "ok",
@@ -671,8 +765,22 @@ class AdminService:
                 "message": f"{len(exhausted_quotas)} 个接口已停止真实请求" if exhausted_quotas else f"{len(warning_quotas)} 个接口已超过 80%" if warning_quotas else f"{len(active_quotas)} 个已配置接口均在安全线内",
             },
         ]
-        if integrity != "ok" or foreign_key_violations:
-            self.record_event("database:integrity", "critical", "database", "数据库完整性检查异常", {"integrity": integrity, "foreign_key_violations": foreign_key_violations})
+        if integrity != "ok" or foreign_key_violations or not schema_health["ok"]:
+            self.record_event(
+                "database:integrity", "critical", "database", "数据库完整性检查异常",
+                {
+                    "integrity": integrity,
+                    "foreign_key_violations": foreign_key_violations,
+                    "missing_tables": schema_health.get("missing_tables", []),
+                    "missing_columns": schema_health.get("missing_columns", {}),
+                    "missing_foreign_keys": schema_health.get("missing_foreign_keys", {}),
+                    "malformed_constraints": schema_health.get("malformed_constraints", []),
+                    "missing_indexes": schema_health.get("missing_indexes", []),
+                    "malformed_indexes": schema_health.get("malformed_indexes", []),
+                    "unexpected_indexes": schema_health.get("unexpected_indexes", []),
+                    "actual_schema_version": schema_health.get("actual_version"),
+                },
+            )
         if disk.free < 1024**3 or free_ratio < 0.05:
             self.record_event("disk:low", "critical", "storage", "服务器磁盘空间不足", {"free_bytes": disk.free, "free_ratio": round(free_ratio, 4)})
         elif disk.free < 2 * 1024**3 or free_ratio < 0.1:
@@ -704,7 +812,9 @@ class AdminService:
             "runtime": {
                 "python": sys.version.split()[0],
                 "uptime_seconds": int((datetime.now(timezone.utc) - self.started_at).total_seconds()),
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": schema_health["actual_version"],
+                "expected_schema_version": SCHEMA_VERSION,
+                "schema_inventory": schema_health,
                 "database": "sqlite",
                 "media_storage": store.storage.name,
             },
@@ -725,6 +835,41 @@ class AdminService:
             },
             "push_outbox": push_outbox,
             "backups": backups,
+            "data_vault": {
+                "checked_at": utc_now(),
+                "database": {
+                    "integrity": integrity,
+                    "foreign_key_violations": foreign_key_violations,
+                    "schema_actual": schema_health["actual_version"],
+                    "schema_expected": SCHEMA_VERSION,
+                    "schema_ok": bool(schema_health["ok"]),
+                },
+                "account_export_policy": {
+                    "ok": bool(export_policy["ok"]),
+                    "version": export_policy["version"],
+                    "covered": export_policy["covered"],
+                    "required": export_policy["required"],
+                    "by_strategy": export_policy["by_strategy"],
+                },
+                "media": {
+                    "available": bool(media_integrity["available"]),
+                    "missing_files": media_integrity["missing_files"],
+                    "orphan_files": media_integrity["orphan_files"],
+                },
+                "latest_backup": {
+                    "exists": bool(latest_backup),
+                    "verified": backup_verified,
+                    "restore_drill": latest_backup.get("restore_drill", "not-run"),
+                    "checksum_ok": bool(latest_backup.get("database_checksum_ok", False)),
+                    "export_policy_ok": bool(latest_backup.get("export_policy_ok", False)),
+                    "age_hours": backups.get("latest_age_hours"),
+                },
+                "mirror": {
+                    "configured": bool(configured["backup_mirror"]),
+                    "status": "configured" if configured["backup_mirror"] else "not_configured",
+                },
+                "privacy": "仅返回完整性、数量和验证状态，不返回正文、媒体内容、完整路径或凭据。",
+            },
             "maintenance": maintenance,
             "restore_instructions": [
                 "先在后台重新验证目标备份，并下载账号数据导出留作二次保险。",

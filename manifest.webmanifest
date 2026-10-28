@@ -34,7 +34,7 @@
     }
   ],
   "shortcuts": [
-    { "name": "发送消息", "short_name": "消息", "url": "/?screen=chat" },
+    { "name": "发消息", "short_name": "消息", "url": "/?screen=chat" },
     { "name": "记录瞬间", "short_name": "瞬间", "url": "/?action=moment" }
   ]
 }

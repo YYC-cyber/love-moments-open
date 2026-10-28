@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from urllib import error, parse, request
 
 from .http_client import TRUSTED_SSL_CONTEXT
@@ -41,7 +41,7 @@ class OpenMeteoWeather:
             enabled = os.getenv("OPEN_METEO_ENABLED", "true").strip().lower() == "true"
         self.enabled = enabled
         self.timeout = max(1, min(timeout, 10))
-        self._cache: dict[str, tuple[float, dict]] = {}
+        self._cache: dict[str, tuple[float, float, dict]] = {}
         self._lock = threading.Lock()
 
     def current(self, latitude: object, longitude: object, timezone_name: str = "auto") -> dict | None:
@@ -51,7 +51,13 @@ class OpenMeteoWeather:
         with self._lock:
             cached = self._cache.get(key)
             if cached and cached[0] > time.monotonic():
-                return dict(cached[1])
+                value = dict(cached[2])
+                value.update({
+                    "source_type": "cache",
+                    "original_source_type": str(value.get("source_type") or "real_api"),
+                    "cache_age_seconds": max(0, int(time.monotonic() - cached[1])),
+                })
+                return value
         query = parse.urlencode({
             "latitude": float(latitude),
             "longitude": float(longitude),
@@ -73,12 +79,16 @@ class OpenMeteoWeather:
                 "label": WEATHER_LABELS.get(code, "天气变化中"),
                 "is_day": bool(current.get("is_day", 1)),
                 "source": "Open-Meteo",
+                "provider": "Open-Meteo",
+                "source_type": "real_api",
+                "evidence_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                 "updated_at": str(current.get("time", "")),
             }
         except (error.URLError, TimeoutError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
         with self._lock:
-            self._cache[key] = (time.monotonic() + 1800, value)
+            cached_at = time.monotonic()
+            self._cache[key] = (cached_at + 1800, cached_at, value)
         return dict(value)
 
     def forecast(
@@ -101,7 +111,13 @@ class OpenMeteoWeather:
         with self._lock:
             cached = self._cache.get(key)
             if cached and cached[0] > time.monotonic():
-                return dict(cached[1])
+                value = dict(cached[2])
+                value.update({
+                    "source_type": "cache",
+                    "original_source_type": str(value.get("source_type") or "real_api"),
+                    "cache_age_seconds": max(0, int(time.monotonic() - cached[1])),
+                })
+                return value
         query = parse.urlencode({
             "latitude": float(latitude), "longitude": float(longitude),
             "start_date": start.isoformat(), "end_date": end.isoformat(),
@@ -131,11 +147,19 @@ class OpenMeteoWeather:
                     "temperature_max": round(float(highs[index]), 1) if highs[index] is not None else None,
                     "temperature_min": round(float(lows[index]), 1) if lows[index] is not None else None,
                 })
-            value = {"items": items, "source": "Open-Meteo", "timezone": str(payload.get("timezone") or timezone_name)}
+            value = {
+                "items": items,
+                "source": "Open-Meteo",
+                "provider": "Open-Meteo",
+                "source_type": "real_api",
+                "evidence_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "timezone": str(payload.get("timezone") or timezone_name),
+            }
         except (error.URLError, TimeoutError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
             return None
         with self._lock:
-            self._cache[key] = (time.monotonic() + 1800, value)
+            cached_at = time.monotonic()
+            self._cache[key] = (cached_at + 1800, cached_at, value)
         return dict(value)
 
     def enrich(self, context: dict) -> dict:

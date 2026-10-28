@@ -13,8 +13,8 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from .intelligent_ui import ConflictError
-from .life_assistant import LifeIntent
-from .recipes import build_shopping_items, normalize_name, recipe_snapshot
+from .life_assistant import LifeIntent, life_assistant_usage_scope
+from .recipes import normalize_name, recipe_snapshot
 
 
 def _now() -> str:
@@ -589,10 +589,31 @@ class LifeAssistantMixin:
 
         # A remote model can take seconds. Never keep SQLite's write lock while
         # waiting for it, otherwise the partner cannot chat or confirm plans.
+        def usage_observer(fact: dict[str, object]) -> None:
+            try:
+                self.record_ai_usage_event(
+                    actor_kind="user",
+                    user_id=user_id,
+                    couple_id=couple_id,
+                    feature="life_assistant",
+                    provider=str(fact.get("provider") or "unknown"),
+                    model=str(fact.get("model") or "unknown"),
+                    request_id=job_id,
+                    status=str(fact.get("status") or "unknown"),
+                    request_sent=bool(fact.get("request_sent")),
+                    latency_ms=fact.get("latency_ms") if isinstance(fact.get("latency_ms"), int) else None,
+                    input_tokens=fact.get("input_tokens") if isinstance(fact.get("input_tokens"), int) else None,
+                    output_tokens=fact.get("output_tokens") if isinstance(fact.get("output_tokens"), int) else None,
+                    total_tokens=fact.get("total_tokens") if isinstance(fact.get("total_tokens"), int) else None,
+                    failure_code=str(fact["failure_code"]) if fact.get("failure_code") else None,
+                )
+            except Exception:
+                self.record_ai_telemetry_failure()
         try:
-            parsed_intent = self.life_assistant_provider.parse(
-                intent, timezone_name=timezone_name
-            )
+            with life_assistant_usage_scope(usage_observer):
+                parsed_intent = self.life_assistant_provider.parse(
+                    intent, timezone_name=timezone_name
+                )
         except Exception as error:
             self._fail_life_assistant_job(job_id, error)
             raise
@@ -837,27 +858,62 @@ class LifeAssistantMixin:
         *,
         couple_id: str,
         creator_id: str,
+        source_type: str,
         payload: dict,
     ) -> dict:
-        values = self._calendar_values(payload)
+        couple = db.execute(
+            """
+            SELECT member_a,member_b FROM couples
+            WHERE id=? AND status='active'
+            """,
+            (couple_id,),
+        ).fetchone()
+        if not couple:
+            raise ConflictError("情侣关系已经变化，请重新生成方案")
+        member_ids = [str(couple["member_a"]), str(couple["member_b"])]
+        # A jointly confirmed assistant plan belongs to both current members.
+        # The intent contract has no duration/blocking choice, so it must remain
+        # non-blocking instead of inventing a busy interval from a start time.
+        calendar_payload = {
+            **payload,
+            "participant_ids": member_ids,
+            "blocks_time": False,
+        }
+        values = self._calendar_values(
+            calendar_payload,
+            member_ids=set(member_ids),
+            server_source_type=source_type,
+        )
         entry_id, now = _id("calendar"), _now()
         db.execute(
             """
             INSERT INTO calendar_entries(
                 id,couple_id,creator_id,entry_type,title,starts_at,ends_at,
-                all_day,recurrence,location,note,created_at,updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                all_day,recurrence,location,note,participant_a_id,
+                participant_b_id,blocks_time,source_type,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 entry_id,
                 couple_id,
                 creator_id,
-                *values.values(),
+                values["entry_type"],
+                values["title"],
+                values["starts_at"],
+                values["ends_at"],
+                values["all_day"],
+                values["recurrence"],
+                values["location"],
+                values["note"],
+                values["participant_a_id"],
+                values["participant_b_id"],
+                values["blocks_time"],
+                values["source_type"],
                 now,
                 now,
             ),
         )
-        return dict(
+        return self._public_calendar_entry(
             db.execute(
                 "SELECT * FROM calendar_entries WHERE id=?", (entry_id,)
             ).fetchone()
@@ -937,143 +993,22 @@ class LifeAssistantMixin:
         db: sqlite3.Connection,
         *,
         couple_id: str,
+        actor_id: str,
         meal_items: list[dict],
     ) -> dict:
         if not meal_items:
             raise ConflictError("没有可用于采购清单的已确认菜品")
-        generated = build_shopping_items(meal_items)
-        if not generated:
-            raise ConflictError("菜谱缺少可靠食材，不能生成采购清单")
         dates = sorted({item["planned_date"] for item in meal_items})
-        shopping = db.execute(
-            "SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'",
-            (couple_id,),
-        ).fetchone()
-        now = _now()
-        if not shopping:
-            cart = self._active_cart(db, couple_id, create=True)
-            list_id = _id("shopping")
-            db.execute(
-                """
-                INSERT INTO shopping_lists(
-                    id,couple_id,cart_id,title,range_start,range_end,status,created_at
-                ) VALUES (?,?,?,?,?,?,'active',?)
-                """,
-                (
-                    list_id,
-                    couple_id,
-                    cart["id"],
-                    "采购清单",
-                    dates[0],
-                    dates[-1],
-                    now,
-                ),
-            )
-            shopping = db.execute(
-                "SELECT * FROM shopping_lists WHERE id=?", (list_id,)
-            ).fetchone()
-        else:
-            range_start = min(shopping["range_start"], dates[0])
-            range_end = max(shopping["range_end"], dates[-1])
-            db.execute(
-                """
-                UPDATE shopping_lists
-                SET range_start=?,range_end=?,version=version+1
-                WHERE id=?
-                """,
-                (range_start, range_end, shopping["id"]),
-            )
-        existing_rows = db.execute(
-            "SELECT * FROM shopping_list_items WHERE shopping_list_id=?",
-            (shopping["id"],),
-        ).fetchall()
-        existing = {
-            (row["canonical_name"], row["unit_family"], row["specification"]): row
-            for row in existing_rows
-        }
-        position = max([int(row["position"]) for row in existing_rows] or [0])
-        for value in generated:
-            key = (
-                value["canonical_name"],
-                value["unit_family"],
-                value["specification"],
-            )
-            old = existing.get(key)
-            if old:
-                item_id = old["id"]
-                if not old["manual_locked"]:
-                    current_quantity = old["quantity_milli"]
-                    incoming = value["quantity_milli"]
-                    combined = (
-                        int(current_quantity) + int(incoming)
-                        if current_quantity is not None and incoming is not None
-                        else current_quantity or incoming
-                    )
-                    db.execute(
-                        """
-                        UPDATE shopping_list_items
-                        SET quantity_milli=?,quantity_text=?,version=version+1,
-                            updated_at=?
-                        WHERE id=?
-                        """,
-                        (
-                            combined,
-                            value["quantity_text"],
-                            now,
-                            item_id,
-                        ),
-                    )
-            else:
-                position += 1
-                item_id = _id("shopping_item")
-                db.execute(
-                    """
-                    INSERT INTO shopping_list_items(
-                        id,shopping_list_id,canonical_name,display_name,
-                        quantity_milli,quantity_text,canonical_unit,unit_family,
-                        category,specification,position,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        item_id,
-                        shopping["id"],
-                        value["canonical_name"],
-                        value["display_name"],
-                        value["quantity_milli"],
-                        value["quantity_text"],
-                        value["canonical_unit"],
-                        value["unit_family"],
-                        value["category"],
-                        value["specification"],
-                        position,
-                        now,
-                    ),
-                )
-            for source in value["sources"]:
-                db.execute(
-                    """
-                    INSERT OR IGNORE INTO shopping_item_sources(
-                        shopping_item_id,meal_item_id,recipe_ingredient_id,
-                        contributed_quantity_milli
-                    ) VALUES (?,?,?,?)
-                    """,
-                    (
-                        item_id,
-                        source["meal_item_id"],
-                        source["recipe_ingredient_id"],
-                        source["contributed_quantity_milli"],
-                    ),
-                )
-        for meal in meal_items:
-            db.execute(
-                """
-                UPDATE meal_cart_items
-                SET status='shopping',version=version+1,updated_at=?
-                WHERE id=? AND status='accepted'
-                """,
-                (now, meal["id"]),
-            )
-        return self._shopping_list_in_connection(db, shopping["id"])
+        shopping, range_start, range_end, complete_meals = self._shopping_rebuild_scope_in_connection(
+            db, couple_id=couple_id, range_start=dates[0], range_end=dates[-1],
+        )
+        applied = self._apply_shopping_items_in_connection(
+            db, couple_id=couple_id, actor_id=actor_id,
+            meal_items=complete_meals,
+            range_start=range_start, range_end=range_end,
+            expected_list_version=int(shopping["version"]) if shopping else 0,
+        )
+        return applied["shopping_list"]
 
     def _execute_life_plan(
         self,
@@ -1103,6 +1038,7 @@ class LifeAssistantMixin:
                         db,
                         couple_id=plan["couple_id"],
                         creator_id=actor_id,
+                        source_type=plan["source"],
                         payload=payload,
                     )
                 )
@@ -1143,6 +1079,7 @@ class LifeAssistantMixin:
                 created["shopping"] = self._merge_plan_shopping(
                     db,
                     couple_id=plan["couple_id"],
+                    actor_id=actor_id,
                     meal_items=list(created["meals"]),
                 )
             else:
@@ -1409,68 +1346,9 @@ class LifeAssistantMixin:
                     ).fetchone()[0]
                 ),
             }
-            priorities: list[dict] = []
-            pending_plan = db.execute(
-                """
-                SELECT id,title,summary,version,updated_at
-                FROM life_assistant_plans
-                WHERE couple_id=? AND status='pending_confirmation' AND expires_at>?
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (couple["id"], _now()),
-            ).fetchone()
-            if pending_plan:
-                priorities.append(
-                    {
-                        "type": "assistant_plan",
-                        "resource_id": pending_plan["id"],
-                        "title": pending_plan["title"],
-                        "subtitle": "待双方确认",
-                        "url": (
-                            f"/?screen=home&assistant-plan="
-                            f"{quote(pending_plan['id'])}"
-                        ),
-                    }
-                )
-            notification = db.execute(
-                """
-                SELECT id,title,event_type,resource_type,resource_id,url
-                FROM in_app_notifications
-                WHERE couple_id=? AND recipient_id=? AND read_at IS NULL
-                  AND archived_at IS NULL
-                ORDER BY created_at DESC,id DESC LIMIT 1
-                """,
-                (couple["id"], user_id),
-            ).fetchone()
-            if notification and len(priorities) < 3:
-                priorities.append(
-                    {
-                        "type": "notification",
-                        "resource_id": notification["id"],
-                        "title": notification["title"],
-                        "subtitle": "未读通知",
-                        "url": notification["url"],
-                    }
-                )
-            todo = db.execute(
-                """
-                SELECT id,title,starts_at FROM calendar_entries
-                WHERE couple_id=? AND entry_type='todo' AND deleted_at IS NULL
-                  AND completed_at IS NULL
-                ORDER BY starts_at,id LIMIT 1
-                """,
-                (couple["id"],),
-            ).fetchone()
-            if todo and len(priorities) < 3:
-                priorities.append(
-                    {
-                        "type": "todo",
-                        "resource_id": todo["id"],
-                        "title": todo["title"],
-                        "subtitle": f"计划时间 {todo['starts_at'][:16]}",
-                        "url": "/?screen=life&section=todo",
-                    }
-                )
+        # Keep one shared, privacy-reviewed aggregator for every caller.  It
+        # returns only resource identifiers, labels and deep links.
+        priorities = self.get_today_priorities(user_id)
         return {
             "counts": counts,
             "priorities": priorities,

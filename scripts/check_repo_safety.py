@@ -42,7 +42,9 @@ SECRET_PATTERNS = (
 ASSIGNMENT = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?"
     r"([A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|CERTIFICATE|PASSWORD)[A-Z0-9_]*)"
-    r"[ \t]*=[ \t]*['\"]?([^\s#'\"]{16,})"
+    # Match literal credential-shaped values, not Python expressions such as
+    # ``CATEGORY_KEYS = frozenset(CATEGORY_LABELS)``.
+    r"[ \t]*=[ \t]*['\"]?([A-Za-z0-9_./+=:-]{16,})"
 )
 PLACEHOLDER_PARTS = ("example", "placeholder", "changeme", "your_", "test_", "dummy")
 

@@ -18,9 +18,15 @@ from .intelligent_ui import ConflictError
 from .maps import MockMapProvider, geoapify_provider_from_env, map_provider_from_env
 from .ocr import ManualTextProvider, ocr_provider_from_env
 from .places import google_place_search_from_env, normalize_place_candidate
+from .providers import physical_place_identity
 from .quotes import quote_provider_from_env
 from .quota import QuotaExceededError
 from .restaurant_reviews import restaurant_review_search_from_env
+from .schema import (
+    ACCOUNT_EXPORT_POLICIES,
+    ACCOUNT_EXPORT_POLICY_VERSION,
+    account_export_policy_status,
+)
 
 
 FOOD_SPECIALTY_CATALOG = {
@@ -362,14 +368,24 @@ class PhaseThreeMixin:
         # A manual scope is honest only when the user supplied a separate
         # country/city hint. It carries no invented coordinate or map ID.
         if region_hint:
-            candidates.append(normalize_place_candidate({
+            manual_candidate = normalize_place_candidate({
                 "provider": "manual", "name": query,
                 "formatted_address": f"用户确认范围：{region_hint}",
                 "city": region_hint, "category": "用户确认的旅行范围",
-            }))
+            })
+            foreign_markers = ("法国", "日本", "美国", "英国", "德国", "意大利", "澳大利亚", "加拿大", "新加坡", "韩国", "泰国")
+            if re.search(r"(?:省|市|自治区|特别行政区|区|县)$", region_hint) and not any(marker in region_hint for marker in foreign_markers):
+                manual_candidate["timezone"] = "Asia/Shanghai"
+            candidates.append(manual_candidate)
 
+        now = _now()
         unique, seen, semantic_seen = [], set(), set()
         for candidate in candidates:
+            manual = candidate.get("provider") == "manual"
+            candidate["source_type"] = str(candidate.get("source_type") or ("human" if manual else "real_api"))
+            candidate["scope_confirmed"] = bool(candidate.get("scope_confirmed", not manual))
+            candidate["scope_status"] = "confirmed" if candidate["scope_confirmed"] else "unconfirmed"
+            candidate["evidence_at"] = str(candidate.get("evidence_at") or now)
             key = candidate["provider_place_id"] or (
                 f"{candidate['provider']}:{candidate['name']}:{candidate['formatted_address']}:"
                 f"{candidate['latitude']}:{candidate['longitude']}"
@@ -383,7 +399,6 @@ class PhaseThreeMixin:
             semantic_seen.add(semantic_key)
             unique.append(candidate)
 
-        now = _now()
         expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat()
         items = []
         with self.connection() as db:
@@ -394,7 +409,12 @@ class PhaseThreeMixin:
                     "INSERT INTO place_search_candidates(id,user_id,query,region_hint,payload_json,expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
                     (candidate_id, user_id, query, region_hint, json.dumps(candidate, ensure_ascii=False), expires, now),
                 )
-                items.append({"candidate_id": candidate_id, **candidate})
+                items.append({
+                    "candidate_id": candidate_id,
+                    "created_at": now,
+                    "cache_hit": candidate.get("source_type") == "cache",
+                    **candidate,
+                })
         configured = not amap.is_mock or (
             include_global and (
                 not geoapify_provider_from_env().is_mock
@@ -414,15 +434,187 @@ class PhaseThreeMixin:
             return None
         with self.connection() as db:
             row = db.execute(
-                "SELECT payload_json,expires_at FROM place_search_candidates WHERE id=? AND user_id=?",
+                "SELECT payload_json,expires_at,created_at FROM place_search_candidates WHERE id=? AND user_id=?",
                 (value, user_id),
             ).fetchone()
         if not row or row["expires_at"] < _now():
             raise ValueError("地点候选已失效，请重新搜索并确认")
         try:
-            return normalize_place_candidate(json.loads(row["payload_json"]))
+            raw = json.loads(row["payload_json"])
+            value = normalize_place_candidate(raw)
+            source_type = str(raw.get("source_type") or ("human" if value.get("provider") == "manual" else "real_api"))
+            value.update({
+                "source_type": source_type,
+                "original_source_type": str(raw.get("original_source_type") or source_type),
+                "evidence_at": str(raw.get("evidence_at") or row["created_at"]),
+                "created_at": str(row["created_at"]),
+                "cache_hit": source_type == "cache",
+                "scope_confirmed": bool(raw.get("scope_confirmed", value.get("provider") != "manual")),
+                "scope_status": str(raw.get("scope_status") or ("unconfirmed" if value.get("provider") == "manual" else "confirmed")),
+            })
+            if raw.get("timezone"):
+                value["timezone"] = str(raw["timezone"])
+            if isinstance(raw.get("activity_tags"), list):
+                value["activity_tags"] = [
+                    str(tag)[:40] for tag in raw["activity_tags"] if str(tag).strip()
+                ][:4]
+            if source_type == "cache" and raw.get("cache_age_seconds") is not None:
+                value["cache_age_seconds"] = max(0, int(raw["cache_age_seconds"]))
+            return value
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("地点候选数据无效，请重新搜索") from exc
+
+    def _destination_candidate_pool(
+        self,
+        candidate_id: object,
+        user_id: str,
+        limit: int = 6,
+        interest_tags: list[str] | None = None,
+    ) -> list[dict]:
+        """Return a bounded, still-valid pool scoped to the confirmed admin area.
+
+        This first reuses candidates already fetched for the user's explicit
+        search.  When the only compatible row is the confirmed anchor, it may
+        make one bounded category search so a plan is not padded with the same
+        place.  It never chooses a same-name destination result on the user's
+        behalf.
+        """
+        anchor = self._destination_candidate(candidate_id, user_id)
+        if anchor is None:
+            return []
+        anchor_id = str(candidate_id)
+        anchor_city = str(anchor.get("city") or "").strip().casefold()
+        anchor_province = str(anchor.get("province") or "").strip().casefold()
+        anchor_country = str(anchor.get("country") or "").strip().casefold()
+        anchor_category = str(anchor.get("category") or "").strip().casefold()
+        activity_specs = {
+            "美食": ("餐厅", ("餐饮", "餐厅", "美食", "咖啡", "甜品")),
+            "展览": ("博物馆 美术馆", ("文化", "博物", "美术", "展览", "艺术")),
+            "自然": ("公园 景区", ("风景", "公园", "自然", "景区")),
+            "散步": ("公园 步行街", ("公园", "步行", "街区", "风景")),
+            "摄影": ("摄影 景点", ("风景", "景区", "摄影", "公园")),
+            "电影": ("电影院", ("电影院", "电影")),
+            "运动": ("运动场馆", ("体育", "运动", "健身")),
+            "手作": ("手作 文化体验", ("文化", "手作", "工艺", "艺术")),
+        }
+        requested_specs = [
+            (tag, *activity_specs[tag]) for tag in (interest_tags or []) if tag in activity_specs
+        ][:2]
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT id FROM place_search_candidates WHERE user_id=? AND expires_at>=? ORDER BY created_at DESC LIMIT 48",
+                (user_id, _now()),
+            ).fetchall()
+        def eligible(item: dict) -> bool:
+            return (
+                item.get("latitude") is not None and item.get("longitude") is not None
+                and str(item.get("source_type") or "") in {"real_api", "cache"}
+                and item.get("provider") != "manual"
+            )
+
+        def same_area(item: dict) -> bool:
+            city = str(item.get("city") or "").strip().casefold()
+            province = str(item.get("province") or "").strip().casefold()
+            country = str(item.get("country") or "").strip().casefold()
+            return (
+                bool(anchor_city and city and city == anchor_city)
+                or bool(not anchor_city and anchor_province and province == anchor_province)
+                or bool(not anchor_city and not anchor_province and anchor_country and country == anchor_country)
+            )
+
+        def matches_activity(item: dict) -> bool:
+            category = str(item.get("category") or "").strip().casefold()
+            activity_tags = {str(tag).strip() for tag in item.get("activity_tags", []) if str(tag).strip()}
+            if requested_specs:
+                return any(
+                    tag in activity_tags or any(term.casefold() in category for term in terms)
+                    for tag, _query, terms in requested_specs
+                )
+            return bool(anchor_category and category and category == anchor_category)
+
+        result = [{"candidate_id": anchor_id, **anchor}] if eligible(anchor) and matches_activity(anchor) else []
+        seen_places = {physical_place_identity(item) for item in result}
+        for row in rows:
+            value_id = str(row["id"])
+            if value_id == anchor_id:
+                continue
+            try:
+                value = self._destination_candidate(value_id, user_id)
+            except ValueError:
+                continue
+            if value is None or not eligible(value):
+                continue
+            if not same_area(value) or not matches_activity(value):
+                continue
+            identity = physical_place_identity(value)
+            if identity in seen_places:
+                continue
+            result.append({"candidate_id": value_id, **value})
+            seen_places.add(identity)
+            if len(result) >= max(1, min(limit, 8)):
+                break
+
+        # A category query is performed at most once per requested activity
+        # (and at most twice overall), never once per generated variant. The
+        # results remain server-owned candidates and are filtered back to the
+        # confirmed administrative scope before the model can reference them.
+        max_items = max(1, min(limit, 8))
+        only_anchor = len(result) == 1 and str(result[0].get("candidate_id") or "") == anchor_id
+        can_search = (
+            (not result or only_anchor) and requested_specs and anchor.get("provider") != "manual"
+            and anchor.get("scope_confirmed", True)
+        )
+        if can_search:
+            provider_name = str(anchor.get("provider") or "")
+            search_provider: object | None = None
+            search_method = "search_places"
+            if provider_name == "amap":
+                value = map_provider_from_env(self.external_request_guard("amap"))
+                search_provider = None if value.is_mock else value
+            elif provider_name == "geoapify":
+                value = geoapify_provider_from_env(self.external_request_guard("geoapify"))
+                search_provider = None if value.is_mock else value
+            elif provider_name == "google_maps":
+                value = google_place_search_from_env(self.external_request_guard("serpapi"))
+                search_provider = value if value.is_configured else None
+                search_method = "search"
+            region_hint = str(anchor.get("city") or anchor.get("province") or anchor.get("country") or "")
+            fetched: list[dict] = []
+            if search_provider is not None and region_hint:
+                for tag, query, _terms in requested_specs:
+                    try:
+                        method = getattr(search_provider, search_method)
+                        rows_found = method(query, region_hint, max_items)
+                    except (RuntimeError, QuotaExceededError, TimeoutError, ValueError):
+                        continue
+                    for raw in rows_found:
+                        item = normalize_place_candidate(raw)
+                        item.update({
+                            "source_type": "real_api", "scope_confirmed": True,
+                            "scope_status": "confirmed", "activity_tags": [tag],
+                            "evidence_at": _now(),
+                        })
+                        key = physical_place_identity(item)
+                        if key in seen_places or not eligible(item) or not same_area(item) or not matches_activity(item):
+                            continue
+                        seen_places.add(key)
+                        fetched.append(item)
+                        if len(result) + len(fetched) >= max_items:
+                            break
+                    if len(result) + len(fetched) >= max_items:
+                        break
+            if fetched:
+                created_at = _now()
+                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+                with self.connection() as db:
+                    for item in fetched:
+                        value_id = _id("place")
+                        db.execute(
+                            "INSERT INTO place_search_candidates(id,user_id,query,region_hint,payload_json,expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                            (value_id, user_id, "约会活动", region_hint, json.dumps(item, ensure_ascii=False), expires_at, created_at),
+                        )
+                        result.append({"candidate_id": value_id, "created_at": created_at, "cache_hit": False, **item})
+        return result
 
     @staticmethod
     def _save_destination_place(db: sqlite3.Connection, trip_id: str, place: dict, user_id: str, now: str) -> None:
@@ -567,10 +759,17 @@ class PhaseThreeMixin:
                 "UPDATE trips SET deleted_at=?,deleted_by=?,version=version+1,updated_at=? WHERE id=?",
                 (now, user_id, now, trip_id),
             )
+            db.execute("UPDATE couples SET version=version+1 WHERE id=?", (couple["id"],))
+            permission_version = int(db.execute(
+                "SELECT version FROM couples WHERE id=?", (couple["id"],),
+            ).fetchone()[0])
             db.execute("UPDATE ui_action_drafts SET status='cancelled' WHERE couple_id=? AND status='draft' AND payload_json LIKE ?", (couple["id"], f'%"trip_id": "{trip_id}"%'))
             self._audit(db, "trip.deleted", "trip", trip_id, {"title": row["title"]}, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", trip_id, {"resource": "trip", "operation": "deleted"})
-        return {"id": trip_id, "title": row["title"], "deleted": True, "deleted_at": now, "version": int(row["version"]) + 1}
+        return {
+            "id": trip_id, "title": row["title"], "deleted": True, "deleted_at": now,
+            "version": int(row["version"]) + 1, "permission_version": permission_version,
+        }
 
     def restore_trip(self, trip_id: str, expected_version: object, user_id: str) -> dict:
         """Restore a shared trip that either partner deleted by mistake."""
@@ -591,9 +790,15 @@ class PhaseThreeMixin:
                 "UPDATE trips SET deleted_at=NULL,deleted_by=NULL,version=version+1,updated_at=? WHERE id=?",
                 (now, trip_id),
             )
+            db.execute("UPDATE couples SET version=version+1 WHERE id=?", (couple["id"],))
+            permission_version = int(db.execute(
+                "SELECT version FROM couples WHERE id=?", (couple["id"],),
+            ).fetchone()[0])
             self._audit(db, "trip.restored", "trip", trip_id, {"title": row["title"]}, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", trip_id, {"resource": "trip", "operation": "restored"})
-        return self.get_trip(trip_id, user_id)
+        result = self.get_trip(trip_id, user_id)
+        result["permission_version"] = permission_version
+        return result
 
     def update_trip_logistics(self, trip_id: str, payload: dict, user_id: str) -> dict:
         departure_city = str(payload.get("departure_city", "")).strip()[:80]
@@ -1736,10 +1941,30 @@ class PhaseThreeMixin:
                 params.append(entry_type)
             sql += " ORDER BY completed_at IS NOT NULL, starts_at, created_at"
             rows = db.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        return [self._public_calendar_entry(row) for row in rows]
 
     @staticmethod
-    def _calendar_values(payload: dict, current: sqlite3.Row | None = None) -> dict:
+    def _public_calendar_entry(row: sqlite3.Row | dict) -> dict:
+        value = dict(row)
+        participants = [
+            str(value.get(key)) for key in ("participant_a_id", "participant_b_id")
+            if value.get(key)
+        ]
+        value["participant_ids"] = participants
+        value["blocks_time"] = bool(value.get("blocks_time", 0))
+        value["all_day"] = bool(value.get("all_day", 0))
+        value.pop("participant_a_id", None)
+        value.pop("participant_b_id", None)
+        return value
+
+    @staticmethod
+    def _calendar_values(
+        payload: dict,
+        current: sqlite3.Row | None = None,
+        member_ids: set[str] | None = None,
+        *,
+        server_source_type: str | None = None,
+    ) -> dict:
         def value(name: str, default: Any = "") -> Any:
             return payload[name] if name in payload else (current[name] if current else default)
         entry_type = str(value("entry_type", "event"))
@@ -1748,43 +1973,119 @@ class PhaseThreeMixin:
         title = str(value("title")).strip()[:160]
         if not title:
             raise ValueError("标题不能为空")
-        all_day = int(bool(value("all_day", False)))
+        raw_all_day = value("all_day", False)
+        if isinstance(raw_all_day, bool):
+            all_day = int(raw_all_day)
+        elif isinstance(raw_all_day, int) and raw_all_day in {0, 1}:
+            all_day = raw_all_day
+        else:
+            raise ValueError("全天标记必须是布尔值")
         starts_at_raw = value("starts_at")
-        if all_day and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(starts_at_raw)):
-            starts_at = str(starts_at_raw)
+        if all_day:
+            try:
+                start_date = date.fromisoformat(str(starts_at_raw)[:10])
+            except ValueError as exc:
+                raise ValueError("开始时间格式无效") from exc
+            starts_at = start_date.isoformat()
         else:
             starts_at = _iso(starts_at_raw, "开始时间")
         ends_raw = value("ends_at", None)
-        ends_at = _iso(ends_raw, "结束时间") if ends_raw else None
-        if ends_at and len(starts_at) > 10 and ends_at < starts_at:
-            raise ValueError("结束时间不能早于开始时间")
+        if all_day and ends_raw:
+            try:
+                end_date = date.fromisoformat(str(ends_raw)[:10])
+            except ValueError as exc:
+                raise ValueError("结束时间格式无效") from exc
+            if end_date < start_date:
+                raise ValueError("结束时间不能早于开始时间")
+            # All-day ranges are persisted as [start,end). A same-day end is
+            # the common UI expression for one full day, not an empty range.
+            if end_date == start_date:
+                end_date += timedelta(days=1)
+            ends_at = end_date.isoformat()
+        else:
+            ends_at = _iso(ends_raw, "结束时间") if ends_raw else None
+            if ends_at and ends_at < starts_at:
+                raise ValueError("结束时间不能早于开始时间")
         recurrence = str(value("recurrence", "none"))
         if recurrence not in {"none", "daily", "weekly", "monthly", "yearly"}:
             raise ValueError("重复规则无效")
-        return {"entry_type": entry_type, "title": title, "starts_at": starts_at, "ends_at": ends_at, "all_day": all_day, "recurrence": recurrence, "location": str(value("location", ""))[:200], "note": str(value("note", ""))[:2000]}
+        if "participant_ids" in payload:
+            raw_participants = payload.get("participant_ids")
+        elif current is not None:
+            raw_participants = [current["participant_a_id"], current["participant_b_id"]]
+        else:
+            raw_participants = []
+        if not isinstance(raw_participants, list) or any(item is not None and not isinstance(item, str) for item in raw_participants):
+            raise ValueError("参与人格式无效")
+        participants = [item.strip() for item in raw_participants if item and item.strip()]
+        if len(participants) > 2 or len(set(participants)) != len(participants):
+            raise ValueError("参与人不能重复且最多两人")
+        if member_ids is not None and not set(participants).issubset(member_ids):
+            raise ValueError("参与人必须是当前情侣双方")
+        raw_blocks_time = value("blocks_time", False)
+        if isinstance(raw_blocks_time, bool):
+            blocks_time = raw_blocks_time
+        elif isinstance(raw_blocks_time, int) and raw_blocks_time in {0, 1}:
+            blocks_time = bool(raw_blocks_time)
+        else:
+            raise ValueError("占用时间标记必须是布尔值")
+        if blocks_time and not participants:
+            raise ValueError("占用时间必须选择至少一位参与人")
+        if blocks_time and not all_day and not ends_at:
+            raise ValueError("占用时间的日程必须填写结束时间")
+        current_source = str(current["source_type"] or "legacy_unknown") if current is not None else "human"
+        requested_source = str(payload.get("source_type") or current_source)
+        if requested_source != current_source:
+            raise ValueError("日历来源由服务器维护，不能手动修改")
+        if server_source_type is not None and current is not None and server_source_type != current_source:
+            raise ValueError("已有日历来源不能被覆盖")
+        source_type = str(server_source_type or current_source)
+        if source_type not in {"human", "rules", "ai", "real_api", "cache", "mock", "legacy_unknown"}:
+            raise ValueError("日历来源无效")
+        return {
+            "entry_type": entry_type, "title": title, "starts_at": starts_at,
+            "ends_at": ends_at, "all_day": all_day, "recurrence": recurrence,
+            "location": str(value("location", ""))[:200], "note": str(value("note", ""))[:2000],
+            "participant_a_id": participants[0] if participants else None,
+            "participant_b_id": participants[1] if len(participants) > 1 else None,
+            "blocks_time": int(blocks_time), "source_type": source_type,
+        }
 
     def create_calendar_entry(self, payload: dict, user_id: str) -> dict:
-        values, entry_id, now = self._calendar_values(payload), _id("calendar"), _now()
+        entry_id, now = _id("calendar"), _now()
         with self.connection() as db:
-            couple, _ = self._couple_context(db, user_id)
-            db.execute("INSERT INTO calendar_entries(id,couple_id,creator_id,entry_type,title,starts_at,ends_at,all_day,recurrence,location,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (entry_id, couple["id"], user_id, *values.values(), now, now))
+            db.execute("BEGIN IMMEDIATE")
+            couple, partner_id = self._couple_context(db, user_id)
+            previous = self._idempotent_result(db, couple["id"], user_id, "calendar.create", payload.get("idempotency_key"))
+            if previous:
+                return previous
+            values = self._calendar_values(payload, member_ids={user_id, partner_id})
+            db.execute("""INSERT INTO calendar_entries(
+                id,couple_id,creator_id,entry_type,title,starts_at,ends_at,all_day,recurrence,
+                location,note,participant_a_id,participant_b_id,blocks_time,source_type,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (entry_id, couple["id"], user_id, *values.values(), now, now))
             self._event(db, couple["id"], user_id, "calendar.created", entry_id, {"type": values["entry_type"]})
             row = db.execute("SELECT * FROM calendar_entries WHERE id=?", (entry_id,)).fetchone()
-        return dict(row)
+            result = self._public_calendar_entry(row)
+            self._save_idempotent_result(db, couple["id"], user_id, "calendar.create", payload.get("idempotency_key"), result)
+        return result
 
     def update_calendar_entry(self, entry_id: str, payload: dict, user_id: str) -> dict:
         with self.connection() as db:
-            couple, _ = self._couple_context(db, user_id)
+            couple, partner_id = self._couple_context(db, user_id)
             row = db.execute("SELECT * FROM calendar_entries WHERE id=? AND couple_id=? AND deleted_at IS NULL", (entry_id, couple["id"])).fetchone()
             if not row:
                 raise KeyError("日历事项不存在")
             if payload.get("expected_version") is not None and int(payload["expected_version"]) != row["version"]:
                 raise ConflictError("日历事项已被另一方修改，请刷新")
-            values = self._calendar_values(payload, row)
-            db.execute("UPDATE calendar_entries SET entry_type=?,title=?,starts_at=?,ends_at=?,all_day=?,recurrence=?,location=?,note=?,version=version+1,updated_at=? WHERE id=?", (*values.values(), _now(), entry_id))
+            values = self._calendar_values(payload, row, {user_id, partner_id})
+            db.execute("""UPDATE calendar_entries SET
+                entry_type=?,title=?,starts_at=?,ends_at=?,all_day=?,recurrence=?,location=?,note=?,
+                participant_a_id=?,participant_b_id=?,blocks_time=?,source_type=?,
+                version=version+1,updated_at=? WHERE id=?""", (*values.values(), _now(), entry_id))
             self._event(db, couple["id"], user_id, "calendar.updated", entry_id, {})
             updated = db.execute("SELECT * FROM calendar_entries WHERE id=?", (entry_id,)).fetchone()
-        return dict(updated)
+        return self._public_calendar_entry(updated)
 
     def complete_calendar_entry(self, entry_id: str, completed: bool, expected_version: object, user_id: str) -> dict:
         with self.connection() as db:
@@ -1799,7 +2100,7 @@ class PhaseThreeMixin:
             db.execute("UPDATE calendar_entries SET completed_at=?,version=version+1,updated_at=? WHERE id=?", (_now() if completed else None, _now(), entry_id))
             self._event(db, couple["id"], user_id, "calendar.updated", entry_id, {"completed": completed})
             updated = db.execute("SELECT * FROM calendar_entries WHERE id=?", (entry_id,)).fetchone()
-        return dict(updated)
+        return self._public_calendar_entry(updated)
 
     def delete_calendar_entry(self, entry_id: str, expected_version: object, user_id: str) -> dict:
         with self.connection() as db:
@@ -1887,6 +2188,36 @@ class PhaseThreeMixin:
             db.execute("UPDATE push_subscriptions SET active=0,updated_at=? WHERE session_id=?", (_now(), session_id))
         return {"id": session_id, "revoked": True}
 
+    @staticmethod
+    def _invalidate_expression_requests(db: sqlite3.Connection, couple_id: str, now: str) -> None:
+        """Close in-flight private expression usage before invalidating its receipt."""
+        rows = db.execute(
+            """SELECT result_json FROM mutation_idempotency
+            WHERE couple_id=? AND operation='expression.suggest'
+              AND json_extract(result_json,'$._state')='pending'""",
+            (couple_id,),
+        ).fetchall()
+        request_ids: set[str] = set()
+        for row in rows:
+            try:
+                receipt = json.loads(str(row["result_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            request_id = receipt.get("_request_id") if isinstance(receipt, dict) else None
+            if isinstance(request_id, str) and request_id:
+                request_ids.add(request_id)
+        for request_id in request_ids:
+            db.execute(
+                """UPDATE ai_usage_events SET status='failed',finished_at=?,
+                failure_code='scope_changed'
+                WHERE couple_id=? AND request_id=? AND status='started'""",
+                (now, couple_id, request_id),
+            )
+        db.execute(
+            "DELETE FROM mutation_idempotency WHERE couple_id=? AND operation='expression.suggest'",
+            (couple_id,),
+        )
+
     def unlink_couple(self, password: str, confirmation: str, user_id: str) -> dict:
         if confirmation != "解除情侣":
             raise ValueError("请输入“解除情侣”确认")
@@ -1900,8 +2231,10 @@ class PhaseThreeMixin:
             raise ValueError("当前密码不正确") from exc
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
+            now = _now()
+            self._cleanup_incomplete_trip_negotiations(db, str(couple["id"]))
             db.execute("UPDATE couples SET status='unlinked',version=version+1 WHERE id=?", (couple["id"],))
-            db.execute("UPDATE invites SET consumed_at=COALESCE(consumed_at,?) WHERE creator_id IN (?,?)", (_now(), couple["member_a"], couple["member_b"]))
+            db.execute("UPDATE invites SET consumed_at=COALESCE(consumed_at,?) WHERE creator_id IN (?,?)", (now, couple["member_a"], couple["member_b"]))
             db.execute(
                 "UPDATE push_subscriptions SET active=0,updated_at=? WHERE user_id IN (?,?)",
                 (_now(), couple["member_a"], couple["member_b"]),
@@ -1910,6 +2243,33 @@ class PhaseThreeMixin:
                 "UPDATE push_outbox SET status='cancelled',updated_at=? WHERE user_id IN (?,?) AND status IN ('pending','processing')",
                 (_now(), couple["member_a"], couple["member_b"]),
             )
+            self.apply_foundation_lifecycle(db, event="unlink", couple_id=couple["id"])
+            self.invalidate_foundation_scope(db, couple["id"])
+            active_cook_ids = [row["id"] for row in db.execute(
+                "SELECT id FROM cook_sessions WHERE couple_id=? AND status='active'", (couple["id"],),
+            ).fetchall()]
+            if active_cook_ids:
+                placeholders = ",".join("?" for _ in active_cook_ids)
+                db.execute(
+                    f"UPDATE cook_timers SET status='cancelled',version=version+1,updated_at=? WHERE session_id IN ({placeholders}) AND status='running'",
+                    (now, *active_cook_ids),
+                )
+                db.execute(
+                    "UPDATE cook_sessions SET status='cancelled',version=version+1,updated_at=?,ended_at=? WHERE couple_id=? AND status='active'",
+                    (now, now, couple["id"]),
+                )
+            db.execute(
+                """UPDATE wishlist_claims SET status=CASE WHEN status='active' THEN 'cancelled' ELSE status END,
+                    private_note='',version=version+1,updated_at=?,ended_at=COALESCE(ended_at,?)
+                WHERE item_id IN (SELECT i.id FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=?)""",
+                (now, now, couple["id"]),
+            )
+            db.execute("DELETE FROM couple_statuses WHERE couple_id=?", (couple["id"],))
+            db.execute(
+                "DELETE FROM mutation_idempotency WHERE couple_id=? AND operation LIKE 'wishlist.claim%'",
+                (couple["id"],),
+            )
+            self._invalidate_expression_requests(db, str(couple["id"]), now)
             self._audit(db, "couple.unlinked", "couple", couple["id"], actor_id=user_id)
         return {"unlinked": True, "couple_id": couple["id"]}
 
@@ -1926,9 +2286,48 @@ class PhaseThreeMixin:
             raise ValueError("当前密码不正确") from exc
         now = _now()
         with self.connection() as db:
-            couple = db.execute("SELECT * FROM couples WHERE (member_a=? OR member_b=?) AND status='active'", (user_id, user_id)).fetchone()
-            if couple:
-                db.execute("UPDATE couples SET status='account_deleted',version=version+1 WHERE id=?", (couple["id"],))
+            couples = db.execute(
+                "SELECT * FROM couples WHERE member_a=? OR member_b=?",
+                (user_id, user_id),
+            ).fetchall()
+            for couple in couples:
+                self._cleanup_incomplete_trip_negotiations(db, str(couple["id"]))
+                if couple["status"] == "active":
+                    db.execute(
+                        "UPDATE couples SET status='account_deleted',version=version+1 WHERE id=?",
+                        (couple["id"],),
+                    )
+                self.apply_foundation_lifecycle(
+                    db, event="account_delete", couple_id=couple["id"], user_id=user_id
+                )
+                self.invalidate_foundation_scope(db, couple["id"])
+                active_cook_ids = [row["id"] for row in db.execute(
+                    "SELECT id FROM cook_sessions WHERE couple_id=? AND status='active'", (couple["id"],),
+                ).fetchall()]
+                if active_cook_ids:
+                    placeholders = ",".join("?" for _ in active_cook_ids)
+                    db.execute(
+                        f"UPDATE cook_timers SET status='cancelled',version=version+1,updated_at=? WHERE session_id IN ({placeholders}) AND status='running'",
+                        (now, *active_cook_ids),
+                    )
+                    db.execute(
+                        "UPDATE cook_sessions SET status='cancelled',version=version+1,updated_at=?,ended_at=? WHERE couple_id=? AND status='active'",
+                        (now, now, couple["id"]),
+                    )
+                db.execute(
+                    """UPDATE wishlist_claims SET status=CASE WHEN status='active' THEN 'cancelled' ELSE status END,
+                        private_note='',version=version+1,updated_at=?,ended_at=COALESCE(ended_at,?)
+                    WHERE item_id IN (
+                        SELECT i.id FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=?
+                    )""",
+                    (now, now, couple["id"]),
+                )
+                db.execute("DELETE FROM couple_statuses WHERE couple_id=?", (couple["id"],))
+                db.execute(
+                    "DELETE FROM mutation_idempotency WHERE couple_id=? AND operation LIKE 'wishlist.claim%'",
+                    (couple["id"],),
+                )
+                self._invalidate_expression_requests(db, str(couple["id"]), now)
             db.execute("UPDATE moments SET title='已删除的私密内容',body='',location=NULL,mood=NULL,media_url=NULL,purged_at=?,deleted_at=COALESCE(deleted_at,?) WHERE creator_id=? AND visibility!='shared'", (now, now, user_id))
             db.execute("UPDATE recipes SET name='已删除的私密菜谱',deleted_at=COALESCE(deleted_at,?),updated_at=? WHERE owner_id=? AND visibility='private'", (now, now, user_id))
             db.execute("UPDATE recipe_drafts SET status='expired' WHERE creator_id=? AND status='pending'", (user_id,))
@@ -1944,16 +2343,95 @@ class PhaseThreeMixin:
 
     def account_export(self, user_id: str) -> tuple[bytes, str]:
         """Return a ZIP containing JSON data and all media the user may access."""
+        policy_status = account_export_policy_status()
+        if not policy_status["ok"]:
+            raise RuntimeError("账户导出策略清单不完整，已停止导出")
         with self.connection() as db:
             user = db.execute("SELECT id,username,nickname,locale,timezone,created_at FROM users WHERE id=?", (user_id,)).fetchone()
             if not user:
                 raise KeyError("用户不存在")
-            couple, partner_id = self._couple_context(db, user_id)
+            couple, partner_id = self._memory_couple_context(db, user_id)
+            self._reconcile_delayed_moments(db)
             partner = db.execute("SELECT id,username,nickname,created_at FROM users WHERE id=?", (partner_id,)).fetchone()
-            data: dict[str, Any] = {"exported_at": _now(), "user": dict(user), "partner": dict(partner), "couple": dict(couple)}
-            direct_tables = ["messages", "call_records", "trips", "trip_assistant_messages", "trip_assistant_action_drafts", "trip_memory_drafts", "shared_lists", "calendar_entries", "partner_preferences", "place_snapshots", "quote_snapshots", "realtime_events", "audit_events", "couple_statuses", "weekly_reviews", "date_plans", "meal_wishes", "meal_carts", "meal_cart_items", "shopping_lists"]
+            data: dict[str, Any] = {
+                "exported_at": _now(),
+                "user": dict(user),
+                "partner": dict(partner),
+                "couple": dict(couple),
+            }
+            direct_tables = [
+                "messages", "call_records", "trips", "trip_assistant_messages",
+                "trip_assistant_action_drafts", "trip_memory_drafts", "shared_lists",
+                "calendar_entries", "partner_preferences", "place_snapshots",
+                "quote_snapshots", "couple_statuses", "weekly_reviews", "date_plans",
+                "meal_wishes", "meal_carts", "meal_cart_items", "shopping_lists",
+                "daily_couple_summaries",
+            ]
             for table in direct_tables:
-                data[table] = [dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE couple_id=?", (couple["id"],)).fetchall()]
+                if table == "trips":
+                    rows = db.execute(
+                        f"SELECT t.* FROM trips t WHERE {self._visible_trip_sql('t')}",
+                        (couple["id"],),
+                    ).fetchall()
+                elif table == "trip_assistant_messages":
+                    rows = db.execute(
+                        f"""SELECT m.* FROM trip_assistant_messages m
+                            JOIN trips t ON t.id=m.trip_id
+                            WHERE {self._visible_trip_sql('t')}""",
+                        (couple["id"],),
+                    ).fetchall()
+                elif table == "trip_assistant_action_drafts":
+                    rows = db.execute(
+                        f"""SELECT d.* FROM trip_assistant_action_drafts d
+                            JOIN trips t ON t.id=d.trip_id
+                            WHERE {self._visible_trip_sql('t')}
+                              AND (d.creator_id=? OR d.status='confirmed')""",
+                        (couple["id"], user_id),
+                    ).fetchall()
+                elif table == "trip_memory_drafts":
+                    rows = db.execute(
+                        f"""SELECT d.* FROM trip_memory_drafts d
+                            JOIN trips t ON t.id=d.trip_id
+                            WHERE {self._visible_trip_sql('t')}
+                              AND (d.creator_id=? OR d.status='confirmed')""",
+                        (couple["id"], user_id),
+                    ).fetchall()
+                elif table == "calendar_entries":
+                    rows = db.execute(
+                        "SELECT * FROM calendar_entries WHERE couple_id=? AND deleted_at IS NULL",
+                        (couple["id"],),
+                    ).fetchall()
+                elif table == "meal_wishes":
+                    rows = db.execute(
+                        "SELECT * FROM meal_wishes WHERE couple_id=? AND deleted_at IS NULL",
+                        (couple["id"],),
+                    ).fetchall()
+                else:
+                    rows = db.execute(f"SELECT * FROM {table} WHERE couple_id=?", (couple["id"],)).fetchall()
+                if table == "trip_assistant_messages":
+                    allowed = (
+                        "id", "trip_id", "author_id", "role", "content", "intent_type",
+                        "cards_json", "reply_to", "created_at",
+                    )
+                    data[table] = [{key: row[key] for key in allowed} for row in rows]
+                elif table == "trip_assistant_action_drafts":
+                    allowed = (
+                        "id", "trip_id", "creator_id", "action_type", "payload_json",
+                        "preview_json", "expected_trip_version", "expected_item_version",
+                        "expected_item_versions_json", "status", "result_json", "expires_at",
+                        "created_at", "confirmed_at",
+                    )
+                    data[table] = [{key: row[key] for key in allowed} for row in rows]
+                elif table == "trip_memory_drafts":
+                    allowed = (
+                        "id", "trip_id", "creator_id", "title", "body", "location",
+                        "source_summary_json", "is_early", "expected_trip_version", "version",
+                        "status", "result_json", "moment_id", "expires_at", "created_at",
+                        "updated_at", "confirmed_at",
+                    )
+                    data[table] = [{key: row[key] for key in allowed} for row in rows]
+                else:
+                    data[table] = [dict(row) for row in rows]
             data["shared_comments"] = []
             for comment in db.execute(
                 "SELECT * FROM shared_comments WHERE couple_id=? AND deleted_at IS NULL ORDER BY created_at,rowid",
@@ -1964,11 +2442,40 @@ class PhaseThreeMixin:
                 except KeyError:
                     continue
                 data["shared_comments"].append(dict(comment))
-            member_ids = (user_id, partner_id)
-            data["user_locations"] = [dict(row) for row in db.execute("SELECT * FROM user_locations WHERE user_id IN (?,?)", member_ids).fetchall()]
+            data["user_locations"] = [dict(row) for row in db.execute(
+                "SELECT * FROM user_locations WHERE user_id=?", (user_id,),
+            ).fetchall()]
             data["devices"] = [dict(row) for row in db.execute("SELECT id,device_name,user_agent,ip_address,expires_at,created_at,last_seen_at,revoked_at FROM sessions WHERE user_id=?", (user_id,)).fetchall()]
             data["invites"] = [dict(row) for row in db.execute("SELECT id,creator_id,expires_at,consumed_at FROM invites WHERE creator_id=?", (user_id,)).fetchall()]
-            data["moments"] = [dict(row) for row in db.execute("SELECT * FROM moments WHERE couple_id=? AND (visibility='shared' OR creator_id=?)", (couple["id"], user_id)).fetchall()]
+            data["moments"] = [dict(row) for row in db.execute(
+                f"SELECT m.* FROM moments m WHERE {self._visible_moment_sql('m')}",
+                (couple["id"], user_id, _now()),
+            ).fetchall()]
+            visible_moment_ids = [str(row["id"]) for row in data["moments"]]
+            data["moment_reactions"] = []
+            if visible_moment_ids:
+                placeholders = ",".join("?" for _ in visible_moment_ids)
+                data["moment_reactions"] = [dict(row) for row in db.execute(
+                    f"SELECT * FROM moment_reactions WHERE moment_id IN ({placeholders}) ORDER BY created_at,moment_id,user_id",
+                    visible_moment_ids,
+                ).fetchall()]
+            settings = db.execute(
+                "SELECT * FROM couple_assistant_settings WHERE couple_id=?",
+                (couple["id"],),
+            ).fetchone()
+            data["couple_assistant_settings"] = [dict(settings)] if settings else []
+            data["in_app_notifications"] = [dict(row) for row in db.execute(
+                """SELECT id,actor_id,event_type,resource_type,resource_id,title,body,url,
+                          read_at,archived_at,created_at
+                   FROM in_app_notifications WHERE couple_id=? AND recipient_id=?
+                   ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["place_search_candidates"] = [dict(row) for row in db.execute(
+                """SELECT id,query,region_hint,payload_json,expires_at,created_at
+                   FROM place_search_candidates WHERE user_id=? ORDER BY created_at,id""",
+                (user_id,),
+            ).fetchall()]
             data["chat_imports"] = [dict(row) for row in db.execute("SELECT * FROM chat_imports WHERE couple_id=? AND creator_id=?", (couple["id"], user_id)).fetchall()]
             import_ids = [row["id"] for row in data["chat_imports"]]
             data["chat_import_items"] = []
@@ -1997,6 +2504,17 @@ class PhaseThreeMixin:
             data["media_assets"] = [self._media_public(row) for row in media_rows]
             trip_ids = [row["id"] for row in data["trips"]]
             variant_rows: list[sqlite3.Row] = []
+            data["trip_expenses"] = []
+            data["trip_generation_jobs"] = [dict(row) for row in db.execute(
+                """SELECT id,user_id,status,trip_id,created_at,started_at,
+                          completed_at,updated_at
+                   FROM trip_generation_jobs
+                   WHERE couple_id=? AND user_id=? ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["trip_item_preferences"] = []
+            data["trip_realism_checks"] = []
+            data["trip_packing_items"] = []
             if trip_ids:
                 placeholders = ",".join("?" for _ in trip_ids)
                 for table in ("trip_preferences", "trip_destination_places", "plan_variants", "hotel_options", "plan_revisions", "approvals"):
@@ -2004,7 +2522,40 @@ class PhaseThreeMixin:
                     data[table] = [dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE {key} IN ({placeholders})", trip_ids).fetchall()]
                 for table in ("trip_food_recommendations", "trip_food_review_evidence"):
                     data[table] = [dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE trip_id IN ({placeholders})", trip_ids).fetchall()]
+                expense_names = self._expense_member_names(db, couple)
+                for row in db.execute(
+                    f"SELECT * FROM trip_expenses WHERE trip_id IN ({placeholders}) ORDER BY trip_id,occurred_on,id",
+                    trip_ids,
+                ).fetchall():
+                    expense = self._public_trip_expense(row, expense_names)
+                    expense["creator_id"] = str(row["creator_id"])
+                    data["trip_expenses"].append(expense)
                 variant_rows = db.execute(f"SELECT * FROM plan_variants WHERE trip_id IN ({placeholders})", trip_ids).fetchall()
+                for trip_id in trip_ids:
+                    trip_row = db.execute("SELECT * FROM trips WHERE id=?", (trip_id,)).fetchone()
+                    if not trip_row:
+                        continue
+                    itinerary: list[dict] = []
+                    if trip_row["active_variant"]:
+                        negotiation = self._serialize_trip_negotiation_in_connection(
+                            db, couple, trip_row, user_id, partner_id,
+                        )
+                        if negotiation["state"] != "open":
+                            data["trip_item_preferences"].append(negotiation)
+                        itinerary = self._active_itinerary_snapshot(db, trip_row)
+                    for check in db.execute(
+                        "SELECT * FROM trip_realism_checks WHERE trip_id=? ORDER BY checked_at,id",
+                        (trip_id,),
+                    ).fetchall():
+                        effective_status = str(check["status"])
+                        if int(check["trip_version"]) != int(trip_row["version"]):
+                            effective_status = "stale"
+                        data["trip_realism_checks"].append(
+                            self._serialize_realism_check(check, itinerary, effective_status)
+                        )
+                    data["trip_packing_items"].extend(
+                        self._list_trip_packing_db(db, trip_id, couple)
+                    )
             variant_ids = [row["id"] for row in variant_rows]
             data["trip_days"], data["itinerary_items"], data["itinerary_item_places"] = [], [], []
             if variant_ids:
@@ -2030,7 +2581,16 @@ class PhaseThreeMixin:
             data["shared_list_items"] = []
             if list_ids:
                 placeholders = ",".join("?" for _ in list_ids)
-                data["shared_list_items"] = [dict(row) for row in db.execute(f"SELECT * FROM shared_list_items WHERE list_id IN ({placeholders})", list_ids).fetchall()]
+                data["shared_list_items"] = [dict(row) for row in db.execute(f"SELECT * FROM shared_list_items WHERE list_id IN ({placeholders}) AND deleted_at IS NULL", list_ids).fetchall()]
+                data["wishlist_claims"] = [dict(row) for row in db.execute(
+                    f"""SELECT c.id,c.item_id,c.claimant_id,c.status,c.reveal_claimant,c.version,
+                               c.created_at,c.updated_at,c.ended_at
+                    FROM wishlist_claims c JOIN shared_list_items i ON i.id=c.item_id
+                    WHERE i.list_id IN ({placeholders}) AND c.claimant_id=?""",
+                    (*list_ids, user_id),
+                ).fetchall()]
+            else:
+                data["wishlist_claims"] = []
             date_plan_ids = [row["id"] for row in data["date_plans"]]
             for table in ("date_plan_variants", "date_plan_confirmations"):
                 data[table] = []
@@ -2040,21 +2600,185 @@ class PhaseThreeMixin:
                 data["date_plan_variants"] = [dict(row) for row in db.execute(f"SELECT * FROM date_plan_variants WHERE date_plan_id IN ({placeholders})", date_plan_ids).fetchall()]
                 data["date_plan_confirmations"] = [dict(row) for row in db.execute(f"SELECT * FROM date_plan_confirmations WHERE date_plan_id IN ({placeholders})", date_plan_ids).fetchall()]
                 data["date_plan_votes"] = [dict(row) for row in db.execute(f"SELECT * FROM date_plan_votes WHERE date_plan_id IN ({placeholders}) AND (user_id=? OR revealed=1)", (*date_plan_ids, user_id)).fetchall()]
-            data["ui_manifests"] = [dict(row) for row in db.execute("SELECT * FROM ui_manifests WHERE couple_id=? AND (user_id IS NULL OR user_id=?)", (couple["id"], user_id)).fetchall()]
-            data["ui_generation_jobs"] = [dict(row) for row in db.execute("SELECT * FROM ui_generation_jobs WHERE couple_id=? AND user_id=?", (couple["id"], user_id)).fetchall()]
-            data["ui_action_drafts"] = [dict(row) for row in db.execute("SELECT * FROM ui_action_drafts WHERE couple_id=? AND creator_id=?", (couple["id"], user_id)).fetchall()]
-            data["ai_context_grants"] = [dict(row) for row in db.execute("SELECT * FROM ai_context_grants WHERE couple_id=? AND user_id=?", (couple["id"], user_id)).fetchall()]
+
+            decision_rows = db.execute(
+                "SELECT * FROM decisions WHERE couple_id=? AND deleted_at IS NULL ORDER BY created_at,id",
+                (couple["id"],),
+            ).fetchall()
+            data["decisions"] = self._serialize_decision_rows(
+                db, decision_rows, user_id, couple=couple, partner_id=partner_id,
+            )
+            decision_ids = [str(row["id"]) for row in decision_rows]
+            data["decision_options"], data["decision_votes"], data["decision_confirmations"] = [], [], []
+            if decision_ids:
+                placeholders = ",".join("?" for _ in decision_ids)
+                data["decision_options"] = [dict(row) for row in db.execute(
+                    f"SELECT decision_id,id,label,position FROM decision_options WHERE decision_id IN ({placeholders}) ORDER BY decision_id,position",
+                    decision_ids,
+                ).fetchall()]
+                revealed_ids = {
+                    str(row["id"]) for row in decision_rows
+                    if self._effective_decision_status(row) in {
+                        "revealed", "pending_confirmation", "confirmed", "converted",
+                    }
+                }
+                vote_rows = db.execute(
+                    f"""SELECT v.decision_id,v.user_id,v.option_id,v.voting_round,
+                                v.submitted_at,v.version
+                         FROM decision_votes v JOIN decisions d ON d.id=v.decision_id
+                         WHERE v.decision_id IN ({placeholders}) AND v.voting_round=d.voting_round
+                         ORDER BY v.decision_id,v.user_id,v.option_id""",
+                    decision_ids,
+                ).fetchall()
+                data["decision_votes"] = [
+                    dict(row) for row in vote_rows
+                    if str(row["decision_id"]) in revealed_ids or str(row["user_id"]) == user_id
+                ]
+                data["decision_confirmations"] = [dict(row) for row in db.execute(
+                    f"SELECT * FROM decision_confirmations WHERE decision_id IN ({placeholders}) ORDER BY decision_id,user_id",
+                    decision_ids,
+                ).fetchall()]
+
+            data["food_profiles"] = self._food_profiles_in_connection(db, couple["id"])
+            data["pantry_items"] = self._pantry_snapshot_in_connection(db, couple["id"])
+            data["shopping_category_preferences"] = [dict(row) for row in db.execute(
+                "SELECT * FROM shopping_category_preferences WHERE couple_id=? ORDER BY position,category",
+                (couple["id"],),
+            ).fetchall()]
+            data["weekly_meal_plan_drafts"] = [
+                self._weekly_draft_dict(row) for row in db.execute(
+                    "SELECT * FROM weekly_meal_plan_drafts WHERE couple_id=? ORDER BY created_at,id",
+                    (couple["id"],),
+                ).fetchall()
+            ]
+            substitution_rows = db.execute(
+                """SELECT * FROM ingredient_substitutions
+                   WHERE couple_id=? AND creator_id=? ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall()
+            data["ingredient_substitutions"] = [
+                self._substitution_public_item(db, row) for row in substitution_rows
+            ]
+
+            plan_rows = db.execute(
+                """SELECT * FROM life_assistant_plans
+                   WHERE couple_id=? AND (creator_id=? OR status='applied')
+                   ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall()
+            data["life_assistant_plans"] = [{
+                "id": row["id"], "creator_id": row["creator_id"], "title": row["title"],
+                "summary": row["summary"], "status": row["status"], "version": int(row["version"]),
+                "source": row["source"], "expires_at": row["expires_at"],
+                "created_at": row["created_at"], "updated_at": row["updated_at"],
+                "applied_at": row["applied_at"],
+            } for row in plan_rows]
+            plan_ids = [str(row["id"]) for row in plan_rows]
+            data["life_assistant_plan_items"], data["life_assistant_confirmations"] = [], []
+            if plan_ids:
+                placeholders = ",".join("?" for _ in plan_ids)
+                data["life_assistant_plan_items"] = [dict(row) for row in db.execute(
+                    f"SELECT id,plan_id,item_type,preview_json,position FROM life_assistant_plan_items WHERE plan_id IN ({placeholders}) ORDER BY plan_id,position",
+                    plan_ids,
+                ).fetchall()]
+                data["life_assistant_confirmations"] = [dict(row) for row in db.execute(
+                    f"SELECT * FROM life_assistant_confirmations WHERE plan_id IN ({placeholders}) ORDER BY plan_id,user_id",
+                    plan_ids,
+                ).fetchall()]
+            data["life_assistant_jobs"] = [dict(row) for row in db.execute(
+                """SELECT id,creator_id,status,result_plan_id,error_code,created_at,completed_at
+                   FROM life_assistant_jobs WHERE couple_id=? AND creator_id=? ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["ui_manifests"] = [dict(row) for row in db.execute(
+                """SELECT id,user_id,surface,context_version,schema_version,manifest_json,
+                          source,expires_at,created_at
+                   FROM ui_manifests WHERE couple_id=? AND (user_id IS NULL OR user_id=?)""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["ui_generation_jobs"] = [dict(row) for row in db.execute(
+                """SELECT id,surface,status,result_manifest_id,error_code,retry_count,
+                          created_at,completed_at
+                   FROM ui_generation_jobs WHERE couple_id=? AND user_id=?""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["ui_action_drafts"] = [dict(row) for row in db.execute(
+                """SELECT id,action_type,payload_json,preview_json,expected_versions_json,
+                          status,result_json,expires_at,created_at,confirmed_at
+                   FROM ui_action_drafts WHERE couple_id=? AND creator_id=?""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["ai_context_grants"] = [dict(row) for row in db.execute(
+                """
+                SELECT id,surface,resource_type,resource_id,purpose,expires_at,created_at,
+                       revoked_at,last_used_at,usage_scope,version
+                FROM ai_context_grants WHERE couple_id=? AND user_id=?
+                """,
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["ai_usage_summary"] = [dict(row) for row in db.execute(
+                """
+                SELECT feature,status,COUNT(*) AS calls,
+                       SUM(input_tokens) AS known_input_tokens,
+                       SUM(output_tokens) AS known_output_tokens,
+                       SUM(CASE WHEN estimated_cost IS NOT NULL THEN estimated_cost ELSE 0 END) AS known_cost,
+                       SUM(CASE WHEN estimated_cost IS NULL THEN 1 ELSE 0 END) AS unknown_cost_calls
+                FROM ai_usage_events WHERE couple_id=? AND user_id=?
+                GROUP BY feature,status ORDER BY feature,status
+                """,
+                (couple["id"], user_id),
+            ).fetchall()]
+            data.update(
+                self.export_foundation_lifecycle_rows(
+                    db, couple_id=couple["id"], user_id=user_id
+                )
+            )
+            data["export_exclusions"] = {
+                table: str(policy["reason"])
+                for table, policy in ACCOUNT_EXPORT_POLICIES.items()
+                if policy["strategy"] == "operational_excluded"
+            }
+            data["export_exclusions"].update({
+                "ai_usage_events": "仅导出本人聚合用量，不导出逐次运营记录。",
+                "external_api_usage": "外部接口额度属于整套服务的运营数据，不是任何单个账号的个人数据。",
+                "route_cache": "路线缓存可能由双方或系统复用，仅导出已确认地点与行程，不导出原始缓存响应。",
+                "recipe_provider_cache": "第三方菜谱缓存不属于账号内容，已导出的菜谱仍包含可携带字段。",
+                "schema_migrations": "数据库迁移历史属于服务实现；导出格式版本记录在清单中。",
+            })
             data["widget_snapshots"] = [dict(row) for row in db.execute("SELECT * FROM widget_snapshots WHERE user_id=?", (user_id,)).fetchall()]
             data["recipes"] = [dict(row) for row in db.execute(
                 "SELECT * FROM recipes WHERE deleted_at IS NULL AND ((couple_id=? AND visibility='couple') OR (owner_id=? AND visibility='private'))",
                 (couple["id"], user_id),
             ).fetchall()]
             recipe_ids = [row["id"] for row in data["recipes"]]
-            data["recipe_ingredients"], data["recipe_steps"] = [], []
+            data["recipe_dishes"], data["recipe_ingredients"], data["recipe_steps"] = [], [], []
+            data["recipe_media"], data["recipe_media_checks"] = [], []
             if recipe_ids:
                 placeholders = ",".join("?" for _ in recipe_ids)
+                dish_ids = [str(row["dish_id"]) for row in data["recipes"] if row.get("dish_id")]
+                if dish_ids:
+                    dish_placeholders = ",".join("?" for _ in dish_ids)
+                    data["recipe_dishes"] = [dict(row) for row in db.execute(
+                        f"""SELECT * FROM recipe_dishes WHERE id IN ({dish_placeholders})
+                             AND (visibility='system' OR couple_id=? OR owner_id=?)""",
+                        (*dish_ids, couple["id"], user_id),
+                    ).fetchall()]
                 data["recipe_ingredients"] = [dict(row) for row in db.execute(f"SELECT * FROM recipe_ingredients WHERE recipe_id IN ({placeholders})", recipe_ids).fetchall()]
                 data["recipe_steps"] = [dict(row) for row in db.execute(f"SELECT * FROM recipe_steps WHERE recipe_id IN ({placeholders})", recipe_ids).fetchall()]
+                media = db.execute(
+                    f"SELECT * FROM recipe_media WHERE recipe_id IN ({placeholders}) ORDER BY recipe_id,created_at,id",
+                    recipe_ids,
+                ).fetchall()
+                data["recipe_media"] = [dict(row) for row in media]
+                media_ids = [str(row["id"]) for row in media]
+                if media_ids:
+                    media_placeholders = ",".join("?" for _ in media_ids)
+                    data["recipe_media_checks"] = [dict(row) for row in db.execute(
+                        f"""SELECT id,media_id,checked_at,ok,status_code
+                             FROM recipe_media_checks WHERE media_id IN ({media_placeholders})
+                             ORDER BY media_id,checked_at,id""",
+                        media_ids,
+                    ).fetchall()]
             shopping_ids = [row["id"] for row in data["shopping_lists"]]
             data["shopping_list_items"], data["shopping_item_sources"] = [], []
             if shopping_ids:
@@ -2065,12 +2789,100 @@ class PhaseThreeMixin:
                     item_placeholders = ",".join("?" for _ in shopping_item_ids)
                     data["shopping_item_sources"] = [dict(row) for row in db.execute(f"SELECT * FROM shopping_item_sources WHERE shopping_item_id IN ({item_placeholders})", shopping_item_ids).fetchall()]
             data["recipe_drafts"] = [dict(row) for row in db.execute("SELECT * FROM recipe_drafts WHERE couple_id=? AND creator_id=?", (couple["id"], user_id)).fetchall()]
-            data["recipe_generation_jobs"] = [dict(row) for row in db.execute("SELECT * FROM recipe_generation_jobs WHERE couple_id=? AND user_id=?", (couple["id"], user_id)).fetchall()]
-            call_ids = [row["id"] for row in data["call_records"]]
-            data["call_signals"] = []
-            if call_ids:
-                placeholders = ",".join("?" for _ in call_ids)
-                data["call_signals"] = [dict(row) for row in db.execute(f"SELECT * FROM call_signals WHERE call_id IN ({placeholders})", call_ids).fetchall()]
+            data["recipe_generation_jobs"] = [dict(row) for row in db.execute(
+                """SELECT id,job_type,provider,status,result_draft_id,error_code,
+                          created_at,completed_at
+                   FROM recipe_generation_jobs WHERE couple_id=? AND user_id=?""",
+                (couple["id"], user_id),
+            ).fetchall()]
+            data["cook_sessions"] = [dict(row) for row in db.execute(
+                "SELECT * FROM cook_sessions WHERE couple_id=? AND (visibility='shared' OR creator_id=?) ORDER BY started_at,id",
+                (couple["id"], user_id),
+            ).fetchall()]
+            cook_ids = [row["id"] for row in data["cook_sessions"]]
+            data["cook_timers"] = []
+            if cook_ids:
+                placeholders = ",".join("?" for _ in cook_ids)
+                data["cook_timers"] = [dict(row) for row in db.execute(
+                    f"SELECT * FROM cook_timers WHERE session_id IN ({placeholders}) ORDER BY started_at,id", cook_ids,
+                ).fetchall()]
+
+            data["memory_completion_suggestions"] = []
+            for row in db.execute(
+                """SELECT * FROM memory_completion_suggestions
+                   WHERE couple_id=? AND user_id=? ORDER BY created_at,id""",
+                (couple["id"], user_id),
+            ).fetchall():
+                resource_type = "moment" if row["moment_id"] else "trip"
+                resource_id = str(row["moment_id"] or row["trip_id"])
+                try:
+                    self._visible_memory_parent(db, resource_type, resource_id, user_id)
+                except KeyError:
+                    continue
+                data["memory_completion_suggestions"].append(
+                    self._public_completion_suggestion(row, resource_type, resource_id)
+                )
+
+            visible_media_ids = {str(row["id"]) for row in media_rows}
+            visible_recipe_ids = {str(row["id"]) for row in data["recipes"]}
+            visible_calendar_ids = {str(row["id"]) for row in data["calendar_entries"]}
+            visible_list_item_ids = {str(row["id"]) for row in data["shared_list_items"]}
+            visible_trip_ids = {str(row["id"]) for row in data["trips"]}
+            visible_moment_id_set = set(visible_moment_ids)
+            data["memory_provenance"] = []
+            for row in db.execute(
+                "SELECT * FROM memory_provenance WHERE couple_id=? ORDER BY created_at,id",
+                (couple["id"],),
+            ).fetchall():
+                refs = {
+                    "moment_id": visible_moment_id_set,
+                    "media_id": visible_media_ids,
+                    "trip_id": visible_trip_ids,
+                    "recipe_id": visible_recipe_ids,
+                    "calendar_entry_id": visible_calendar_ids,
+                    "shared_list_item_id": visible_list_item_ids,
+                }
+                if not any(row[column] and str(row[column]) in allowed for column, allowed in refs.items()):
+                    continue
+                data["memory_provenance"].append({
+                    "id": row["id"], "owner_id": row["owner_id"],
+                    "moment_id": row["moment_id"], "media_id": row["media_id"],
+                    "trip_id": row["trip_id"], "recipe_id": row["recipe_id"],
+                    "calendar_entry_id": row["calendar_entry_id"],
+                    "shared_list_item_id": row["shared_list_item_id"],
+                    "source_type": row["source_type"], "date_source": row["date_source"],
+                    "version": int(row["version"]), "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                })
+
+            ingredient_ids = {
+                str(item["ingredient_id"]) for item in data["pantry_items"] if item.get("ingredient_id")
+            }
+            for profile in data["food_profiles"]:
+                ingredient_ids.update(
+                    str(item["ingredient_id"]) for item in profile.get("avoidances", [])
+                    if item.get("ingredient_id")
+                )
+            for row in substitution_rows:
+                ingredient_ids.update((str(row["from_ingredient_id"]), str(row["to_ingredient_id"])))
+            couple_ingredients = db.execute(
+                "SELECT * FROM ingredient_catalog WHERE couple_id=? ORDER BY canonical_name,id",
+                (couple["id"],),
+            ).fetchall()
+            ingredient_ids.update(str(row["id"]) for row in couple_ingredients)
+            data["ingredient_catalog"] = []
+            if ingredient_ids:
+                placeholders = ",".join("?" for _ in ingredient_ids)
+                data["ingredient_catalog"] = [dict(row) for row in db.execute(
+                    f"""SELECT * FROM ingredient_catalog WHERE id IN ({placeholders})
+                         AND (couple_id IS NULL OR couple_id=?) ORDER BY canonical_name,id""",
+                    (*sorted(ingredient_ids), couple["id"]),
+                ).fetchall()]
+        dataset_counts = {
+            key: len(value)
+            for key, value in sorted(data.items())
+            if isinstance(value, list)
+        }
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("README.txt", "恋屿账号数据导出\n包含当前账号有权访问的共同数据、本人私密数据和媒体文件。\n不包含密码、会话令牌或伴侣的私密内容。\n")
@@ -2087,6 +2899,24 @@ class PhaseThreeMixin:
                     archive.writestr(f"media/{row['id']}-{safe_name}", content)
                 except (KeyError, RuntimeError, OSError):
                     missing.append(row["id"])
-            archive.writestr("media-status.json", json.dumps({"missing": missing}, ensure_ascii=False, indent=2))
-            archive.writestr("manifest.json", json.dumps({"schema_version": 1, "exported_at": data["exported_at"], "data_file": "data.json", "media_count": len(media_rows), "missing_media": missing, "privacy": "包含双方共享内容、本人私密内容，以及按产品解锁规则当前可见的双人回答。"}, ensure_ascii=False, indent=2))
+            included_media_count = len(media_rows) - len(missing)
+            archive.writestr("media-status.json", json.dumps({
+                "authorized_media_count": len(media_rows),
+                "included_media_count": included_media_count,
+                "missing_media_count": len(missing),
+                "missing": missing,
+            }, ensure_ascii=False, indent=2))
+            archive.writestr("manifest.json", json.dumps({
+                "schema_version": 2,
+                "export_policy_version": ACCOUNT_EXPORT_POLICY_VERSION,
+                "export_policy_coverage": policy_status,
+                "exported_at": data["exported_at"],
+                "data_file": "data.json",
+                "dataset_counts": dataset_counts,
+                "media_count": len(media_rows),
+                "included_media_count": included_media_count,
+                "missing_media_count": len(missing),
+                "missing_media": missing,
+                "privacy": "包含双方共享内容、本人私密内容，以及按产品解锁规则当前可见的双人回答。",
+            }, ensure_ascii=False, indent=2))
         return stream.getvalue(), f"love-moments-export-{date.today().isoformat()}.zip"

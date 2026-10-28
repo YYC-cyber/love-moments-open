@@ -36,6 +36,14 @@ def _checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _ignore_ephemeral_album_exports(directory: str, names: list[str]) -> set[str]:
+    path = Path(directory)
+    ignored = {name for name in names if name in {".media-access-key", ".web-push-vapid-private.pem"}}
+    if path.name == "temp" and "album_exports" in names:
+        ignored.add("album_exports")
+    return ignored
+
+
 def create_backup(
     output_root: Path | None = None,
     database_path: Path | None = None,
@@ -79,7 +87,7 @@ def create_backup(
         media_objects = []
         media_copy = working / "media"
         if media.is_dir():
-            shutil.copytree(media, media_copy)
+            shutil.copytree(media, media_copy, ignore=_ignore_ephemeral_album_exports)
             for path in media_copy.rglob("*"):
                 if path.is_dir():
                     _private(path, 0o700)
@@ -103,6 +111,8 @@ def create_backup(
             "media_bytes": media_bytes,
             "media_objects": media_objects,
             "includes_env": False,
+            "service_secrets_included": False,
+            "ephemeral_album_exports_included": False,
         }
         manifest_path = working / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -16,6 +16,12 @@ RESOURCE_TYPES = frozenset({
     "wishlist_item", "calendar_entry", "preference", "date_plan",
 })
 
+SOURCE_LABELS = {
+    "human": "真人填写", "real_api": "真实接口", "rules": "规则推导",
+    "ai": "AI 建议", "mock": "模拟数据", "cache": "历史缓存",
+    "legacy_unknown": "来源未记录",
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -57,12 +63,14 @@ class SharedContentMixin:
             raise ValueError("不支持查看这种共同内容")
 
         if resource_type == "moment":
+            self._reconcile_delayed_moments(db)
             row = db.execute(
                 """SELECT m.*,u.nickname AS creator_name FROM moments m
                 JOIN users u ON u.id=m.creator_id
+                JOIN couples c ON c.id=m.couple_id AND c.status='active'
                 WHERE m.id=? AND m.couple_id=? AND m.deleted_at IS NULL AND m.purged_at IS NULL
-                  AND (m.visibility='shared' OR (m.visibility='delayed' AND m.reveal_at<=?))""",
-                (resource_id, couple_id, _now()),
+                  AND m.visibility='shared'""",
+                (resource_id, couple_id),
             ).fetchone()
             if row:
                 fields = [
@@ -73,7 +81,8 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id,
                     "kind_label": "恋爱瞬间", "title": row["title"], "summary": row["body"],
                     "fields": [item for item in fields if item], "version": row["version"],
-                    "media_url": row["media_url"] or "",
+                    "media_url": row["media_url"] or "", "moment_type": row["type"],
+                    "source_type": "human", "fact_sensitive": False,
                 }
 
         elif resource_type == "trip":
@@ -91,11 +100,13 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": "共同旅行",
                     "title": row["title"], "summary": f"从 {row['departure_city'] or '待确认'} 出发，{row['travelers']} 人同行。",
                     "fields": [item for item in fields if item], "version": row["version"],
+                    "source_type": "human", "fact_sensitive": False,
                 }
 
         elif resource_type == "itinerary_item":
             row = db.execute(
-                """SELECT i.*,d.day_number,d.date,d.title AS day_title,v.name AS variant_name,t.title AS trip_title
+                """SELECT i.*,d.day_number,d.date,d.title AS day_title,v.name AS variant_name,
+                           v.generation_source,t.title AS trip_title
                 FROM itinerary_items i JOIN trip_days d ON d.id=i.day_id
                 JOIN plan_variants v ON v.id=d.variant_id JOIN trips t ON t.id=v.trip_id
                 WHERE i.id=? AND t.couple_id=? AND t.deleted_at IS NULL""",
@@ -114,6 +125,11 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": "共同旅行行程",
                     "title": row["title"], "summary": row["note"],
                     "fields": [item for item in fields if item], "version": row["version"],
+                    "source_type": {
+                        "ai": "ai", "rules": "rules", "mock": "mock", "cache": "cache",
+                    }.get(str(row["generation_source"]), "legacy_unknown"),
+                    "source_checked_at": str(details.get("evidence_at") or details.get("fetched_at") or ""),
+                    "fact_sensitive": True,
                 }
 
         elif resource_type == "meal_wish":
@@ -133,6 +149,7 @@ class SharedContentMixin:
                     "title": row["title"], "summary": row["note"],
                     "fields": [item for item in fields if item], "version": row["version"],
                     "recipe_id": row["recipe_id"] or "",
+                    "source_type": "human", "fact_sensitive": False,
                 }
 
         elif resource_type == "meal_item":
@@ -153,13 +170,14 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": "共同菜单",
                     "title": name, "summary": row["note"], "fields": [item for item in fields if item],
                     "version": row["version"], "recipe_id": row["recipe_id"] or "",
+                    "source_type": "human", "fact_sensitive": False,
                 }
 
         elif resource_type == "wishlist_item":
             row = db.execute(
                 """SELECT i.*,u.nickname AS creator_name,l.title AS list_title FROM shared_list_items i
                 JOIN shared_lists l ON l.id=i.list_id JOIN users u ON u.id=i.creator_id
-                WHERE i.id=? AND l.couple_id=?""",
+                WHERE i.id=? AND l.couple_id=? AND i.deleted_at IS NULL""",
                 (resource_id, couple_id),
             ).fetchone()
             if row:
@@ -168,11 +186,21 @@ class SharedContentMixin:
                     _field("状态", "已完成" if row["completed_at"] else "待完成"),
                     _field("完成时间", row["completed_at"]),
                 ]
-                return {
+                result = {
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": row["list_title"],
                     "title": row["text"], "summary": row["note"], "fields": [item for item in fields if item],
                     "version": row["version"],
+                    "source_type": "human", "fact_sensitive": False,
                 }
+                revealed = db.execute(
+                    """SELECT u.nickname FROM wishlist_claims c JOIN users u ON u.id=c.claimant_id
+                    WHERE c.item_id=? AND c.status='completed' AND c.reveal_claimant=1""",
+                    (resource_id,),
+                ).fetchone()
+                if revealed:
+                    result["revealed"] = True
+                    result["claimant_name"] = str(revealed["nickname"])
+                return result
 
         elif resource_type == "calendar_entry":
             row = db.execute(
@@ -192,6 +220,7 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": label,
                     "title": row["title"], "summary": row["note"], "fields": [item for item in fields if item],
                     "version": row["version"],
+                    "source_type": str(row["source_type"] or "legacy_unknown"), "fact_sensitive": False,
                 }
 
         elif resource_type == "preference":
@@ -211,6 +240,7 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": "对方偏好",
                     "title": row["label"], "summary": row["note"], "fields": [item for item in fields if item],
                     "version": row["version"],
+                    "source_type": "human", "fact_sensitive": False,
                 }
 
         elif resource_type == "date_plan":
@@ -227,6 +257,7 @@ class SharedContentMixin:
                     "resource_type": resource_type, "resource_id": resource_id, "kind_label": "共同约会",
                     "title": row["title"], "summary": "双方可以在这里讨论方案和当天安排。",
                     "fields": [item for item in fields if item], "version": row["version"],
+                    "source_type": "legacy_unknown", "fact_sensitive": True,
                 }
 
         raise KeyError("这条共同内容不存在或当前不可见")
@@ -235,6 +266,13 @@ class SharedContentMixin:
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             resource = self._shared_resource(db, couple["id"], resource_type, resource_id)
+            resource["visibility"] = "shared"
+            resource["visibility_label"] = "双方可见"
+            source_type = str(resource.get("source_type") or "legacy_unknown")
+            if source_type not in SOURCE_LABELS:
+                source_type = "legacy_unknown"
+                resource["source_type"] = source_type
+            resource["source_label"] = SOURCE_LABELS[source_type]
             rows = db.execute(
                 """SELECT c.*,u.nickname AS author_name,u.avatar_label FROM shared_comments c
                 JOIN users u ON u.id=c.author_id

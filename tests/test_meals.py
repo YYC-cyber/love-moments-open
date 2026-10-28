@@ -431,9 +431,9 @@ class MealRecipeTests(unittest.TestCase):
         shopping = self.store.apply_shopping_preview({"preview_id": preview["preview_id"], "idempotency_key": uuid.uuid4().hex}, DEMO_USER)
         self.assertGreater(len(shopping["items"]), 0)
         locked = shopping["items"][0]
-        locked = self.store.update_shopping_item(locked["id"], {"quantity": 9, "unit": "个", "category": "临时分类", "expected_version": locked["version"]}, DEMO_USER)
+        locked = self.store.update_shopping_item(locked["id"], {"quantity": 9, "unit": "个", "category": "other", "expected_version": locked["version"]}, DEMO_USER)
         self.assertTrue(locked["manual_locked"])
-        self.assertEqual(locked["category"], "临时分类")
+        self.assertEqual((locked["category_key"], locked["category_label"]), ("other", "其他"))
         checked = self.store.update_shopping_item(locked["id"], {"checked": True, "expected_version": locked["version"]}, DEMO_PARTNER)
         self.assertTrue(checked["checked"])
         locked = checked

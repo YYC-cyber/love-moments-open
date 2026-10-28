@@ -9,10 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Callable, Protocol
-from urllib import request
+from typing import Callable, Iterator, Protocol
+from urllib import error as urlerror, request
 from zoneinfo import ZoneInfo
 
 from .http_client import TRUSTED_SSL_CONTEXT
@@ -38,6 +42,35 @@ WEEKDAYS = {
     "日": 6,
     "天": 6,
 }
+
+
+_usage_observer: ContextVar[Callable[[dict[str, object]], None] | None] = ContextVar(
+    "life_assistant_usage_observer", default=None
+)
+
+
+@contextmanager
+def life_assistant_usage_scope(
+    observer: Callable[[dict[str, object]], None],
+) -> Iterator[None]:
+    """Attach request-local telemetry without mutating the shared provider."""
+    token = _usage_observer.set(observer)
+    try:
+        yield
+    finally:
+        _usage_observer.reset(token)
+
+
+def _emit_usage(value: dict[str, object]) -> None:
+    observer = _usage_observer.get()
+    if observer is None:
+        return
+    try:
+        observer(value)
+    except Exception:
+        # Usage evidence must never change the assistant's user-facing
+        # fallback/success behavior.  Operational health catches DB failures.
+        return
 
 
 @dataclass(frozen=True)
@@ -269,6 +302,24 @@ class OpenAICompatibleLifeAssistant:
         try:
             if self.before_request:
                 self.before_request("life assistant intent")
+        except Exception:
+            _emit_usage(
+                {
+                    "provider": "openai-compatible", "model": self.model,
+                    "status": "rejected", "request_sent": False,
+                    "failure_code": "preflight_rejected",
+                }
+            )
+            return self.fallback.parse(text, timezone_name=timezone_name)
+        started = time.monotonic()
+        _emit_usage(
+            {
+                "provider": "openai-compatible", "model": self.model,
+                "status": "started", "request_sent": True,
+            }
+        )
+        usage: dict[str, object] = {}
+        try:
             req = request.Request(
                 f"{self.base_url}/chat/completions",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -282,9 +333,47 @@ class OpenAICompatibleLifeAssistant:
                 req, timeout=self.timeout, context=TRUSTED_SSL_CONTEXT
             ) as response:  # noqa: S310 - configured OpenAI-compatible endpoint
                 raw = json.loads(response.read().decode("utf-8"))
+            raw_usage = raw.get("usage") if isinstance(raw, dict) else None
+            usage = raw_usage if isinstance(raw_usage, dict) else {}
             content = raw["choices"][0]["message"]["content"]
-            return LifeIntent.from_dict(json.loads(content))
-        except Exception:
+            parsed = LifeIntent.from_dict(json.loads(content))
+            _emit_usage(
+                {
+                    "provider": "openai-compatible", "model": self.model,
+                    "status": "succeeded", "request_sent": True,
+                    "latency_ms": max(0, int((time.monotonic() - started) * 1000)),
+                    "input_tokens": usage.get("prompt_tokens"),
+                    "output_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                }
+            )
+            return parsed
+        except Exception as exc:
+            reason = exc.reason if isinstance(exc, urlerror.URLError) else None
+            timed_out = isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
+                reason, (TimeoutError, socket.timeout)
+            )
+            if timed_out:
+                status, failure_code = "timeout", "transport_timeout"
+            elif isinstance(exc, urlerror.HTTPError):
+                status, failure_code = "failed", "http_error"
+            elif isinstance(exc, json.JSONDecodeError):
+                status, failure_code = "failed", "invalid_json"
+            elif isinstance(exc, (KeyError, TypeError, ValueError)):
+                status, failure_code = "failed", "invalid_intent"
+            else:
+                status, failure_code = "failed", "transport_error"
+            _emit_usage(
+                {
+                    "provider": "openai-compatible", "model": self.model,
+                    "status": status, "request_sent": True,
+                    "latency_ms": max(0, int((time.monotonic() - started) * 1000)),
+                    "input_tokens": usage.get("prompt_tokens"),
+                    "output_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                    "failure_code": failure_code,
+                }
+            )
             return self.fallback.parse(text, timezone_name=timezone_name)
 
 

@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from love_moments import LoveMomentsStore
 from love_moments.admin import AdminService
-from love_moments.schema import SCHEMA_VERSION
-from love_moments.store import DEMO_PARTNER, DEMO_USER
+from love_moments.schema import ACCOUNT_EXPORT_POLICIES, REQUIRED_TABLES_V34, SCHEMA_VERSION
+from love_moments.store import DEMO_COUPLE, DEMO_PARTNER, DEMO_USER
 
 
 class AdminServiceTests(unittest.TestCase):
@@ -63,6 +63,11 @@ class AdminServiceTests(unittest.TestCase):
         public_url = next(item for item in overview["checks"] if item["id"] == "public_url")
         self.assertEqual(public_url["status"], "warning")
         self.assertIn("手机流量验证", public_url["message"])
+        vault = overview["data_vault"]
+        self.assertEqual(vault["account_export_policy"]["covered"], len(REQUIRED_TABLES_V34))
+        self.assertEqual(vault["account_export_policy"]["required"], len(REQUIRED_TABLES_V34))
+        self.assertEqual(set(ACCOUNT_EXPORT_POLICIES), REQUIRED_TABLES_V34)
+        self.assertNotIn(str(self.store.db_path), encoded)
 
     def test_backup_is_private_and_database_is_valid(self) -> None:
         result = self.admin.create_backup(DEMO_USER)
@@ -75,6 +80,24 @@ class AdminServiceTests(unittest.TestCase):
             self.assertEqual((destination / "love_moments.db").stat().st_mode & 0o777, 0o600)
         verified = self.admin.verify_backup(result["backup"], DEMO_USER)
         self.assertTrue(verified["verification"]["ok"])
+        self.assertTrue(verified["verification"]["schema_inventory"]["ok"])
+        overview = self.admin.overview(True)
+        vault = overview["data_vault"]
+        self.assertTrue(vault["latest_backup"]["verified"])
+        self.assertTrue(vault["latest_backup"]["checksum_ok"])
+        self.assertEqual(next(item for item in overview["checks"] if item["id"] == "data_vault")["status"], "ok")
+
+    def test_admin_health_uses_observed_schema_and_detects_missing_required_table(self) -> None:
+        overview = self.admin.overview(True)
+        self.assertEqual(overview["runtime"]["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(overview["runtime"]["expected_schema_version"], SCHEMA_VERSION)
+        self.assertTrue(overview["runtime"]["schema_inventory"]["ok"])
+        with self.store.connection() as db:
+            db.execute("DROP TABLE ai_usage_events")
+        broken = self.admin.overview(True)
+        self.assertIn("ai_usage_events", broken["runtime"]["schema_inventory"]["missing_tables"])
+        database = next(item for item in broken["checks"] if item["id"] == "database")
+        self.assertEqual(database["status"], "critical")
 
     def test_storage_growth_and_orphan_file_are_reported(self) -> None:
         first = self.admin.overview(True)
@@ -106,6 +129,78 @@ class AdminServiceTests(unittest.TestCase):
             event = db.execute("SELECT resolved_at,resolved_by FROM system_events WHERE event_key='media:orphan'").fetchone()
         self.assertIsNotNone(event["resolved_at"])
         self.assertIsNone(event["resolved_by"])
+
+    def test_running_album_work_file_is_not_missing_or_orphan_media(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        job_id = "album-running-integrity-00000000001"
+        work_file = self.store.album_export_root / f"{job_id}.tmp"
+        with self.store.connection() as db:
+            db.execute(
+                """INSERT INTO album_export_jobs(
+                       id,couple_id,creator_id,template,year,audience,selection_json,
+                       expected_versions_json,status,version,expires_at,created_at,updated_at
+                   ) VALUES (?,?,?,'year',2026,'personal','[]','{}','running',1,?,?,?)""",
+                (
+                    job_id, DEMO_COUPLE, DEMO_USER,
+                    (now + timedelta(hours=1)).isoformat(), now.isoformat(), now.isoformat(),
+                ),
+            )
+
+        absent = self.admin.overview(True)["storage"]["integrity"]
+
+        self.assertEqual(absent["missing_files"], 0)
+        self.assertEqual(absent["orphan_files"], 0)
+
+        work_file.write_bytes(b"working")
+        integrity = self.admin.overview(True)["storage"]["integrity"]
+
+        self.assertEqual(integrity["missing_files"], 0)
+        self.assertEqual(integrity["orphan_files"], 0)
+        self.assertEqual(integrity["album_exports"]["active"], 1)
+
+    def test_album_storage_metrics_revalidate_current_download_authority(self) -> None:
+        occurred_at = "2026-05-01T08:00:00+00:00"
+        with self.store.connection() as db:
+            db.execute("DELETE FROM moments")
+            db.execute(
+                """INSERT INTO moments(
+                       id,couple_id,creator_id,type,title,body,occurred_at,visibility,version
+                   ) VALUES ('album-admin-visible',?,?, 'photo','可打印','正文',?,'shared',1)""",
+                (DEMO_COUPLE, DEMO_USER, occurred_at),
+            )
+            db.execute(
+                """INSERT INTO memory_provenance(
+                       id,couple_id,owner_id,moment_id,source_type,date_source,
+                       evidence_json,version,created_at,updated_at
+                   ) VALUES ('album-admin-provenance',?,?,?,'human','user_confirmed','{}',1,?,?)""",
+                (DEMO_COUPLE, DEMO_USER, "album-admin-visible", occurred_at, occurred_at),
+            )
+        job = self.store.create_album_export_job(
+            {
+                "template": "year", "year": 2026, "audience": "shared",
+                "selection": [{"resource_type": "moment", "resource_id": "album-admin-visible"}],
+                "expected_versions": {"moment:album-admin-visible": 1},
+            },
+            DEMO_USER,
+            "album-admin-metrics-job",
+        )
+        completed = self.store.run_album_export_job(self.store.claim_album_export_job())
+        self.assertEqual(completed["status"], "completed")
+        before = self.admin.overview(True)["storage"]["integrity"]["album_exports"]
+        self.assertEqual(before["active"], 1)
+        self.assertGreater(before["downloadable_bytes"], 0)
+
+        with self.store.connection() as db:
+            db.execute(
+                "UPDATE moments SET visibility='private',version=version+1 WHERE id='album-admin-visible'"
+            )
+
+        after_permission_change = self.admin.overview(True)["storage"]["integrity"]["album_exports"]
+        self.assertEqual(after_permission_change["active"], 0)
+        self.assertEqual(after_permission_change["downloadable_bytes"], 0)
+        self.assertEqual(after_permission_change["stored_count"], 1)
+        with self.assertRaises(KeyError):
+            self.store.get_album_export_download(job["id"], DEMO_USER)
 
     def test_historical_events_close_only_with_real_recovery_evidence(self) -> None:
         job_id = "ui_job_recoveryevidence000000000001"

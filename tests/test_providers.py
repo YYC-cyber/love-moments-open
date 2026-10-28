@@ -196,7 +196,7 @@ class ProviderTests(unittest.TestCase):
     def test_local_date_planner_always_returns_five_distinct_variants(self) -> None:
         plans = LocalDatePlanner().generate_variants({"city": "杭州", "budget_cents": 50000, "start_time": "14:00"})
         self.assertEqual([plan["style"] for plan in plans], ["romantic", "classic", "value", "food", "adventure"])
-        self.assertTrue(all(len(plan["items"]) == 3 for plan in plans))
+        self.assertTrue(all(2 <= len(plan["items"]) <= 6 for plan in plans))
 
     def test_date_model_contract_rejects_time_reversal(self) -> None:
         rows = []
@@ -213,6 +213,119 @@ class ProviderTests(unittest.TestCase):
             })
         with self.assertRaises(ValueError):
             OpenAICompatibleDatePlanner._validate({"plans": rows}, 50000)
+
+    def test_local_date_planner_respects_window_busy_time_and_marks_provenance(self) -> None:
+        plans = LocalDatePlanner().generate_variants({
+            "city": "杭州", "budget_cents": 50000, "start_time": "13:00", "end_time": "20:00",
+            "busy_intervals": [{"start": "14:00", "end": "16:00", "all_day": False}],
+            "place_candidates": [{
+                "candidate_id": "candidate-1", "provider": "amap", "provider_place_id": "poi-1",
+                "name": "西湖景区", "formatted_address": "杭州市西湖区", "latitude": 30.2,
+                "longitude": 120.1, "source_type": "real_api", "evidence_at": "2026-10-27T10:00:00+00:00",
+            }],
+            "weather": {"source_type": "real_api", "provider": "Open-Meteo", "evidence_at": "2026-10-27T10:00:00+00:00"},
+        })
+        self.assertEqual([plan["style"] for plan in plans], ["romantic", "classic", "value", "food", "adventure"])
+        for plan in plans:
+            self.assertEqual(plan["generation_source"], "rules")
+            self.assertEqual(len(plan["items"]), 2)
+            self.assertLessEqual(plan["expected_cost_cents"], 50000)
+            for item in plan["items"]:
+                self.assertIn(item["recommendationSource"], {"rules", "ai"})
+                self.assertEqual(item["priceSource"], "rules")
+                self.assertEqual(item["weatherSource"], "real_api")
+                start = int(item["startTime"][:2]) * 60 + int(item["startTime"][3:])
+                end = start + item["durationMinutes"]
+                self.assertGreaterEqual(start, 13 * 60)
+                self.assertLessEqual(end, 20 * 60)
+                self.assertFalse(start < 16 * 60 and end > 14 * 60)
+
+    def test_date_model_rejects_unverified_places_and_server_overrides_source_claims(self) -> None:
+        rows = []
+        for style in ("romantic", "classic", "value", "food", "adventure"):
+            rows.append({
+                "style": style, "name": style, "summary": "测试", "expected_cost_cny": 200,
+                "intensity": "适中", "weather_fit": "以实时天气为准", "items": [
+                    {"start_time": "16:00", "duration_minutes": 60, "title": "西湖景区",
+                     "place_candidate_id": "candidate-1", "cost_cny": 50,
+                     "recommendationSource": "real_api", "placeSource": "real_api"},
+                    {"start_time": "18:00", "duration_minutes": 60, "title": "地点待选择",
+                     "cost_cny": 50},
+                ],
+            })
+        context = {
+            "start_time": "13:00", "end_time": "20:00", "busy_intervals": [{"start": "14:00", "end": "16:00"}],
+            "place_candidates": [{"candidate_id": "candidate-1", "provider": "amap", "provider_place_id": "poi-1", "name": "西湖景区", "formatted_address": "杭州", "source_type": "real_api", "evidence_at": "2026-10-27T10:00:00+00:00"}],
+            "weather": {"source_type": "unavailable"},
+        }
+        plans = OpenAICompatibleDatePlanner._validate({"plans": rows}, 50000, context)
+        first = plans[0]["items"][0]
+        self.assertEqual(first["recommendationSource"], "ai")
+        self.assertEqual(first["placeSource"], "real_api")
+        self.assertEqual(first["provider"], "amap")
+        self.assertEqual(first["priceSource"], "rules")
+        self.assertEqual(first["weatherSource"], "unavailable")
+
+        rows[0]["items"][0]["place_candidate_id"] = "forged-place"
+        with self.assertRaisesRegex(ValueError, "地点候选"):
+            OpenAICompatibleDatePlanner._validate({"plans": rows}, 50000, context)
+
+        rows[0]["items"][0]["place_candidate_id"] = "candidate-1"
+        rows[0]["items"][1].update({
+            "title": "西湖景区", "place_candidate_id": "candidate-1",
+        })
+        with self.assertRaisesRegex(ValueError, "重复安排"):
+            OpenAICompatibleDatePlanner._validate({"plans": rows}, 50000, context)
+
+    def test_date_model_rejects_two_candidate_ids_for_the_same_physical_place(self) -> None:
+        rows = []
+        for style in ("romantic", "classic", "value", "food", "adventure"):
+            rows.append({
+                "style": style, "name": style, "summary": "测试", "expected_cost_cny": 200,
+                "intensity": "适中", "weather_fit": "请确认天气", "items": [
+                    {"start_time": "14:00", "duration_minutes": 60, "title": "候选一", "place_candidate_id": "candidate-1", "cost_cny": 50},
+                    {"start_time": "16:00", "duration_minutes": 60, "title": "候选二", "place_candidate_id": "candidate-2", "cost_cny": 50},
+                ],
+            })
+        context = {
+            "start_time": "13:00", "end_time": "20:00", "busy_intervals": [],
+            "place_candidates": [
+                {"candidate_id": "candidate-1", "provider": "amap", "provider_place_id": "same-poi", "name": "同一家餐厅", "formatted_address": "杭州市湖滨", "latitude": 30.25, "longitude": 120.16, "source_type": "real_api"},
+                {"candidate_id": "candidate-2", "provider": "amap", "provider_place_id": "same-poi", "name": "同一家餐厅分词标题", "formatted_address": "杭州市湖滨", "latitude": 30.250001, "longitude": 120.160001, "source_type": "cache"},
+            ],
+            "weather": {"source_type": "unavailable"},
+        }
+        with self.assertRaisesRegex(ValueError, "重复安排"):
+            OpenAICompatibleDatePlanner._validate({"plans": rows}, 50000, context)
+
+    def test_date_model_named_venue_without_server_candidate_falls_back_honestly(self) -> None:
+        rows = []
+        for style in ("romantic", "classic", "value", "food", "adventure"):
+            rows.append({
+                "style": style, "name": style, "summary": "测试", "expected_cost_cny": 200,
+                "intensity": "适中", "weather_fit": "请确认天气", "items": [
+                    {"start_time": "14:00", "duration_minutes": 60,
+                     "title": "模型虚构的网红餐厅", "cost_cny": 50},
+                    {"start_time": "16:00", "duration_minutes": 60,
+                     "title": "附近散步（地点待选择）", "cost_cny": 20},
+                ],
+            })
+        model_response = {"choices": [{"message": {"content": json.dumps({"plans": rows}, ensure_ascii=False)}}]}
+        planner = OpenAICompatibleDatePlanner("secret", "https://example.test/v1", "test-model", 5)
+        with patch("love_moments.providers.request.urlopen", return_value=FakeResponse(model_response)):
+            plans = planner.generate_variants({
+                "city": "杭州", "budget_cents": 50000,
+                "start_time": "13:00", "end_time": "20:00",
+                "place_candidates": [], "busy_intervals": [],
+                "weather": {"source_type": "unavailable"},
+            })
+        self.assertTrue(all(plan["generation_source"] == "rules" for plan in plans))
+        self.assertTrue(all("模型" in plan["generation_message"] for plan in plans))
+        for plan in plans:
+            for item in plan["items"]:
+                self.assertNotEqual(item["title"], "模型虚构的网红餐厅")
+                if not item.get("placeCandidateId"):
+                    self.assertIn("待选择", item["title"])
 
 
 if __name__ == "__main__":

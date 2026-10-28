@@ -62,11 +62,11 @@ class LoveMomentsStoreTests(unittest.TestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM weekly_reviews").fetchone()[0], 1)
 
-    def test_testccount_uses_documented_credentials(self) -> None:
+    def test_demo_account_uses_documented_credentials(self) -> None:
         user = self.store.authenticate("test", "test123")
         self.assertEqual(user["nickname"], "演示甲")
         with self.assertRaises(ValueError):
-            self.store.authenticate("legacy_demo", "love1234")
+            self.store.authenticate("legacy-demo", "love1234")
 
     def test_existing_demo_password_is_never_reset_on_restart(self) -> None:
         self.store.change_password("test123", "a-private-password", "a-private-password", DEMO_USER)
@@ -236,11 +236,11 @@ class LoveMomentsStoreTests(unittest.TestCase):
         self.assertTrue(any(item["event_type"] == "message.created" and item["resource_id"] == first["id"] for item in events["items"]))
 
     def test_status_location_and_private_media_are_scoped(self) -> None:
-        status = self.store.set_status({"status_code": "miss_you", "text": "早点见面"})
+        status = self.store.set_status({"status_code": "want_chat", "text": "早点见面", "duration_minutes": 120})
         self.assertEqual(status["text"], "早点见面")
         partner_context = self.store.get_couple_context(user_id=DEMO_PARTNER)
         shared_status = next(item for item in partner_context["members"] if item["id"] != DEMO_PARTNER)
-        self.assertEqual(shared_status["status_code"], "miss_you")
+        self.assertEqual(shared_status["status_code"], "want_chat")
         location = self.store.set_location({"city": "东京", "timezone": "Asia/Tokyo"})
         self.assertEqual(location["city"], "东京")
         context = self.store.get_couple_context()
@@ -290,6 +290,9 @@ class LoveMomentsStoreTests(unittest.TestCase):
         self.store.set_media_upload_thumbnail(upload["id"], VALID_PNG, DEMO_USER)
         self.store.append_media_upload(upload["id"], video[127:], 127, DEMO_USER)
         completed = self.store.complete_media_upload(upload["id"], DEMO_USER)
+        with self.assertRaises(PermissionError):
+            self.store.get_media_content(completed["id"], DEMO_PARTNER, thumbnail=True)
+        self.store.create_moment({"title": "上传完成后分享", "media_id": completed["id"], "visibility": "shared"})
         self.assertEqual(completed["kind"], "video")
         thumbnail, mime, _ = self.store.get_media_content(completed["id"], DEMO_PARTNER, thumbnail=True)
         self.assertEqual(mime, "image/jpeg")
@@ -370,11 +373,12 @@ class LoveMomentsStoreTests(unittest.TestCase):
         self.assertNotIn("couple_bytes", partner_usage)
 
         reveal_at = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
-        self.store.create_moment({"title": "稍后公开", "type": "photo", "visibility": "delayed", "reveal_at": reveal_at, "media_id": uploaded["id"]})
+        moment = self.store.create_moment({"title": "稍后公开", "type": "photo", "visibility": "delayed", "reveal_at": reveal_at, "media_id": uploaded["id"]})
         with self.assertRaises(PermissionError):
             self.store.get_media_content(uploaded["id"], user_id=DEMO_PARTNER)
         with self.store.connection() as db:
             db.execute("UPDATE media_assets SET reveal_at='2020-01-01T00:00:00+00:00' WHERE id=?", (uploaded["id"],))
+            db.execute("UPDATE moments SET reveal_at='2020-01-01T00:00:00+00:00' WHERE id=?", (moment["id"],))
         self.assertTrue(self.store.get_media_content(uploaded["id"], user_id=DEMO_PARTNER)[0])
 
     def test_media_access_ticket_and_recycle_bin_are_fail_closed(self) -> None:
@@ -765,6 +769,11 @@ class LoveMomentsStoreTests(unittest.TestCase):
                 self.assertEqual(mine["resource_id"], resource_id)
                 self.assertEqual(partner["title"], mine["title"])
                 self.assertIsInstance(mine["fields"], list)
+                self.assertEqual(mine["visibility"], "shared")
+                self.assertEqual(mine["visibility_label"], "双方可见")
+                self.assertIn(mine["source_type"], {"human", "real_api", "rules", "ai", "mock", "cache", "legacy_unknown"})
+                self.assertTrue(mine["source_label"])
+                self.assertIsInstance(mine["fact_sensitive"], bool)
 
     def test_daily_answers_unlock_only_after_both_answer(self) -> None:
         before = self.store.get_daily_question()

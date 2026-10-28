@@ -1,4 +1,4 @@
-const CACHE = "love-moments-v48";
+const CACHE = "love-moments-v51";
 const ASSETS = [
   "/",
   "/static/index.html",
@@ -30,14 +30,19 @@ self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || !CACHEABLE_PATHS.has(url.pathname)) return;
+  // Every public shell asset uses its canonical pathname. Cache-busting query
+  // strings update the same entry and offline query variants hit that entry.
+  const cacheKey = url.pathname;
   event.respondWith(
     fetch(event.request)
       .then(response => {
-        const copy = response.clone();
-        caches.open(CACHE).then(cache => cache.put(event.request, copy));
+        if (response.ok && !/no-store/i.test(response.headers.get("Cache-Control") || "")) {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put(cacheKey, copy));
+        }
         return response;
       })
-      .catch(() => caches.match(event.request).then(hit => hit || caches.match("/")))
+      .catch(() => caches.match(cacheKey))
   );
 });
 

@@ -12,7 +12,9 @@ LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 
 
 def main() -> int:
-    documents = [ROOT / "README.md", *sorted((ROOT / ".docs").rglob("*.md"))]
+    private_docs_root = ROOT / ".docs"
+    private_docs_available = private_docs_root.is_dir()
+    documents = [ROOT / "README.md", *sorted(private_docs_root.rglob("*.md"))]
     checked = 0
     missing: list[str] = []
     for document in documents:
@@ -22,6 +24,12 @@ def main() -> int:
                 continue
             relative = unquote(target.split("#", 1)[0])
             if not relative:
+                continue
+            # `.docs` is intentionally kept as a local/private project folder
+            # by the repository pre-push policy.  Validate every one of those
+            # links in maintainer worktrees where the folder exists, while
+            # allowing a clean remote checkout to run the same CI check.
+            if document == ROOT / "README.md" and relative.startswith(".docs/") and not private_docs_available:
                 continue
             checked += 1
             destination = (document.parent / relative).resolve()

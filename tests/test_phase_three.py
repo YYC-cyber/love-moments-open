@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -41,6 +42,188 @@ class PhaseThreeStoreTests(unittest.TestCase):
         else:
             os.environ["SERPAPI_ENABLED"] = self.original_serpapi_enabled
         self.temp.cleanup()
+
+    def _manual_place_candidate(self, *, user_id: str = DEMO_USER, name: str = "杭州西湖") -> dict:
+        return self.store.search_destination_places({
+            "query": name, "region_hint": "杭州市", "include_global": False,
+        }, user_id)["items"][0]
+
+    def _real_place_candidate(self, *, user_id: str = DEMO_USER) -> dict:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        candidate_id = f"place-test-{now.timestamp()}"
+        payload = {
+            "provider": "amap", "provider_place_id": "amap-west-lake",
+            "name": "西湖风景名胜区", "formatted_address": "浙江省杭州市西湖区",
+            "country": "中国", "province": "浙江省", "city": "杭州市", "district": "西湖区",
+            "latitude": 30.245, "longitude": 120.145, "category": "风景名胜",
+        }
+        with self.store.connection() as db:
+            db.execute(
+                "INSERT INTO place_search_candidates(id,user_id,query,region_hint,payload_json,expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                (candidate_id, user_id, "西湖", "杭州市", json.dumps(payload, ensure_ascii=False),
+                 (now + timedelta(minutes=30)).isoformat(), now.isoformat()),
+            )
+        return {"candidate_id": candidate_id, **payload}
+
+    def test_calendar_busy_contract_uses_only_explicit_current_participants(self) -> None:
+        legacy = self.store.create_calendar_entry({
+            "entry_type": "event", "title": "旧日历记录",
+            "starts_at": "2026-11-02", "all_day": True,
+        }, DEMO_USER)
+        self.assertEqual(legacy["participant_ids"], [])
+        self.assertFalse(legacy["blocks_time"])
+        self.assertNotIn("participant_a_id", legacy)
+        self.assertNotIn("participant_b_id", legacy)
+
+        invalid_payloads = [
+            {"participant_ids": [], "blocks_time": True},
+            {"participant_ids": [DEMO_USER, DEMO_USER], "blocks_time": True},
+            {"participant_ids": ["user-not-in-couple"], "blocks_time": True},
+            {"participant_ids": [DEMO_USER], "blocks_time": "false"},
+            {"participant_ids": [DEMO_USER], "blocks_time": False, "source_type": "real_api"},
+        ]
+        for extra in invalid_payloads:
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.store.create_calendar_entry({
+                    "entry_type": "event", "title": "无效占用",
+                    "starts_at": "2026-11-02T14:00:00+08:00",
+                    "ends_at": "2026-11-02T16:00:00+08:00", "all_day": False,
+                    **extra,
+                }, DEMO_USER)
+
+        busy = self.store.create_calendar_entry({
+            "entry_type": "event", "title": "演示甲的安排",
+            "starts_at": "2026-11-02T14:00:00+08:00",
+            "ends_at": "2026-11-02T16:00:00+08:00", "all_day": False,
+            "participant_ids": [DEMO_USER], "blocks_time": True,
+        }, DEMO_USER)
+        self.assertEqual(busy["participant_ids"], [DEMO_USER])
+        self.assertTrue(busy["blocks_time"])
+        with self.assertRaises(ConflictError):
+            self.store.update_calendar_entry(busy["id"], {
+                "participant_ids": [DEMO_PARTNER], "blocks_time": True,
+                "expected_version": busy["version"] - 1,
+            }, DEMO_USER)
+        unchanged = next(item for item in self.store.list_calendar_entries(DEMO_USER) if item["id"] == busy["id"])
+        self.assertEqual(unchanged["participant_ids"], [DEMO_USER])
+
+    def test_date_generation_uses_owned_candidate_and_explicit_busy_intervals(self) -> None:
+        foreign = self._manual_place_candidate(user_id=DEMO_PARTNER)
+        with self.assertRaisesRegex(ValueError, "地点候选"):
+            self.store.create_date_plan({
+                "plan_date": "2026-11-02", "city": "杭州", "start_time": "13:00",
+                "end_time": "18:00", "budget": 500,
+                "place_candidate_id": foreign["candidate_id"],
+            }, DEMO_USER)
+
+        candidate = self._manual_place_candidate()
+        self.store.create_calendar_entry({
+            "entry_type": "event", "title": "演示乙的安排",
+            "starts_at": "2026-11-02T14:00:00+08:00",
+            "ends_at": "2026-11-02T16:00:00+08:00", "all_day": False,
+            "participant_ids": [DEMO_PARTNER], "blocks_time": True,
+        }, DEMO_PARTNER)
+        plan = self.store.create_date_plan({
+            "plan_date": "2026-11-02", "city": "杭州", "start_time": "13:00",
+            "end_time": "20:00", "budget": 500, "preferences": {"interest": "展览"},
+            "place_candidate_id": candidate["candidate_id"],
+        }, DEMO_USER)
+        self.assertEqual(plan["location"]["name"], "杭州西湖")
+        self.assertEqual(plan["location"]["source_type"], "human")
+        self.assertEqual(plan["busy_intervals"], [{"start": "14:00", "end": "16:00", "all_day": False}])
+        for variant in plan["variants"]:
+            self.assertEqual(len(variant["items"]), 2)
+            for item in variant["items"]:
+                start = item["startTime"]
+                end_minutes = int(start[:2]) * 60 + int(start[3:]) + item["durationMinutes"]
+                self.assertFalse(start < "16:00" and end_minutes > 14 * 60)
+                self.assertIn(item["recommendationSource"], {"rules", "ai"})
+                self.assertIn(item["placeSource"], {"human", "rules", "real_api", "cache"})
+                self.assertEqual(item["priceSource"], "rules")
+
+    def test_explicit_all_day_busy_entry_stops_generation_before_provider(self) -> None:
+        candidate = self._manual_place_candidate()
+
+        class NeverCalled:
+            def __init__(self): self.calls = 0
+            def generate_variants(self, _payload): self.calls += 1; raise AssertionError("provider must not run")
+
+        planner = NeverCalled()
+        self.store.date_planner = planner
+        self.store.create_calendar_entry({
+            "entry_type": "event", "title": "全天不可用", "starts_at": "2026-11-03",
+            "all_day": True, "participant_ids": [DEMO_USER], "blocks_time": True,
+        }, DEMO_USER)
+        with self.assertRaisesRegex(ValueError, "全天"):
+            self.store.create_date_plan({
+                "plan_date": "2026-11-03", "city": "杭州", "start_time": "13:00",
+                "end_time": "20:00", "budget": 500,
+                "place_candidate_id": candidate["candidate_id"],
+            }, DEMO_USER)
+        self.assertEqual(planner.calls, 0)
+
+    def test_insufficient_timed_window_fails_before_creating_a_plan(self) -> None:
+        candidate = self._manual_place_candidate()
+        self.store.create_calendar_entry({
+            "entry_type": "event", "title": "下午已占用",
+            "starts_at": "2026-11-04T14:00:00+08:00",
+            "ends_at": "2026-11-04T17:30:00+08:00", "all_day": False,
+            "participant_ids": [DEMO_PARTNER], "blocks_time": True,
+        }, DEMO_PARTNER)
+        with self.store.connection() as db:
+            before = db.execute("SELECT COUNT(*) FROM date_plans").fetchone()[0]
+        with self.assertRaisesRegex(ValueError, "空闲时间"):
+            self.store.create_date_plan({
+                "plan_date": "2026-11-04", "city": "杭州", "start_time": "13:00",
+                "end_time": "18:00", "budget": 500,
+                "place_candidate_id": candidate["candidate_id"],
+            }, DEMO_USER)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM date_plans").fetchone()[0], before)
+
+    def test_date_weather_and_planner_receive_only_verified_structured_context(self) -> None:
+        candidate = self._real_place_candidate()
+
+        class CapturingPlanner:
+            def __init__(self): self.payload = None
+            def generate_variants(inner_self, payload):
+                inner_self.payload = payload
+                return self.store.date_planner.fallback.generate_variants(payload)
+
+        class FakeWeather:
+            def __init__(self): self.calls = []
+            def forecast(inner_self, latitude, longitude, start_date, end_date, timezone_name):
+                inner_self.calls.append((latitude, longitude, start_date, end_date, timezone_name))
+                return {
+                    "items": [{"date": start_date, "label": "小雨", "precipitation_probability": 70,
+                               "temperature_min": 18, "temperature_max": 24}],
+                    "source": "Open-Meteo", "source_type": "real_api",
+                    "evidence_at": "2026-10-27T12:00:00+00:00",
+                }
+
+        from love_moments.providers import LocalDatePlanner
+        planner = CapturingPlanner()
+        planner.fallback = LocalDatePlanner()
+        self.store.date_planner = planner
+        weather = FakeWeather()
+        plan = self.store.create_date_plan({
+            "plan_date": "2026-11-02", "city": "杭州", "start_time": "13:00",
+            "end_time": "20:00", "budget": 500,
+            "preferences": {"interests": ["展览"], "private_note": "不要发送给模型"},
+            "place_candidate_id": candidate["candidate_id"],
+        }, DEMO_USER, weather_provider=weather)
+
+        self.assertEqual(weather.calls, [(30.245, 120.145, "2026-11-02", "2026-11-02", "auto")])
+        serialized = json.dumps(planner.payload, ensure_ascii=False)
+        self.assertNotIn("不要发送给模型", serialized)
+        self.assertNotIn("private_note", serialized)
+        self.assertEqual(planner.payload["interest_tags"], ["展览"])
+        self.assertEqual(plan["weather"]["source_type"], "real_api")
+        self.assertEqual(plan["weather"]["provider"], "Open-Meteo")
+        self.assertEqual(plan["weather"]["evidence_at"], "2026-10-27T12:00:00+00:00")
+        self.assertTrue(all(item["weatherSource"] == "real_api" for variant in plan["variants"] for item in variant["items"]))
+        self.assertTrue(all(variant["generation_source"] == "rules" for variant in plan["variants"]))
+        self.assertEqual(plan["generation_source"], "rules")
 
     def test_schema_v17_columns_and_integrity(self) -> None:
         with self.store.connection() as db:

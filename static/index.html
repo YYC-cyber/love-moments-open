@@ -12,9 +12,9 @@
   <meta name="description" content="Love Moments · 恋屿，属于两个人的生活与回忆空间">
   <title>Love Moments · 恋屿</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%238e3f52'/%3E%3Cpath d='M18 15v34h29v-8H27V15z' fill='%23fff8f2'/%3E%3C/svg%3E">
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/love-moments-icon-180.png">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="manifest" href="../../manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="../../static/assets/love-moments-icon-180.png">
+  <link rel="stylesheet" href="../../static/app.css">
 </head>
 <body>
   <section class="auth-gate" id="authGate" aria-label="账号登录">
@@ -73,7 +73,7 @@
 
     <section class="screen active" data-screen="home">
       <div class="home-hero">
-        <img src="/static/assets/couple-lake-hero.png" alt="情侣在湖畔旅行的背影">
+        <img src="../../static/assets/couple-lake-hero.png" alt="情侣在湖畔旅行的背影">
         <div class="hero-shade"></div>
         <div class="hero-copy">
           <span class="eyebrow" id="storyYear">OUR STORY</span>
@@ -173,8 +173,10 @@
           <form class="composer" id="chatForm">
             <button type="button" data-action="attach" aria-label="添加附件">＋</button>
             <input id="chatInput" autocomplete="off" placeholder="和 TA 说点什么…" aria-label="消息内容">
+            <button type="button" data-action="expression-help" aria-label="帮我表达">✦</button>
             <button class="send" aria-label="发送">↑</button>
           </form>
+          <p class="form-note">断网时只会在当前情侣空间暂存文字消息，确认本机保存成功后才显示“待发送”；图片、语音和视频需要联网后再发送。</p>
         </div>
         <input id="chatMediaInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp,audio/*,video/mp4,video/webm,video/quicktime" hidden>
       </div>
@@ -188,7 +190,7 @@
         </div>
         <label class="trip-switcher"><span>查看旅行</span><select id="tripSwitcher" aria-label="切换旅行计划"></select></label>
         <nav class="section-tabs" aria-label="旅行功能页">
-          <button class="active" data-trip-section="overview">概览</button><button data-trip-section="assistant">问 AI</button><button data-trip-section="plans">五套方案</button><button data-trip-section="itinerary">每日行程</button><button data-trip-section="stays">酒店</button><button data-trip-section="tools">路线报价</button>
+          <button class="active" data-trip-section="overview">概览</button><button data-trip-section="assistant">问 AI</button><button data-trip-section="plans">五套方案</button><button data-trip-section="itinerary">每日行程</button><button data-trip-section="stays">酒店</button><button data-trip-section="tools">工具</button>
         </nav>
         <div data-trip-panel="overview">
           <article class="destination-warning card" id="tripDestinationWarning" hidden></article>
@@ -256,11 +258,59 @@
           <div class="price-note">最终价格以预订平台为准</div>
         </div>
         <div data-trip-panel="tools">
+          <div class="subpage-heading"><div><span class="eyebrow ink">TRIP TOOLKIT</span><h2>旅行工具</h2><p>行李、应急信息、共同花费和路线报价集中管理；花费只在线保存，不接支付。</p></div></div>
+          <div class="trip-tool-switcher" role="tablist" aria-label="旅行工具分类">
+            <button class="active" data-trip-tool-section="packing">行李</button>
+            <button data-trip-tool-section="emergency">应急卡</button>
+            <button data-trip-tool-section="expenses">花费</button>
+            <button data-trip-tool-section="route">路线与报价</button>
+          </div>
+          <article class="offline-trip-banner card" id="tripOfflineBanner" hidden></article>
+          <section data-trip-tool-panel="packing">
+            <article class="card trip-tool-card">
+              <div class="trip-tool-card-heading"><div><span class="eyebrow ink">PACKING</span><h3>两个人的行李</h3><p id="tripPackingEvidence">按旅行天数和活动生成；天气不可用时会明确说明。</p></div><button class="live-pill" data-action="generate-packing">生成建议</button></div>
+              <form id="tripPackingForm" class="inline-tool-form"><input id="tripPackingLabel" maxlength="200" placeholder="添加一件行李"><button class="primary-button">添加</button></form>
+              <div class="trip-tool-list" id="tripPackingList"><div class="empty-view"><p>还没有行李项目。</p></div></div>
+            </article>
+          </section>
+          <section data-trip-tool-panel="emergency" hidden>
+            <article class="card trip-tool-card">
+              <div class="trip-tool-card-heading"><div><span class="eyebrow ink">EMERGENCY</span><h3>应急卡</h3><p>默认仅自己可见；共享前请确认内容适合让双方离线保存。</p></div><button class="live-pill" data-action="search-hospitals">查附近医院</button></div>
+              <form id="tripEmergencyForm" class="trip-emergency-form">
+                <div class="two-fields"><label class="field"><span>类型</span><select id="tripEmergencyType"><option value="hotel">酒店</option><option value="booking">订单</option><option value="contact">联系人</option><option value="insurance">保险</option><option value="return">返程</option><option value="other">其他</option><option value="hospital" disabled hidden>地图核验医院</option></select></label><label class="field"><span>可见范围</span><select id="tripEmergencyVisibility"><option value="private">仅自己可见</option><option value="shared">双方可见</option></select></label></div>
+                <label class="field"><span>标题</span><input id="tripEmergencyTitle" maxlength="200" required placeholder="例如：酒店前台"></label>
+                <div id="tripEmergencyFields" class="trip-emergency-fields"></div>
+                <div class="inline-tool-form"><button class="primary-button" id="tripEmergencySaveButton">保存应急卡</button><button type="button" class="secondary-button" id="tripEmergencyCancelButton" data-action="cancel-emergency-edit" hidden>取消编辑</button></div>
+              </form>
+              <div class="trip-hospital-results" id="tripHospitalResults"></div>
+              <div class="trip-tool-list" id="tripEmergencyList"><div class="empty-view"><p>还没有应急卡。</p></div></div>
+            </article>
+          </section>
+          <section data-trip-tool-panel="expenses" hidden>
+            <article class="card trip-tool-card trip-expense-card">
+              <div class="trip-tool-card-heading"><div><span class="eyebrow ink">TRIP EXPENSES</span><h3>共同花费</h3><p>只记录人民币支出与线下结清状态，不发起付款、转账或换汇。</p></div></div>
+              <div class="trip-expense-balance" id="tripExpenseBalance"><strong>正在读取余额</strong><small>金额只在当前旅行花费页面显示</small></div>
+              <form id="tripExpenseForm" class="trip-expense-form">
+                <p class="form-note">双方可见 · 真人填写 · 仅用于两个人线下核对</p>
+                <div class="two-fields"><label class="field"><span>金额（元）</span><input id="tripExpenseAmount" inputmode="decimal" autocomplete="off" placeholder="例如 128.50" required></label><label class="field"><span>付款人</span><select id="tripExpensePayer" required></select></label></div>
+                <div class="two-fields"><label class="field"><span>分类</span><select id="tripExpenseCategory"><option value="transport">交通</option><option value="lodging">住宿</option><option value="food" selected>餐饮</option><option value="tickets">门票</option><option value="shopping">购物</option><option value="other">其他</option></select></label><label class="field"><span>如何分摊</span><select id="tripExpenseSplit"><option value="equal">两人均分</option><option value="personal">一人承担</option></select></label></div>
+                <div class="two-fields"><label class="field" id="tripExpenseBeneficiaryField" hidden><span>由谁承担</span><select id="tripExpenseBeneficiary"></select></label><label class="field"><span>消费日期</span><input id="tripExpenseDate" type="date" required></label></div>
+                <label class="field"><span>备注</span><input id="tripExpenseNote" maxlength="500" placeholder="例如：西湖边晚餐"></label>
+                <div class="inline-tool-form"><button class="primary-button" id="tripExpenseSaveButton">记录花费</button><button type="button" class="secondary-button" id="tripExpenseCancelButton" data-action="cancel-expense-edit" hidden>取消编辑</button></div>
+              </form>
+              <div class="trip-expense-settle"><span><b>待线下结清</b><small id="tripExpenseSettlePreview">勾选后会预览剩余净额，不会发起付款。</small></span><button class="secondary-button" id="tripExpenseSettleButton" data-action="settle-expenses" disabled>标记线下结清</button></div>
+              <div class="trip-tool-list" id="tripExpenseList"><div class="empty-view"><p>正在读取旅行花费…</p></div></div>
+              <details class="trip-expense-history"><summary>已线下结清</summary><div class="trip-tool-list" id="tripExpenseSettledList"><div class="empty-view"><p>还没有已结清记录。</p></div></div></details>
+              <details class="trip-expense-history"><summary>最近删除</summary><div class="trip-tool-list" id="tripExpenseDeletedList"><div class="empty-view"><p>还没有可恢复的记录。</p></div></div></details>
+            </article>
+          </section>
+          <section data-trip-tool-panel="route" hidden>
           <div class="subpage-heading"><div><span class="eyebrow ink">ROUTE & PRICE</span><h2>路线与票价查询</h2><p>在应用内比较时间、价格、余票和规则，再跳转到对应平台购买。</p></div></div>
           <div class="food-recommendation-notice" id="tripSearchScopeNotice" hidden></div>
-          <div class="trip-tool-row"><button data-action="trip-route">⌖ 查看路线</button><button data-action="manual-quote">＋ 手工报价</button></div>
+          <div class="trip-tool-row"><button data-action="trip-route">⌖ 查看路线</button><button data-action="manual-quote">＋ 手工报价</button><button data-action="open-trip-album">制作本次旅行纪念册</button></div>
           <section class="quote-search-card card" aria-label="酒店查询">
             <span class="eyebrow ink">HOTELS</span><h3>酒店住宿</h3>
+            <p id="hotelSearchPrefillNotice" class="conversion-prefill-notice" hidden>尚未保存：这里只预填查询条件，不会自动保存酒店或报价。</p>
             <div class="quote-fields"><label class="field"><span>目的地</span><input id="hotelDestination" placeholder="城市、区域或酒店名称"></label><div class="two-fields"><label class="field"><span>入住</span><input id="hotelCheckIn" type="date"></label><label class="field"><span>离店</span><input id="hotelCheckOut" type="date"></label></div><label class="field"><span>入住人数</span><input id="hotelAdults" type="number" min="1" max="9" value="2"></label></div>
             <button class="primary-button quote-submit" data-action="search-quotes" data-quote-type="hotel">查询酒店并比较</button>
           </section>
@@ -275,6 +325,7 @@
             <button class="primary-button quote-submit" data-action="search-quotes" data-quote-type="train">查询车次、座席和余票</button>
           </section>
           <div class="feature-results" id="tripToolResults"></div>
+          </section>
         </div>
         <article class="trip-approval card" id="tripApproval" hidden>
           <div><small>共同确认</small><strong id="tripApprovalTitle">最终方案等待确认</strong><span id="tripApprovalMeta">双方确认后正式生效</span></div>
@@ -294,6 +345,27 @@
           <summary><span><b>问恋屿整理回忆</b><small>按年份、城市或主题查看共同内容</small></span></summary>
           <section class="smart-panel" data-smart="timeline" aria-label="时光智能编排"></section>
         </details>
+        <details class="memory-search card" id="memorySearchPanel">
+          <summary><span><b>搜索我们的回忆</b><small>按关键词、日期和类型查找当前可见内容</small></span></summary>
+          <form id="memorySearchForm" class="memory-search-form">
+            <label class="memory-search-query"><span>想找什么</span><input id="memorySearchQuery" maxlength="100" autocomplete="off" placeholder="例如：去年我们在杭州记录的照片"></label>
+            <label><span>开始日期</span><input id="memorySearchStart" type="date"></label>
+            <label><span>结束日期</span><input id="memorySearchEnd" type="date"></label>
+            <label><span>内容类型</span><select id="memorySearchType"><option value="all">全部</option><option value="photo">照片</option><option value="video">视频</option><option value="voice">语音</option><option value="chat">聊天收藏</option><option value="call">通话</option><option value="trip">旅行</option></select></label>
+            <div class="memory-search-actions"><button type="submit">搜索</button><button type="button" class="quiet" data-action="clear-memory-search">清除</button></div>
+          </form>
+          <div id="memoryParsedFilters" class="memory-filter-chips" aria-live="polite"></div>
+          <div id="memorySearchResults" class="memory-search-results" aria-live="polite"></div>
+        </details>
+        <section class="memory-completion card" aria-labelledby="memoryCompletionTitle">
+          <div class="memory-completion-head"><div><b id="memoryCompletionTitle">待补全的回忆</b><small>只提醒你当前有权补充的内容</small></div><button type="button" class="quiet" data-action="refresh-memory-completion">检查</button></div>
+          <div id="memoryCompletionList" class="memory-completion-list" aria-live="polite"><p class="muted">进入时光页后会检查一次。</p></div>
+        </section>
+        <section class="memory-tools card" aria-labelledby="memoryToolsTitle">
+          <div class="memory-completion-head"><div><b id="memoryToolsTitle">更多回忆工具</b><small>录下原声，或写一封到期才送达的信</small></div></div>
+          <div class="memory-tool-actions"><button type="button" data-action="open-voice-memory">录一段话</button><button type="button" data-action="open-future-letter">写未来信</button><button type="button" data-action="open-year-album">制作纸质纪念册</button></div>
+          <div id="futureLetterList" class="future-letter-list" aria-live="polite"><p class="muted">未来信正文不会提前显示给收件人。</p></div>
+        </section>
         <div class="timeline-viewbar" id="timelineView">
           <div class="segmented timeline-tabs"><button class="active" data-view="list">时间线</button><button data-view="album">月相册</button><button data-view="map">足迹</button></div>
           <details class="timeline-more">
@@ -338,6 +410,7 @@
                 <button data-life-section="todo"><span class="life-icon wine">✓</span><strong>共同待办</strong><small>一起完成的小事</small></button>
                 <button data-action="open-weekly"><span class="life-icon rose">⌁</span><strong>每周回顾</strong><small>一起回看这一周</small></button>
                 <button data-life-section="dates"><span class="life-icon sage">✦</span><strong>智能约会</strong><small>五套方案一起投票</small></button>
+                <button data-life-section="decisions"><span class="life-icon wine">◇</span><strong>双人决策</strong><small>提交后一起揭晓</small></button>
                 <button data-action="install-app"><span class="life-icon wine">⌂</span><strong>添加到主屏幕</strong><small>像 App 一样打开恋屿</small></button>
                 <button data-action="enable-notifications"><span class="life-icon sand">◌</span><strong>消息与来电提醒</strong><small id="notificationSummary">仅在此设备授权</small></button>
               </div>
@@ -349,6 +422,10 @@
         <div data-life-panel="dates">
           <div class="subpage-heading"><div><span class="eyebrow ink">DATE PLANS</span><h2>智能约会</h2><p>生成五套方案、双方投票并共同确认。</p></div><button data-action="new-date">＋ 新约会</button></div>
           <section class="date-plan-list" id="datePlanList"></section>
+        </div>
+        <div data-life-panel="decisions">
+          <div class="subpage-heading"><div><span class="eyebrow ink">DECIDE TOGETHER</span><h2>双人决策</h2><p>先各自选择，双方提交后再同时揭晓。</p></div><button data-action="new-decision">＋ 新决策</button></div>
+          <section class="decision-list" id="decisionList"></section>
         </div>
         <div data-life-panel="meals" id="mealWorkspace">
           <div class="subpage-heading"><div><span class="eyebrow ink">COOK TOGETHER</span><h2>今天想吃什么</h2><p>一方点菜，两个人确认日期和餐次，再自动整理采购食材。</p></div><button data-action="new-meal-wish">＋ 想吃</button></div>
@@ -377,6 +454,7 @@
 
           <section data-meal-panel="calendar" hidden>
             <div class="meal-section-head"><div><h3>用餐日历</h3><p>按日期排开，早、中、晚三餐清楚归档。</p></div><div class="calendar-nav"><button data-action="meal-prev-period" aria-label="上一段">‹</button><strong id="mealCalendarTitle"></strong><button data-action="meal-next-period" aria-label="下一段">›</button></div></div>
+            <article class="card" id="weeklyMealPlanPanel"><div class="meal-section-head"><div><h3>一周菜单</h3><p>按双方点菜、饮食资料、家中食材和明确占用时间生成；双方确认后才写入日历与采购清单。</p></div><button data-action="create-weekly-meal-plan">生成菜单</button></div><div id="weeklyMealPlanContent"><p class="form-note">还没有待确认的一周菜单。</p></div></article>
             <div class="meal-toolbar"><button data-action="meal-calendar-view" data-view="week">周视图</button><button data-action="meal-calendar-view" data-view="month">月视图</button><button data-action="meal-today">今天</button><button data-action="archive-meal-cart">归档已完成</button></div>
             <div class="meal-calendar" id="mealCalendar"></div>
             <div class="meal-day-list" id="mealDayList"></div>
@@ -384,8 +462,12 @@
 
           <section data-meal-panel="shopping" hidden>
             <div class="meal-section-head"><div><h3>采购清单</h3><p>根据已确认菜单按人数汇总，手动修改的数量不会被覆盖。</p></div><button data-action="preview-shopping">生成清单</button></div>
+            <p class="form-note">断网时可以继续勾选已有食材；同一食材快速切换只保留最后选择。新增、编辑、完成采购和库存变更需要联网。</p>
             <div class="meal-toolbar"><button data-action="new-shopping-item">＋ 临时食材</button><button data-action="complete-shopping">完成采购</button></div>
             <div class="shopping-list" id="shoppingList"></div>
+            <details class="card kitchen-profile-card" open><summary>两个人的饮食资料</summary><div id="foodProfilePanel"></div><form id="foodProfileForm" class="meal-search"><label class="field"><span>需要避免的过敏原（可多选）</span><select id="foodAllergenAvoid" multiple size="5"><option>蛋类</option><option>乳制品</option><option>含麸质谷物</option><option>可能含麸质谷物</option><option>甲壳类</option><option>鱼类</option><option>软体动物</option><option>花生</option><option>坚果</option><option>芝麻</option><option>大豆</option></select></label><label class="field"><span>严重过敏原（可多选，不要与上面重复）</span><select id="foodAllergenSevere" multiple size="5"><option>蛋类</option><option>乳制品</option><option>含麸质谷物</option><option>可能含麸质谷物</option><option>甲壳类</option><option>鱼类</option><option>软体动物</option><option>花生</option><option>坚果</option><option>芝麻</option><option>大豆</option></select></label><label class="field"><span>我的忌口食材（从家中食材多选）</span><select id="foodAvoidanceIngredients" multiple size="4"></select></label><input id="foodLikedTags" maxlength="300" placeholder="喜欢的口味，用逗号分隔"><input id="foodDislikedTags" maxlength="300" placeholder="不喜欢的口味，用逗号分隔"><button>保存我的资料</button></form><p class="form-note">食品安全只按已保存资料和菜谱真实配料核对；旧的自由文本偏好不会自动变成过敏事实。</p></details>
+            <details class="card pantry-card" open><summary>家里已有的食材</summary><div id="pantryPanel"></div><form id="pantryForm" class="meal-search"><input id="pantryName" maxlength="80" required placeholder="食材，例如番茄"><select id="pantryState"><option value="have">有</option><option value="low">少</option><option value="out">无</option></select><select id="pantryStorage"><option value="">未指定位置</option><option value="ambient">常温</option><option value="chilled">冷藏</option><option value="frozen">冷冻</option></select><input id="pantryExpiry" type="date" aria-label="到期日"><input id="pantryNote" maxlength="100" placeholder="可选备注，例如半袋"><button>加入库存</button></form></details>
+            <details class="card shopping-order-card"><summary>采购分类顺序</summary><div id="shoppingCategoryOrder"></div></details>
           </section>
         </div>
         <div data-life-panel="calendar anniversary todo preference" id="lifeRecordsPanel">
@@ -469,6 +551,7 @@
   <div class="modal" id="mealWishModal" role="dialog" aria-modal="true" aria-labelledby="mealWishTitle" aria-hidden="true">
     <div class="sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">WANT TO EAT</span><h2 id="mealWishTitle">添加想吃的东西</h2>
+      <p id="mealWishPrefillNotice" class="conversion-prefill-notice" hidden>尚未保存：请检查内容，点击保存后才会写入共同清单。</p>
       <form id="mealWishForm"><input id="mealWishRecipeId" type="hidden"><label class="field"><span>想吃什么</span><input id="mealWishName" maxlength="100" required></label><label class="field"><span>备注</span><textarea id="mealWishNote" maxlength="1000" placeholder="想什么时候吃、口味偏好……"></textarea></label><button class="primary-button">保存到两个人的清单</button></form>
     </div>
   </div>
@@ -527,8 +610,18 @@
     <div class="sheet scroll-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SHOPPING PREVIEW</span><h2 id="shoppingPreviewTitle">确认采购范围</h2><div class="two-fields"><label class="field"><span>开始日期</span><input id="shoppingRangeStart" type="date"></label><label class="field"><span>结束日期</span><input id="shoppingRangeEnd" type="date"></label></div><button class="secondary-button" data-action="build-shopping-preview">查看变更预览</button><div id="shoppingPreviewContent"></div><button class="primary-button" id="applyShoppingPreview" data-action="apply-shopping-preview" hidden>确认生成采购清单</button></div>
   </div>
 
+  <div class="modal" id="ingredientSubstitutionModal" role="dialog" aria-modal="true" aria-labelledby="ingredientSubstitutionTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet ingredient-substitution-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink">INGREDIENT OPTIONS</span>
+      <h2 id="ingredientSubstitutionTitle">核对食材替代</h2>
+      <p class="form-note">只使用本地校准规则和当前配料表，并按两个人已保存的饮食资料重新核对。预览不会修改菜谱、菜单或采购清单。</p>
+      <div id="ingredientSubstitutionContent" role="status"></div>
+    </div>
+  </div>
+
   <div class="modal" id="shoppingItemModal" role="dialog" aria-modal="true" aria-labelledby="shoppingItemTitle" aria-hidden="true">
-    <div class="sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">ADD INGREDIENT</span><h2 id="shoppingItemTitle">添加临时食材</h2><form id="shoppingItemForm"><label class="field"><span>食材</span><input id="shoppingItemName" maxlength="80" required></label><div class="two-fields"><label class="field"><span>数量</span><input id="shoppingItemQuantity" type="number" min="0" step="0.1" value="1"></label><label class="field"><span>单位</span><select id="shoppingItemUnit"><option>个</option><option>克</option><option>千克</option><option>毫升</option><option>升</option><option>包</option><option>盒</option><option>份</option></select></label></div><label class="field"><span>分类</span><input id="shoppingItemCategory" value="其他" maxlength="30"></label><button class="primary-button">添加到采购清单</button></form></div>
+    <div class="sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">ADD INGREDIENT</span><h2 id="shoppingItemTitle">添加临时食材</h2><form id="shoppingItemForm"><label class="field"><span>食材</span><input id="shoppingItemName" maxlength="80" required></label><div class="two-fields"><label class="field"><span>数量</span><input id="shoppingItemQuantity" type="number" min="0" step="0.1" value="1"></label><label class="field"><span>单位</span><select id="shoppingItemUnit"><option>个</option><option>克</option><option>千克</option><option>毫升</option><option>升</option><option>包</option><option>盒</option><option>份</option></select></label></div><label class="field"><span>分类</span><select id="shoppingItemCategory"><option value="produce">蔬菜水果</option><option value="meat_eggs">肉禽蛋</option><option value="seafood">水产</option><option value="dairy">乳品</option><option value="staples_oils">粮油</option><option value="seasonings">调味</option><option value="frozen">冷冻</option><option value="household">日用品</option><option value="other">其他</option></select></label><button class="primary-button">添加到采购清单</button></form></div>
   </div>
 
   <div class="modal" id="momentModal" role="dialog" aria-modal="true" aria-labelledby="momentModalTitle" aria-hidden="true">
@@ -545,13 +638,56 @@
     </div>
   </div>
 
+  <div class="modal" id="voiceMemoryModal" role="dialog" aria-modal="true" aria-labelledby="voiceMemoryTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">VOICE MEMORY</span><h2 id="voiceMemoryTitle">录一段话</h2>
+      <p class="form-note">需要 HTTPS 与麦克风权限。录音只在你点击保存后上传；iPhone 请保持恋屿在前台。</p>
+      <div class="voice-recorder" aria-live="polite"><strong id="voiceRecordStatus">尚未录音</strong><span id="voiceRecordTimer">00:00</span><div><button data-action="start-voice-recording">开始录音</button><button data-action="stop-voice-recording" disabled>停止</button><button data-action="reset-voice-recording" disabled>重录</button></div><audio id="voicePreview" controls playsinline hidden></audio></div>
+      <label class="field"><span>标题</span><input id="voiceMemoryName" maxlength="200" placeholder="今晚想说的话"></label>
+      <label class="field"><span>文字（可选，保存前可校正）</span><textarea id="voiceTranscript" maxlength="10000" placeholder="浏览器识别不可用时可以手工填写"></textarea><small id="voiceTranscriptSource">手工文字会标记为本人填写；已保存的文字仍可由本人继续校正。</small></label>
+      <div class="two-fields"><label class="field"><span>发生时间</span><input id="voiceOccurredAt" type="datetime-local"></label><label class="field"><span>心情</span><input id="voiceMood" maxlength="50"></label></div>
+      <label class="field"><span>可见范围</span><select id="voiceVisibility"><option value="shared">双方可见</option><option value="private">仅自己可见</option><option value="delayed">延时公开</option></select></label>
+      <label class="field" id="voiceRevealField" hidden><span>公开时间</span><input id="voiceRevealAt" type="datetime-local"></label>
+      <button class="primary-button" data-action="save-voice-memory">保存原声与文字</button>
+    </div>
+  </div>
+
+  <div class="modal" id="futureLetterModal" role="dialog" aria-modal="true" aria-labelledby="futureLetterTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">FUTURE LETTER</span><h2 id="futureLetterTitle">写给未来的一封信</h2>
+      <p class="form-note">草稿只对你可见。封存后正文会隐藏，到期前对方不会看到数量、标题或提醒。</p>
+      <form id="futureLetterForm"><input id="futureLetterId" type="hidden"><input id="futureLetterVersion" type="hidden">
+        <label class="field"><span>标题</span><input id="futureLetterName" maxlength="120" required></label>
+        <label class="field"><span>正文</span><textarea id="futureLetterBody" maxlength="20000" required></textarea></label>
+        <button class="primary-button">保存私密草稿</button>
+      </form>
+      <div id="futureLetterSealPanel" hidden><label class="field"><span>送达时间（按本机时区显示）</span><input id="futureLetterDeliverAt" type="datetime-local"></label><p class="form-note" id="futureLetterUtcPreview"></p><button class="primary-button" data-action="seal-future-letter">确认封存</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="futureLetterDetailModal" role="dialog" aria-modal="true" aria-labelledby="futureLetterDetailTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">FUTURE LETTER</span><h2 id="futureLetterDetailTitle">未来信</h2><div id="futureLetterDetail"></div></div>
+  </div>
+
+  <div class="modal" id="albumExportModal" role="dialog" aria-modal="true" aria-labelledby="albumExportTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet album-export-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PRINTED MEMORIES</span><h2 id="albumExportTitle">制作纸质纪念册</h2>
+      <p class="form-note" id="albumExportNotice">PDF 只在恋屿服务器本地生成，不会上传到第三方排版服务；完成后 1 小时自动过期。</p>
+      <div class="two-fields"><label class="field"><span>可见范围</span><select id="albumExportAudience"><option value="shared">共同纪念册</option><option value="personal">个人纪念册</option></select></label><label class="field" id="albumYearField"><span>年份</span><input id="albumExportYear" type="number" min="2000" max="2100"></label></div>
+      <button class="secondary-button" data-action="preview-album-export">刷新可选内容</button>
+      <div id="albumExportItems" class="album-export-items" aria-live="polite"><p class="muted">正在读取当前可见的回忆…</p></div>
+      <section class="album-export-recent" aria-labelledby="albumExportRecentTitle"><h3 id="albumExportRecentTitle">最近生成记录</h3><div id="albumExportRecentJobs"><p class="muted">正在检查一小时内可恢复的任务…</p></div></section>
+      <div id="albumExportStatus" class="album-export-status" aria-live="polite"></div>
+      <div class="album-export-actions"><button class="primary-button" data-action="create-album-export" id="createAlbumExport">生成 PDF</button><button class="secondary-button" data-action="cancel-album-export" id="cancelAlbumExport" hidden>取消生成</button><a class="primary-button" id="downloadAlbumExport" href="#" hidden>下载 PDF</a></div>
+    </div>
+  </div>
+
   <div class="modal" id="statusModal" role="dialog" aria-modal="true" aria-labelledby="statusModalTitle" aria-hidden="true">
     <div class="sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">OUR LITTLE SIGNAL</span><h2 id="statusModalTitle">分享我的此刻</h2>
       <form id="statusForm">
-        <label class="field"><span>状态</span><select id="statusCode"><option value="miss_you">♡ 想你了</option><option value="busy">◷ 忙碌中</option><option value="moving">↗ 在路上</option><option value="home">⌂ 已到家</option><option value="happy">☺ 心情不错</option><option value="quiet">☁ 想安静一下</option><option value="custom">✦ 自定义</option></select></label>
+        <label class="field"><span>状态</span><select id="statusCode"><option value="busy">◷ 忙碌中</option><option value="want_chat">♡ 想聊天</option><option value="need_company">♧ 需要陪伴</option><option value="feeling_low">☁ 心情不好</option><option value="moving">↗ 在路上</option><option value="home">⌂ 已到家</option><option value="custom">✦ 自定义</option></select></label>
         <label class="field"><span>补充一句（可选）</span><input id="statusText" maxlength="60" placeholder="让 TA 知道你现在怎么样"></label>
-        <label class="field"><span>保留时间</span><select id="statusDuration"><option value="2">2 小时</option><option value="8">8 小时</option><option value="24">24 小时</option><option value="0">一直保留</option></select></label>
+        <label class="field"><span>保留时间</span><select id="statusDuration"><option value="30">30 分钟</option><option value="120">2 小时</option><option value="480">8 小时</option><option value="1440">1 天</option><option value="10080">7 天</option></select></label>
         <button class="primary-button">同步给 TA</button>
       </form>
       <button class="secondary-button" data-action="clear-status">清除我的状态</button>
@@ -587,13 +723,31 @@
   <div class="modal" id="dateModal" role="dialog" aria-modal="true" aria-labelledby="dateModalTitle" aria-hidden="true">
     <div class="sheet scroll-sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PLAN OUR DATE</span><h2 id="dateModalTitle">计划下一次约会</h2>
+      <p id="datePrefillNotice" class="conversion-prefill-notice" hidden>尚未保存：请补全日期、时间、预算并明确选择地点。</p>
       <form id="dateForm">
         <label class="field"><span>约会标题</span><input id="dateTitle" value="我们的下一次约会" maxlength="100" required></label>
-        <div class="two-fields"><label class="field"><span>日期</span><input id="dateDay" type="date" required></label><label class="field"><span>城市</span><input id="dateCity" placeholder="输入约会城市" required></label></div>
+        <div class="two-fields"><label class="field"><span>日期</span><input id="dateDay" type="date" required></label><label class="field"><span>地点关键词</span><input id="dateCity" placeholder="例如：西湖、迪士尼" autocomplete="off" required></label></div>
+        <label class="field"><span>城市 / 地区 <small>用于区分同名地点</small></span><input id="dateRegion" placeholder="例如：杭州市、上海市"></label>
+        <button type="button" class="secondary-button" data-action="search-date-place">查找具体地点</button>
+        <div id="datePlaceCandidates" class="destination-candidates" role="listbox" aria-label="约会地点候选" hidden></div>
+        <div id="datePlaceSelection" class="destination-selection" role="status">尚未选择具体地点</div>
         <div class="two-fields"><label class="field"><span>开始</span><input id="dateStart" type="time" value="14:00" required></label><label class="field"><span>结束</span><input id="dateEnd" type="time" value="21:00" required></label></div>
         <label class="field"><span>总预算（元）</span><input id="dateBudget" type="number" min="0" max="100000" value="500" required></label>
         <label class="field"><span>偏好</span><select id="datePreference"><option value="不限">都可以</option><option value="室内">室内为主</option><option value="室外">室外为主</option><option value="美食">美食</option><option value="展览">展览</option><option value="运动">运动</option></select></label>
-        <button class="primary-button">生成五套约会方案</button>
+        <button class="primary-button" type="submit" disabled>生成五套约会方案</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="decisionModal" role="dialog" aria-modal="true" aria-labelledby="decisionModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">DECIDE TOGETHER</span><h2 id="decisionModalTitle">创建双人决策</h2>
+      <form id="decisionForm">
+        <label class="field"><span>要一起决定什么</span><input id="decisionTitle" maxlength="200" required></label>
+        <label class="field"><span>选项 <small>每行一个，2–6 个</small></span><textarea id="decisionOptions" maxlength="1800" required placeholder="选项一&#10;选项二"></textarea></label>
+        <label class="field"><span>选择方式</span><select id="decisionMode"><option value="single">单选</option><option value="multiple">多选</option></select></label>
+        <label class="field"><span>截止时间</span><input id="decisionDeadline" type="datetime-local" required></label>
+        <button class="primary-button" type="submit">创建并邀请 TA 选择</button>
       </form>
     </div>
   </div>
@@ -636,6 +790,7 @@
   <div class="modal" id="tripModal" role="dialog" aria-modal="true" aria-labelledby="tripModalTitle" aria-hidden="true">
     <div class="sheet scroll-sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PLAN A NEW ESCAPE</span><h2 id="tripModalTitle">创建一段新旅行</h2>
+      <p id="tripPrefillNotice" class="conversion-prefill-notice" hidden>尚未保存：请明确选择地图地点并补全日期、预算后再生成。</p>
       <form id="tripForm">
         <div class="two-fields"><label class="field"><span>从哪里出发</span><input id="tripDepartureCity" maxlength="80" placeholder="例如：杭州" required></label><label class="field"><span>到达城市 / 枢纽</span><input id="tripArrivalCity" maxlength="80" placeholder="例如：上海、东京"></label></div>
         <div class="destination-search-block">
@@ -677,11 +832,15 @@
   <div class="modal" id="calendarModal" role="dialog" aria-modal="true" aria-labelledby="calendarModalTitle" aria-hidden="true">
     <div class="sheet scroll-sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">LIFE TOGETHER</span><h2 id="calendarModalTitle">添加共同事项</h2>
+      <p id="calendarPrefillNotice" class="conversion-prefill-notice" hidden>尚未保存：请确认日期后再保存到共同生活。</p>
       <form id="calendarForm">
         <label class="field"><span>类型</span><select id="calendarType"><option value="event">日历事件</option><option value="anniversary">纪念日</option><option value="todo">双人待办</option></select></label>
         <label class="field"><span>标题</span><input id="calendarTitle" maxlength="160" required></label>
-        <label class="field"><span>日期</span><input id="calendarStart" type="date" required></label>
-        <label class="field"><span>重复</span><select id="calendarRecurrence"><option value="none">不重复</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
+        <label class="field check-field"><input id="calendarAllDay" type="checkbox" checked><span>全天事项</span></label>
+        <div class="two-fields"><label class="field"><span>开始</span><input id="calendarStart" type="datetime-local" required></label><label class="field"><span>结束 <small>占用时间时必填</small></span><input id="calendarEnd" type="datetime-local"></label></div>
+        <label class="field"><span>参与人</span><select id="calendarParticipants" multiple></select></label>
+        <label class="field check-field"><input id="calendarBlocksTime" type="checkbox"><span>这项安排占用约会时间</span></label>
+        <label class="field"><span>重复</span><select id="calendarRecurrence"><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
         <label class="field"><span>地点与备注</span><input id="calendarLocation" placeholder="地点（可选）"><textarea id="calendarNote" placeholder="想一起记住的细节"></textarea></label>
         <button class="primary-button">保存到共同生活</button>
       </form>
@@ -693,9 +852,23 @@
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">OUR WISHES</span><h2 id="wishlistModalTitle">添加共同愿望</h2>
       <form id="wishlistForm">
         <label class="field"><span>想一起完成什么</span><input id="wishlistText" maxlength="300" required></label>
+        <label class="field"><span>类型</span><select id="wishlistKind"><option value="general">共同愿望</option><option value="gift">礼物心愿（伴侣可惊喜认领）</option><option value="meal">想吃</option><option value="travel">想去</option></select></label>
         <label class="field"><span>备注</span><textarea id="wishlistNote" maxlength="1000" placeholder="时间、地点或想记住的细节"></textarea></label>
         <button class="primary-button">保存共同愿望</button>
       </form>
+    </div>
+  </div>
+
+  <div class="modal" id="expressionModal" role="dialog" aria-modal="true" aria-labelledby="expressionModalTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">HELP ME SAY IT</span><h2 id="expressionModalTitle">帮我表达</h2>
+      <p class="form-note">只整理你这次选择的一条本人消息或当前草稿，不会读取前后文，也不会自动发送。</p>
+      <form id="expressionForm">
+        <label class="field"><span>方式</span><select id="expressionMode"><option value="gentle">说得更温和</option><option value="needs">整理感受、需要与请求</option><option value="summary">总结我这段话</option></select></label>
+        <label class="field"><span>当前文字</span><textarea id="expressionSource" maxlength="4000" required></textarea></label>
+        <button class="primary-button">生成建议</button>
+      </form>
+      <section id="expressionPreview" hidden><label class="field"><span>建议</span><textarea id="expressionResult" maxlength="4000"></textarea></label><button class="primary-button" data-action="apply-expression">放回输入框（不会发送）</button></section>
     </div>
   </div>
 
@@ -729,6 +902,17 @@
         </div>
         <p class="form-note">iPhone/iPad 需 iOS/iPadOS 16.4 以上、先添加到主屏幕并使用 HTTPS。聊天、共同留言和来电只显示通用隐私文案，点击后进入对应页面；来电不是系统全屏 CallKit。</p>
       </section>
+      <section class="push-settings" aria-labelledby="privacyUsageTitle">
+        <h3 id="privacyUsageTitle">AI 用量与内容授权</h3>
+        <div id="privacyUsage" aria-live="polite"><p class="form-note">正在读取本月真实用量…</p></div>
+        <div id="privacyGrants" class="device-list" aria-live="polite"></div>
+        <p class="form-note">这里只显示授权元数据，不展示聊天、照片、提示词或模型回复。撤回会阻止后续 AI 调用；已经发送给模型的数据无法收回。</p>
+      </section>
+      <section class="push-settings" aria-labelledby="offlineSyncTitle">
+        <h3 id="offlineSyncTitle">离线待同步</h3>
+        <div id="offlineSyncStatus" class="device-list" aria-live="polite"><p class="form-note">正在检查当前设备的离线操作…</p></div>
+        <p class="form-note">消息和采购勾选在断网时只保存在当前设备。需要处理的项目不会静默丢失；丢弃前会再次确认。</p>
+      </section>
       <form id="changePasswordForm" class="account-password-form">
         <h3>更换登录密码</h3>
         <label class="field"><span>当前密码</span><input id="currentPassword" type="password" autocomplete="current-password" required></label>
@@ -751,6 +935,16 @@
     </div>
   </div>
 
+  <div class="cooking-screen" id="cookingScreen" role="dialog" aria-modal="true" aria-labelledby="cookingTitle" aria-hidden="true">
+    <header class="cooking-header"><div><span class="eyebrow">COOK TOGETHER</span><h2 id="cookingTitle">烹饪模式</h2><p id="cookingStatus">步骤会保存在双方空间</p></div><button data-action="close-cooking" aria-label="退出烹饪模式">×</button></header>
+    <main class="cooking-main">
+      <section class="cooking-step" aria-live="polite"><span id="cookingStepNumber">第 1 步</span><h3 id="cookingStepTitle">准备开始</h3><p id="cookingStepInstruction">正在读取菜谱…</p><div id="cookingStepMeta"></div></section>
+      <section class="cooking-timers"><div class="cooking-section-title"><h3>多个计时器</h3><button data-action="start-cook-timer">添加计时器</button></div><div id="cookTimerLive" aria-live="polite"></div></section>
+      <section id="cookingPantryPanel" class="cooking-pantry" hidden><h3>烹饪完成后的人工核对</h3><p>不会自动扣减库存。只勾选确实变少或用完的食材，再逐项确认。</p><div id="cookingPantrySuggestions"></div><button class="primary-button" data-action="apply-cook-pantry">人工更新库存</button><div id="cookingPantryReceipts" class="cooking-pantry-receipts" aria-live="polite"></div></section>
+    </main>
+    <footer class="cooking-controls"><button data-action="previous-cook-step">上一步</button><button data-action="speak-cook-step">朗读当前步骤</button><button data-action="next-cook-step">下一步</button><button class="primary-button" data-action="complete-cooking">结束烹饪</button><button data-action="cancel-cooking">取消本次</button></footer>
+  </div>
+
   <div class="call-screen" id="callScreen" role="dialog" aria-modal="true" aria-labelledby="callTitle" aria-hidden="true">
     <div class="call-glow"></div><span class="eyebrow">LOVE CALL</span><div class="avatar avatar-b call-avatar">♡</div><h2 id="callTitle">伴侣</h2><p id="callStatus">正在连接安全通话…</p><strong id="callTimer">00:00</strong>
     <audio id="remoteCallAudio" autoplay playsinline></audio>
@@ -758,7 +952,7 @@
     <div class="call-controls" id="activeCallControls"><button data-action="mute">⌁<small>静音</small></button><button data-action="speaker">◖<small>扬声器</small></button><button class="hangup" data-action="end-call">×<small>挂断</small></button></div>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/vendor/agora-rtc-sdk-ng-4.24.8.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="../../static/vendor/agora-rtc-sdk-ng-4.24.8.js"></script>
+  <script src="../../static/app.js"></script>
 </body>
 </html>

@@ -155,9 +155,9 @@ class LifeAssistantSchemaTests(unittest.TestCase):
 
     def test_schema_version_and_required_tables_are_installed(self) -> None:
         LoveMomentsStore(self.db_path, seed_demo_data=True)
-        self.assertEqual(SCHEMA_VERSION, 33)
+        self.assertEqual(SCHEMA_VERSION, 34)
         with sqlite3.connect(self.db_path) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 33)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 34)
             tables = {
                 row[0]
                 for row in db.execute(
@@ -345,6 +345,25 @@ class LifeAssistantPlanTests(unittest.TestCase):
                 db.execute("SELECT COUNT(*) FROM shopping_list_items").fetchone()[0],
                 0,
             )
+            calendar = db.execute(
+                """
+                SELECT participant_a_id,participant_b_id,blocks_time,source_type
+                FROM calendar_entries ORDER BY rowid DESC LIMIT 1
+                """
+            ).fetchone()
+            self.assertEqual(
+                {calendar["participant_a_id"], calendar["participant_b_id"]},
+                {DEMO_USER, DEMO_PARTNER},
+            )
+            self.assertEqual(calendar["blocks_time"], 0)
+            self.assertEqual(calendar["source_type"], "rules")
+        self.assertEqual(
+            second["result"]["calendar"][0]["participant_ids"],
+            [DEMO_USER, DEMO_PARTNER],
+        )
+        self.assertNotIn(
+            "participant_a_id", second["result"]["calendar"][0]
+        )
 
     def test_repeated_confirmation_key_is_idempotent(self) -> None:
         plan = self.create_plan()

@@ -33,7 +33,7 @@ from love_moments.life_assistant import life_assistant_from_env
 
 ROOT = Path(__file__).resolve().parent
 load_env(ROOT / ".env")
-APP_INDEX = ROOT / "static" / "index.html"
+PROTOTYPE = ROOT / "static" / "index.html"
 DB_PATH_VALUE = Path(os.getenv("DATABASE_PATH", "data/love_moments.db"))
 DB_PATH = DB_PATH_VALUE if DB_PATH_VALUE.is_absolute() else ROOT / DB_PATH_VALUE
 MEDIA_ROOT_VALUE = Path(os.getenv("MEDIA_ROOT", "data/media"))
@@ -333,6 +333,97 @@ class DailySummaryWorker:
 DAILY_SUMMARY_WORKER = DailySummaryWorker()
 
 
+class FutureLetterWorker:
+    """Deliver due letters without exposing their title or body to push payloads."""
+
+    def __init__(self, interval_seconds: float = 20.0):
+        self.interval_seconds = max(5.0, float(interval_seconds))
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._run, name="future-letter-worker", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                result = STORE.deliver_due_future_letters(limit=50)
+                for delivery in result.get("push_recipients", []):
+                    queue_web_push(
+                        delivery["user_id"],
+                        {
+                            "type": "future_letter",
+                            "title": "未来信已送达",
+                            "body": "一封定时信件已经可以打开，点击进入恋屿查看。",
+                            "url": delivery["url"],
+                            "tag": delivery["tag"],
+                        },
+                        ttl_seconds=86400,
+                    )
+            except Exception as error:
+                PROVIDER_FAILURES.failure("future-letter", "未来信投递任务", error)
+            self.stop_event.wait(self.interval_seconds)
+
+
+FUTURE_LETTER_WORKER = FutureLetterWorker()
+
+
+ALBUM_EXPORT_WAKE = threading.Event()
+
+
+class AlbumExportWorker:
+    """Generate short-lived PDFs outside HTTP request threads."""
+
+    def __init__(self, interval_seconds: float = 2.0):
+        self.interval_seconds = max(0.5, float(interval_seconds))
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        STORE.recover_album_export_jobs()
+        STORE.cleanup_expired_album_exports()
+        self.thread = threading.Thread(target=self._run, name="album-export-worker", daemon=True)
+        self.thread.start()
+
+    def wake(self) -> None:
+        ALBUM_EXPORT_WAKE.set()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        ALBUM_EXPORT_WAKE.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+    def _run(self) -> None:
+        last_cleanup = 0.0
+        while not self.stop_event.is_set():
+            try:
+                job = STORE.claim_album_export_job()
+                if job:
+                    STORE.run_album_export_job(job)
+                    continue
+                if time.monotonic() - last_cleanup >= 45:
+                    STORE.cleanup_expired_album_exports()
+                    last_cleanup = time.monotonic()
+            except Exception as error:
+                PROVIDER_FAILURES.failure("album-export", "纪念册生成任务", error)
+            ALBUM_EXPORT_WAKE.wait(self.interval_seconds)
+            ALBUM_EXPORT_WAKE.clear()
+
+
+ALBUM_EXPORT_WORKER = AlbumExportWorker()
+
+
 def registration_mode() -> str:
     mode = os.getenv("REGISTRATION_MODE", "open").strip().lower()
     return mode if mode in {"open", "closed"} else "closed"
@@ -408,6 +499,14 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def log_message(self, format: str, *args: object) -> None:
+        safe_args = tuple(
+            re.sub(r"(/api/v1/memories/search)\?[^\s\"]*", r"\1", str(value))
+            if "/api/v1/memories/search?" in str(value) else value
+            for value in args
+        )
+        super().log_message(format, *safe_args)
 
     def _send_json(self, payload: object, status: int = 200, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -532,6 +631,14 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             raise ValueError("请求内容必须是对象")
         return value
 
+    def _attach_idempotency_key(self, payload: dict) -> dict:
+        header = str(self.headers.get("Idempotency-Key") or "").strip()
+        body = str(payload.get("idempotency_key") or "").strip()
+        if header and body and header != body:
+            raise ValueError("请求头与请求内容中的幂等键不一致")
+        payload["idempotency_key"] = header or body
+        return payload
+
     def _read_bytes(self, maximum: int = 200 * 1024 * 1024) -> bytes:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -548,7 +655,7 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
 
     def _send_media(self, media_id: str, user: dict, thumbnail: bool = False, ticket: str | None = None) -> None:
         content, mime_type, _ = STORE.get_media_content(media_id, user_id=user["id"], thumbnail=thumbnail, access_ticket=ticket)
-        extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}.get(mime_type, "")
+        extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "audio/webm": ".webm", "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}.get(mime_type, "")
         filename = f"{re.sub(r'[^A-Za-z0-9_-]', '', media_id)[:100]}{'-thumbnail' if thumbnail else ''}{extension}"
         self.send_response(200)
         self.send_header("Content-Type", mime_type)
@@ -565,6 +672,18 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _send_album_export(self, job_id: str, user: dict) -> None:
+        content, filename = STORE.get_album_export_download(job_id, user["id"])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(content)
 
@@ -601,6 +720,7 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(b": keep-alive\n\n")
                     self.wfile.flush()
                     last_heartbeat = time.monotonic()
+                cursor = max(cursor, result["latest_sequence"])
                 time.sleep(0.35)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -855,9 +975,68 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.get_date_plan(match.group(1), user_id=user["id"]))
             return
+        elif path == "/api/v1/decisions":
+            user = self._require_user()
+            self._send_json({
+                "items": STORE.list_decisions(
+                    user["id"], status=query.get("status", [None])[0],
+                )
+            })
+            return
+        elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)", path):
+            user = self._require_user()
+            self._send_json(STORE.get_decision(match.group(1), user["id"]))
+            return
         elif path == "/api/v1/moments":
             user = self._require_user()
             self._send_json({"items": STORE.list_moments(user_id=user["id"])})
+            return
+        elif match := re.fullmatch(r"/api/v1/voice-memories/([^/]+)", path):
+            user = self._require_user()
+            self._send_json(STORE.get_voice_memory(match.group(1), user["id"]))
+            return
+        elif path == "/api/v1/future-letters":
+            user = self._require_user()
+            self._send_json(STORE.list_future_letters(
+                user["id"], scope=query.get("scope", ["mine"])[0],
+            ))
+            return
+        elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)", path):
+            user = self._require_user()
+            self._send_json(STORE.get_future_letter(match.group(1), user["id"]))
+            return
+        elif path == "/api/v1/album-exports":
+            user = self._require_user()
+            self._send_json(STORE.list_album_export_jobs(user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/album-exports/([^/]+)/download", path):
+            user = self._require_user()
+            self._send_album_export(match.group(1), user)
+            return
+        elif match := re.fullmatch(r"/api/v1/album-exports/([^/]+)", path):
+            user = self._require_user()
+            self._send_json(STORE.get_album_export_job(match.group(1), user["id"]))
+            return
+        elif path == "/api/v1/memories/search":
+            user = self._require_user()
+            self._send_json(STORE.search_memories(
+                keyword=query.get("q", [""])[0],
+                start_date=query.get("start_date", [None])[0],
+                end_date=query.get("end_date", [None])[0],
+                content_type=query.get("type", ["all"])[0],
+                person_id=query.get("person_id", [None])[0],
+                cursor=query.get("cursor", [None])[0],
+                limit=query.get("limit", [20])[0],
+                user_id=user["id"],
+            ))
+            return
+        elif path == "/api/v1/memories/completion":
+            user = self._require_user()
+            self._send_json(STORE.list_memory_completion_suggestions(user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/memories/(moment|trip)/([^/]+)/descriptions", path):
+            user = self._require_user()
+            self._send_json(STORE.get_memory_descriptions(match.group(1), match.group(2), user["id"]))
             return
         elif path == "/api/v1/moments/trash":
             user = self._require_user()
@@ -911,6 +1090,37 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.get_shopping_list(user["id"]))
             return
+        elif path == "/api/v1/food-profiles":
+            user = self._require_user()
+            self._send_json(STORE.get_food_profiles(user["id"]))
+            return
+        elif path == "/api/v1/pantry/items":
+            user = self._require_user()
+            self._send_json(STORE.list_pantry_items(user["id"]))
+            return
+        elif path == "/api/v1/shopping-category-order":
+            user = self._require_user()
+            self._send_json(STORE.get_shopping_category_order(user["id"]))
+            return
+        elif path == "/api/v1/weekly-meal-plans/active":
+            user = self._require_user()
+            self._send_json(STORE.get_active_weekly_meal_plan_draft(user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/meal-cart/items/([^/]+)/ingredient-substitutions", path):
+            user = self._require_user()
+            self._send_json(STORE.list_ingredient_substitutions(match.group(1), user["id"]))
+            return
+        elif path == "/api/v1/cook-sessions":
+            user = self._require_user()
+            self._send_json({"items": STORE.list_cook_sessions(
+                user["id"], status=query.get("status", ["active"])[0],
+                meal_item_id=query.get("meal_item_id", [None])[0],
+            )})
+            return
+        elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)", path):
+            user = self._require_user()
+            self._send_json(STORE.get_cook_session(match.group(1), user["id"]))
+            return
         elif path == "/api/v1/trips":
             user = self._require_user()
             self._send_json({"items": STORE.list_trips(user["id"])})
@@ -922,6 +1132,30 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/route-legs", path):
             user = self._require_user()
             self._send_json(STORE.trip_route_legs(match.group(1), user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/negotiation", path):
+            user = self._require_user()
+            self._send_json(STORE.get_trip_negotiation(match.group(1), user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/realism-checks/current", path):
+            user = self._require_user()
+            self._send_json(STORE.get_trip_realism_check(match.group(1), user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/packing", path):
+            user = self._require_user()
+            self._send_json(STORE.list_trip_packing(match.group(1), user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/emergency", path):
+            user = self._require_user()
+            self._send_json(STORE.list_trip_emergency(match.group(1), user["id"]))
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses", path):
+            user = self._require_user()
+            self._send_json(STORE.list_trip_expenses(match.group(1), user["id"]), headers={"Cache-Control": "no-store"})
+            return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/offline-snapshot", path):
+            user = self._require_user()
+            self._send_json(STORE.get_trip_offline_snapshot(match.group(1), user["id"]), headers={"Cache-Control": "no-store"})
             return
         elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/assistant", path):
             user = self._require_user()
@@ -958,6 +1192,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         elif match := re.fullmatch(r"/api/v1/timeline/reports/(\d{4})", path):
             user = self._require_user()
             self._send_json(STORE.annual_report(int(match.group(1)), user["id"]))
+            return
+        elif path == "/api/v1/account/privacy":
+            user = self._require_user()
+            self._send_json(STORE.get_privacy_center(user["id"]), headers={"Cache-Control": "no-store"})
             return
         elif path == "/api/v1/account/devices":
             user = self._require_user()
@@ -1089,6 +1327,67 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     payload.get("new_password_confirmation"),
                     user["id"],
                     self._session_token(),
+                ))
+            elif match := re.fullmatch(r"/api/v1/mutations/([^/]+)/undo", path):
+                self._send_json(STORE.undo_mutation(match.group(1), user["id"]))
+            elif path == "/api/v1/memories/search":
+                allowed = {"q", "start_date", "end_date", "type", "person_id", "cursor", "limit"}
+                if set(payload) - allowed:
+                    raise ValueError("回忆搜索包含不支持的字段")
+                self._send_json(STORE.search_memories(
+                    keyword=payload.get("q", ""),
+                    start_date=payload.get("start_date"),
+                    end_date=payload.get("end_date"),
+                    content_type=payload.get("type", "all"),
+                    person_id=payload.get("person_id"),
+                    cursor=payload.get("cursor"),
+                    limit=payload.get("limit", 20),
+                    user_id=user["id"],
+                ))
+            elif path == "/api/v1/memories/completion/refresh":
+                self._send_json(STORE.refresh_memory_completion_suggestions(user["id"]))
+            elif match := re.fullmatch(r"/api/v1/memories/completion/([^/]+)/respond", path):
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.respond_memory_completion_suggestion(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/memories/moments/([^/]+)/merge-proposal", path):
+                self._send_json(STORE.propose_memory_description_merge(match.group(1), payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/memories/moments/([^/]+)/merge-confirm", path):
+                self._send_json(STORE.confirm_memory_description_merge(
+                    match.group(1), payload.get("proposal_id"), payload.get("expected_version"), user["id"],
+                ))
+            elif path == "/api/v1/voice-memories":
+                idempotency_key = self.headers.get("Idempotency-Key") or payload.pop("idempotency_key", None)
+                self._send_json(STORE.create_voice_memory(
+                    payload, user["id"], idempotency_key,
+                ), 201)
+            elif path == "/api/v1/future-letters":
+                idempotency_key = self.headers.get("Idempotency-Key") or payload.pop("idempotency_key", None)
+                self._send_json(STORE.create_future_letter(
+                    payload, user["id"], idempotency_key,
+                ), 201)
+            elif path == "/api/v1/album-exports/preview":
+                self._send_json(STORE.preview_album_export(payload, user["id"]))
+            elif path == "/api/v1/album-exports":
+                idempotency_key = self.headers.get("Idempotency-Key") or payload.pop("idempotency_key", None)
+                result = STORE.create_album_export_job(payload, user["id"], idempotency_key)
+                ALBUM_EXPORT_WORKER.wake()
+                self._send_json(result, 202)
+            elif match := re.fullmatch(r"/api/v1/album-exports/([^/]+)/cancel", path):
+                self._send_json(STORE.cancel_album_export_job(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)/seal", path):
+                self._send_json(STORE.seal_future_letter(
+                    match.group(1), payload.get("deliver_at"), payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)/cancel", path):
+                self._send_json(STORE.cancel_future_letter(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)/convert-to-moment", path):
+                self._send_json(STORE.convert_future_letter_to_moment(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
                 ))
             elif path == "/api/v1/push/subscriptions":
                 if not PUSH.enabled:
@@ -1271,8 +1570,55 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.apply_shopping_preview(payload, user["id"]))
             elif path == "/api/v1/shopping-lists/items":
                 self._send_json(STORE.create_shopping_item(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/shopping-lists/items/([^/]+)/stock", path):
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.stock_shopping_item(match.group(1), payload, user["id"]))
             elif path == "/api/v1/shopping-lists/complete":
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
                 self._send_json(STORE.complete_shopping_list(payload, user["id"]))
+            elif path == "/api/v1/pantry/items":
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.upsert_pantry_item(payload, user["id"]), 201)
+            elif path == "/api/v1/weekly-meal-plans/drafts":
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.create_weekly_meal_plan_draft(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/weekly-meal-plans/drafts/([^/]+)/confirm", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.confirm_weekly_meal_plan_draft(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/weekly-meal-plans/drafts/([^/]+)/cancel", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.cancel_weekly_meal_plan_draft(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/meal-cart/items/([^/]+)/ingredient-substitutions/preview", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.preview_ingredient_substitutions(match.group(1), payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/meal-cart/items/([^/]+)/ingredient-substitutions/([^/]+)/apply", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.apply_ingredient_substitution(
+                    match.group(1), match.group(2), payload, user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/meal-cart/items/([^/]+)/ingredient-substitutions/([^/]+)/dismiss", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.dismiss_ingredient_substitution(
+                    match.group(1), match.group(2), payload, user["id"],
+                ))
+            elif path == "/api/v1/cook-sessions":
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.start_cook_session(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/timers", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.start_cook_timer(match.group(1), payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/timers/([^/]+)/cancel", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.cancel_cook_timer(match.group(1), match.group(2), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/complete", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.complete_cook_session(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/cancel", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.cancel_cook_session(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/pantry", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.apply_cook_pantry_updates(match.group(1), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/moments/([^/]+)/trash", path):
                 self._send_json(STORE.trash_moment(match.group(1), user["id"]))
             elif match := re.fullmatch(r"/api/v1/moments/([^/]+)/restore", path):
@@ -1350,6 +1696,39 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.compose_plan(match.group(1), payload.get("selected_item_ids", []), user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/approve", path):
                 self._send_json(STORE.approve_trip(match.group(1), payload.get("revision", 0), user_id=user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/realism-checks", path):
+                payload["client_request_id"] = self.headers.get("Idempotency-Key") or payload.get("client_request_id") or payload.get("idempotency_key")
+                self._send_json(STORE.run_trip_realism_check(match.group(1), payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/packing/generate", path):
+                payload["client_request_id"] = self.headers.get("Idempotency-Key") or payload.get("client_request_id") or payload.get("idempotency_key")
+                self._send_json(STORE.generate_trip_packing(match.group(1), payload, user["id"], WEATHER), 201)
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/packing", path):
+                self._send_json(STORE.create_trip_packing_item(
+                    match.group(1), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ), 201)
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/hospitals/search", path):
+                self._send_json(STORE.search_trip_hospitals(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/emergency", path):
+                self._send_json(STORE.create_trip_emergency(
+                    match.group(1), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ), 201)
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses/settle", path):
+                self._send_json(STORE.settle_trip_expenses(
+                    match.group(1), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses/([^/]+)/restore", path):
+                self._send_json(STORE.restore_trip_expense(
+                    match.group(1), match.group(2), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses", path):
+                self._send_json(STORE.create_trip_expense(
+                    match.group(1), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ), 201)
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/assistant/live", path):
                 self._send_json(STORE.live_trip_status(match.group(1), payload, user["id"], WEATHER))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/assistant/navigation", path):
@@ -1466,10 +1845,38 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(comment, 201)
             elif path == "/api/v1/lists/wishlist/items":
                 self._send_json(STORE.create_wishlist_item(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/lists/items/([^/]+)/claim", path):
+                self._send_json(STORE.claim_wishlist_item(
+                    match.group(1), payload.get("private_note", ""),
+                    payload.get("reveal_claimant", False), payload.get("expected_version"),
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ), 201)
+            elif match := re.fullmatch(r"/api/v1/lists/items/([^/]+)/claim/release", path):
+                self._send_json(STORE.release_wishlist_claim(
+                    match.group(1), payload.get("expected_version"),
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/lists/items/([^/]+)/claim/complete", path):
+                self._send_json(STORE.complete_wishlist_claim(
+                    match.group(1), payload.get("expected_version"),
+                    payload.get("reveal_claimant", False), payload.get("create_moment", False),
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
+            elif path == "/api/v1/expression/suggestions":
+                self._send_json(STORE.suggest_expression(
+                    mode=payload.get("mode"), message_id=payload.get("message_id"),
+                    draft=payload.get("draft"),
+                    idempotency_key=self.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
+                    user_id=user["id"],
+                ))
             elif match := re.fullmatch(r"/api/v1/calendar/([^/]+)/complete", path):
                 self._send_json(STORE.complete_calendar_entry(match.group(1), bool(payload.get("completed", True)), payload.get("expected_version"), user["id"]))
             elif path == "/api/v1/preferences":
                 self._send_json(STORE.create_preference(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/account/privacy/grants/([^/]+)/revoke", path):
+                self._send_json(STORE.revoke_ai_context_grant(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                ))
             elif match := re.fullmatch(r"/api/v1/account/devices/([^/]+)/revoke", path):
                 self._send_json(STORE.revoke_device(match.group(1), user["id"], self._session_token()))
             elif path == "/api/v1/couple/unlink":
@@ -1487,7 +1894,11 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/v1/weekly-reviews/([^/]+)/confirm", path):
                 self._send_json(STORE.confirm_weekly_review(match.group(1), user_id=user["id"]))
             elif path == "/api/v1/date-plans":
-                self._send_json(STORE.create_date_plan(payload, user_id=user["id"]), 201)
+                if not str(payload.get("place_candidate_id") or "").strip():
+                    raise ValueError("请先搜索并明确选择一个具体地点")
+                self._send_json(STORE.create_date_plan(
+                    payload, user_id=user["id"], weather_provider=WEATHER,
+                ), 201)
             elif match := re.fullmatch(r"/api/v1/date-plans/([^/]+)/generate", path):
                 self._send_json(STORE.generate_date_plan(match.group(1), user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/date-plans/([^/]+)/compose", path):
@@ -1496,6 +1907,22 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.confirm_date_plan(match.group(1), payload.get("version"), user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/date-plans/([^/]+)/complete", path):
                 self._send_json(STORE.complete_date_plan(match.group(1), payload, user_id=user["id"]))
+            elif path == "/api/v1/decisions":
+                self._send_json(STORE.create_decision(payload, user["id"]), 201)
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)/conversion-preview", path):
+                self._send_json(STORE.prepare_decision_conversion(
+                    match.group(1), payload.get("target"), payload.get("option_id"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)/resolve", path):
+                self._send_json(STORE.resolve_decision(
+                    match.group(1), payload.get("action"), payload.get("option_id"),
+                    payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)/extend", path):
+                self._send_json(STORE.extend_decision(
+                    match.group(1), payload.get("deadline_at"),
+                    payload.get("expected_version"), user["id"],
+                ))
             elif path == "/api/v1/couples/invites":
                 self._send_json(STORE.create_user_invite(user["id"]), 201)
             elif path == "/api/v1/couples/invites/accept":
@@ -1550,12 +1977,29 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             payload = self._read_json()
             if path == "/api/v1/me/status":
                 self._send_json(STORE.set_status(payload, user_id=user["id"]))
+            elif match := re.fullmatch(r"/api/v1/memories/(moment|trip)/([^/]+)/descriptions/me", path):
+                self._send_json(STORE.save_memory_description(match.group(1), match.group(2), payload, user["id"]))
+            elif path == "/api/v1/food-profiles/me":
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.update_my_food_profile(payload, user["id"]))
+            elif path == "/api/v1/shopping-category-order":
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.update_shopping_category_order(payload, user["id"]))
             elif path == "/api/v1/me/location":
                 self._send_json(STORE.set_location(payload, user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/weekly-reviews/([^/]+)/answer", path):
                 self._send_json(STORE.answer_weekly_review(match.group(1), payload, user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/date-plans/([^/]+)/vote", path):
                 self._send_json(STORE.vote_date_plan(match.group(1), str(payload.get("variant_id", "")), user_id=user["id"]))
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)/vote", path):
+                self._send_json(STORE.submit_decision_vote(
+                    match.group(1), payload.get("option_ids"), payload.get("expected_version"),
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
+                    user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/negotiation/preferences", path):
+                payload["client_request_id"] = self.headers.get("Idempotency-Key") or payload.get("client_request_id") or payload.get("idempotency_key")
+                self._send_json(STORE.submit_trip_item_preferences(match.group(1), payload, user["id"]))
             else:
                 self._send_json({"error": "接口不存在"}, 404)
         except Exception as error:
@@ -1573,6 +2017,15 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.update_trip_recap_draft(match.group(1), match.group(2), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/items/([^/]+)", path):
                 self._send_json(STORE.revise_item(match.group(1), payload.get("changes", {}), str(payload.get("reason", "用户手动调整")), user_id=user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/packing/([^/]+)", path):
+                self._send_json(STORE.update_trip_packing_item(match.group(1), match.group(2), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/emergency/([^/]+)", path):
+                self._send_json(STORE.update_trip_emergency(match.group(1), match.group(2), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses/([^/]+)", path):
+                self._send_json(STORE.update_trip_expense(
+                    match.group(1), match.group(2), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)", path):
                 self._send_json(STORE.update_trip_logistics(match.group(1), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/lists/items/([^/]+)", path):
@@ -1582,6 +2035,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     self._send_json(STORE.update_wishlist_item(match.group(1), payload, user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/moments/([^/]+)", path):
                 self._send_json(STORE.update_moment(match.group(1), payload, user_id=user["id"]))
+            elif match := re.fullmatch(r"/api/v1/voice-transcripts/([^/]+)", path):
+                self._send_json(STORE.update_voice_transcript(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)", path):
+                self._send_json(STORE.update_future_letter(match.group(1), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/chat-imports/([^/]+)/items/([^/]+)", path):
                 self._send_json(STORE.update_chat_import_item(match.group(1), match.group(2), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/calendar/([^/]+)", path):
@@ -1596,6 +2053,15 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.update_meal_cart_item(match.group(1), payload, user["id"]))
             elif match := re.fullmatch(r"/api/v1/shopping-lists/items/([^/]+)", path):
                 self._send_json(STORE.update_shopping_item(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/pantry/items/([^/]+)", path):
+                payload["idempotency_key"] = self.headers.get("Idempotency-Key") or payload.get("idempotency_key")
+                self._send_json(STORE.update_pantry_item(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/weekly-meal-plans/drafts/([^/]+)/items/([^/]+)", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.update_weekly_meal_plan_item(match.group(1), match.group(2), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/cook-sessions/([^/]+)/step", path):
+                self._attach_idempotency_key(payload)
+                self._send_json(STORE.set_cook_session_step(match.group(1), payload, user["id"]))
             elif path == "/api/v1/assistant/settings":
                 self._send_json(
                     STORE.update_life_assistant_settings(payload, user["id"])
@@ -1608,6 +2074,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                         match.group(1), payload, user["id"]
                     )
                 )
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)", path):
+                self._send_json(STORE.update_decision(match.group(1), payload, user["id"]))
             else:
                 self._send_json({"error": "接口不存在"}, 404)
         except Exception as error:
@@ -1628,6 +2096,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.purge_media(match.group(1), user["id"]))
             elif match := re.fullmatch(r"/api/v1/moments/([^/]+)", path):
                 self._send_json(STORE.purge_moment(match.group(1), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/future-letters/([^/]+)", path):
+                self._send_json(STORE.delete_future_letter(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                ))
             elif match := re.fullmatch(r"/api/v1/shared-comments/([^/]+)", path):
                 self._send_json(STORE.delete_shared_comment(match.group(1), payload.get("expected_version"), user["id"]))
             elif match := re.fullmatch(r"/api/v1/calendar/([^/]+)", path):
@@ -1644,8 +2116,25 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.cancel_meal_cart_item(match.group(1), payload.get("expected_version"), user["id"]))
             elif match := re.fullmatch(r"/api/v1/shopping-lists/items/([^/]+)", path):
                 self._send_json(STORE.delete_shopping_item(match.group(1), payload.get("expected_version"), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/packing/([^/]+)", path):
+                self._send_json(STORE.delete_trip_packing_item(
+                    match.group(1), match.group(2), payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/emergency/([^/]+)", path):
+                self._send_json(STORE.delete_trip_emergency(
+                    match.group(1), match.group(2), payload.get("expected_version"), user["id"],
+                ))
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/expenses/([^/]+)", path):
+                self._send_json(STORE.delete_trip_expense(
+                    match.group(1), match.group(2), payload,
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"), user["id"],
+                ))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)", path):
                 self._send_json(STORE.delete_trip(match.group(1), payload.get("expected_version"), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/decisions/([^/]+)", path):
+                self._send_json(STORE.cancel_decision(
+                    match.group(1), payload.get("expected_version"), user["id"],
+                ))
             else:
                 self._send_json({"error": "接口不存在"}, 404)
         except Exception as error:
@@ -1678,20 +2167,24 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    if not APP_INDEX.exists():
-        raise SystemExit(f"Application page not found: {APP_INDEX}")
+    if not PROTOTYPE.exists():
+        raise SystemExit(f"Prototype not found: {PROTOTYPE}")
     host = os.getenv("APP_HOST", "127.0.0.1")
     port = int(os.getenv("APP_PORT", "18765"))
     server = ThreadingHTTPServer((host, port), LoveMomentsHandler)
     PUSH_OUTBOX_WORKER.start()
     TRIP_GENERATION_WORKER.start()
     DAILY_SUMMARY_WORKER.start()
+    FUTURE_LETTER_WORKER.start()
+    ALBUM_EXPORT_WORKER.start()
     print(f"Love Moments full-stack MVP is running at http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        ALBUM_EXPORT_WORKER.stop()
+        FUTURE_LETTER_WORKER.stop()
         DAILY_SUMMARY_WORKER.stop()
         TRIP_GENERATION_WORKER.stop()
         PUSH_OUTBOX_WORKER.stop()

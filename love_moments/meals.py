@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from .http_client import TRUSTED_SSL_CONTEXT
 from .intelligent_ui import ConflictError
+from .kitchen import CATEGORY_BY_LABEL, CATEGORY_KEYS, normalize_shopping_category, shopping_category_label
 from .recipe_catalog_quality import allergen_report
 from .recipes import (
     COURSE_ORDER,
@@ -204,8 +205,8 @@ class MealRecipeMixin:
         value["is_external"] = value["provider"] not in {"local", "qiniu"}
         return value
 
-    @staticmethod
     def _insert_recipe_media_candidates(
+        self,
         db: sqlite3.Connection,
         recipe_id: str,
         media: list[dict],
@@ -230,6 +231,10 @@ class MealRecipeMixin:
                     item.get("match_status", "unverified"), next_check, user_id, now, now,
                 ),
             )
+            local_id = self._local_media_id(item["url"])
+            if local_id:
+                self._sync_media_visibility(db, local_id)
+
     @staticmethod
     def _recipe_row_to_dict(db: sqlite3.Connection, row: sqlite3.Row, include_details: bool = True) -> dict:
         value = dict(row)
@@ -384,7 +389,11 @@ class MealRecipeMixin:
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             row = self._get_visible_recipe_row(db, recipe_id, couple["id"], user_id)
-            return self._recipe_row_to_dict(db, row)
+            result = self._recipe_row_to_dict(db, row)
+            result["food_safety"] = self._evaluate_recipe_food_safety_in_connection(
+                db, couple_id=couple["id"], recipe_snapshot=result,
+            )
+            return result
 
     def list_recipe_variants(self, dish_id: str, user_id: str) -> dict:
         with self.connection() as db:
@@ -648,6 +657,8 @@ class MealRecipeMixin:
                 ),
             )
             result = self._recipe_media_dict(db.execute("SELECT * FROM recipe_media WHERE id=?", (media_id,)).fetchone())
+            if local_media_id:
+                self._sync_media_visibility(db, local_media_id)
             self._event(db, couple["id"], user_id, "meals.updated", recipe_id, {"resource": "recipe_media", "operation": "created"})
         return result
 
@@ -902,6 +913,10 @@ class MealRecipeMixin:
                         (_json(details), now, media["id"]),
                     )
             updated = self._recipe_row_to_dict(db, db.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone())
+            for media in db.execute("SELECT url FROM recipe_media WHERE recipe_id=?", (recipe_id,)).fetchall():
+                local_id = self._local_media_id(media["url"])
+                if local_id:
+                    self._sync_media_visibility(db, local_id)
             self._audit(db, "recipe.updated", "recipe", recipe_id, {"version": updated["version"]}, actor_id=user_id)
             if row["visibility"] == "couple" or visibility == "couple":
                 self._event(db, couple["id"], user_id, "meals.updated", recipe_id, {"resource": "recipe", "operation": "updated", "version": updated["version"]})
@@ -919,6 +934,10 @@ class MealRecipeMixin:
                 raise MealConflictError("菜谱已被修改，请刷新", details={"current_version": row["version"]})
             now = _now()
             db.execute("UPDATE recipes SET deleted_at=?,version=version+1,updated_at=? WHERE id=?", (now, now, recipe_id))
+            for media in db.execute("SELECT url FROM recipe_media WHERE recipe_id=?", (recipe_id,)).fetchall():
+                local_id = self._local_media_id(media["url"])
+                if local_id:
+                    self._sync_media_visibility(db, local_id)
             self._audit(db, "recipe.deleted", "recipe", recipe_id, actor_id=user_id)
             if row["visibility"] == "couple":
                 self._event(db, couple["id"], user_id, "meals.updated", recipe_id, {"resource": "recipe", "operation": "deleted"})
@@ -1453,6 +1472,8 @@ class MealRecipeMixin:
         value["manual_locked"] = bool(value["manual_locked"])
         value["manually_added"] = bool(value["manually_added"])
         value["display_quantity"] = format_quantity(value["quantity_milli"], value["canonical_unit"], value["quantity_text"])
+        value["category_key"] = normalize_shopping_category(value.get("category"), ingredient_name=value.get("canonical_name"))
+        value["category_label"] = shopping_category_label(value["category_key"])
         value["sources"] = sources or []
         return value
 
@@ -1463,7 +1484,10 @@ class MealRecipeMixin:
             if not row:
                 return {"id": None, "title": "采购清单", "status": "empty", "version": 0, "items": []}
             items = []
-            for item in db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=? ORDER BY category,position", (row["id"],)).fetchall():
+            category_order = {key: index for index, key in enumerate(self._category_order_in_connection(db, couple["id"]))}
+            raw_items = db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=? ORDER BY position,display_name", (row["id"],)).fetchall()
+            raw_items = sorted(raw_items, key=lambda item: (category_order.get(normalize_shopping_category(item["category"], ingredient_name=item["canonical_name"]), 99), item["position"], item["display_name"]))
+            for item in raw_items:
                 sources = [dict(source) for source in db.execute(
                     """
                     SELECT s.*,json_extract(m.recipe_snapshot_json,'$.name') AS recipe_name
@@ -1477,6 +1501,164 @@ class MealRecipeMixin:
             result["items"] = items
         return result
 
+    def _shopping_rebuild_scope_in_connection(
+        self,
+        db: sqlite3.Connection,
+        *,
+        couple_id: str,
+        range_start: str,
+        range_end: str,
+    ) -> tuple[sqlite3.Row | None, str, str, list[dict]]:
+        """Load the complete meal set covered by the active and requested ranges."""
+        active = db.execute(
+            "SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'", (couple_id,)
+        ).fetchone()
+        if active:
+            range_start = min(str(active["range_start"]), range_start)
+            range_end = max(str(active["range_end"]), range_end)
+        rows = db.execute(
+            """
+            SELECT * FROM meal_cart_items WHERE couple_id=? AND planned_date BETWEEN ? AND ?
+              AND status IN ('accepted','shopping','cooking') ORDER BY planned_date,meal_slot,id
+            """,
+            (couple_id, range_start, range_end),
+        ).fetchall()
+        return active, range_start, range_end, [self._meal_item_dict(row) for row in rows]
+
+    def _apply_shopping_items_in_connection(
+        self,
+        db: sqlite3.Connection,
+        *,
+        couple_id: str,
+        actor_id: str,
+        meal_items: list[dict],
+        range_start: str,
+        range_end: str,
+        expected_list_version: int,
+        mark_accepted_as_shopping: bool = True,
+    ) -> dict:
+        """Rebuild the automatic portion of the active shopping list.
+
+        The caller owns the transaction.  Manual rows and locked automatic
+        rows are never overwritten, and this helper never commits or emits an
+        event on its own.
+        """
+        if not meal_items:
+            raise ConflictError("没有可用于采购清单的已确认菜品")
+        for item in meal_items:
+            if item.get("couple_id") != couple_id or not isinstance(item.get("recipe_snapshot"), dict):
+                raise PermissionError("餐食不属于当前情侣空间")
+        generated = build_shopping_items(meal_items)
+        if not generated:
+            raise ConflictError("菜谱缺少可靠食材，不能生成采购清单")
+        active = db.execute(
+            "SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'", (couple_id,)
+        ).fetchone()
+        current_version = int(active["version"]) if active else 0
+        if current_version != int(expected_list_version):
+            raise MealConflictError("采购清单已被另一方修改，请刷新", details={"current_version": current_version})
+        existing_rows = list(db.execute(
+            "SELECT * FROM shopping_list_items WHERE shopping_list_id=?", (active["id"],)
+        ).fetchall()) if active else []
+        diff_detail = shopping_diff([dict(row) for row in existing_rows], generated)
+        now = _now()
+        created_list = not active
+        if not active:
+            cart = self._active_cart(db, couple_id, create=True)
+            list_id = _id("shopping")
+            db.execute(
+                "INSERT INTO shopping_lists(id,couple_id,cart_id,title,range_start,range_end,status,created_at) VALUES (?,?,?,?,?,?,'active',?)",
+                (list_id, couple_id, cart["id"], "采购清单", range_start, range_end, now),
+            )
+            active = db.execute("SELECT * FROM shopping_lists WHERE id=?", (list_id,)).fetchone()
+        else:
+            range_start = min(str(active["range_start"]), range_start)
+            range_end = max(str(active["range_end"]), range_end)
+        existing = {
+            (row["canonical_name"], row["unit_family"], row["specification"]): row
+            for row in existing_rows
+        }
+        generated_keys: set[tuple[str, str, str]] = set()
+        changed_ids: list[str] = []
+        logical_change = False
+        for position, value in enumerate(generated, 1):
+            key = (value["canonical_name"], value["unit_family"], value["specification"])
+            generated_keys.add(key)
+            old = existing.get(key)
+            if old and (old["manual_locked"] or old["manually_added"]):
+                item_id = str(old["id"])
+            elif old:
+                item_id = str(old["id"])
+                changed = any((
+                    old["display_name"] != value["display_name"],
+                    old["quantity_milli"] != value["quantity_milli"],
+                    old["quantity_text"] != value["quantity_text"],
+                    old["canonical_unit"] != value["canonical_unit"],
+                    old["category"] != value["category"],
+                    int(old["position"]) != position,
+                ))
+                if changed:
+                    quantity_changed = old["quantity_milli"] != value["quantity_milli"] or old["quantity_text"] != value["quantity_text"]
+                    db.execute(
+                        """
+                        UPDATE shopping_list_items SET display_name=?,quantity_milli=?,quantity_text=?,canonical_unit=?,
+                            unit_family=?,category=?,specification=?,position=?,checked=?,version=version+1,updated_at=?
+                        WHERE id=?
+                        """,
+                        (value["display_name"], value["quantity_milli"], value["quantity_text"], value["canonical_unit"],
+                         value["unit_family"], value["category"], value["specification"], position,
+                         0 if quantity_changed else int(old["checked"]), now, item_id),
+                    )
+                    changed_ids.append(item_id)
+                    logical_change = True
+            else:
+                item_id = _id("shopping_item")
+                db.execute(
+                    """
+                    INSERT INTO shopping_list_items(id,shopping_list_id,canonical_name,display_name,quantity_milli,quantity_text,
+                        canonical_unit,unit_family,category,specification,position,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (item_id, active["id"], value["canonical_name"], value["display_name"], value["quantity_milli"],
+                     value["quantity_text"], value["canonical_unit"], value["unit_family"], value["category"],
+                     value["specification"], position, now),
+                )
+                changed_ids.append(item_id)
+                logical_change = True
+            if not (old and (old["manual_locked"] or old["manually_added"])):
+                db.execute("DELETE FROM shopping_item_sources WHERE shopping_item_id=?", (item_id,))
+                for source in value["sources"]:
+                    db.execute(
+                        "INSERT INTO shopping_item_sources(shopping_item_id,meal_item_id,recipe_ingredient_id,contributed_quantity_milli) VALUES (?,?,?,?)",
+                        (item_id, source["meal_item_id"], source["recipe_ingredient_id"], source["contributed_quantity_milli"]),
+                    )
+        for key, old in existing.items():
+            if key not in generated_keys and not old["manual_locked"] and not old["manually_added"]:
+                db.execute("DELETE FROM shopping_list_items WHERE id=?", (old["id"],))
+                changed_ids.append(str(old["id"]))
+                logical_change = True
+        range_changed = active["range_start"] != range_start or active["range_end"] != range_end
+        if (logical_change or range_changed) and not created_list:
+            db.execute(
+                "UPDATE shopping_lists SET range_start=?,range_end=?,version=version+1 WHERE id=?",
+                (range_start, range_end, active["id"]),
+            )
+        if mark_accepted_as_shopping:
+            db.execute(
+                "UPDATE meal_cart_items SET status='shopping',version=version+1,updated_at=? WHERE couple_id=? AND planned_date BETWEEN ? AND ? AND status='accepted'",
+                (now, couple_id, range_start, range_end),
+            )
+        result_list = self._shopping_list_in_connection(db, active["id"])
+        return {
+            "shopping_list": result_list,
+            "diff": {
+                "add": len(diff_detail["added"]), "update": len(diff_detail["updated"]),
+                "remove": len(diff_detail["removed"]),
+                "unchanged": max(0, len(generated) - len(diff_detail["added"]) - len(diff_detail["updated"])),
+            },
+            "changed_item_ids": changed_ids,
+        }
+
     def preview_shopping_list(self, payload: dict, user_id: str) -> dict:
         range_start = date.fromisoformat(parse_local_date(payload.get("range_start"), "采购开始日期"))
         range_end = date.fromisoformat(parse_local_date(payload.get("range_end"), "采购结束日期"))
@@ -1484,17 +1666,23 @@ class MealRecipeMixin:
             raise ValueError("采购范围必须为连续的 1 到 31 天")
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
-            active_list = db.execute("SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'", (couple["id"],)).fetchone()
+            active_list, rebuild_start, rebuild_end, meal_items = self._shopping_rebuild_scope_in_connection(
+                db, couple_id=couple["id"], range_start=range_start.isoformat(), range_end=range_end.isoformat(),
+            )
             if active_list and payload.get("expected_version") is not None and int(payload["expected_version"]) != int(active_list["version"]):
                 raise MealConflictError("采购清单已被另一方修改，请刷新", details={"current_version": active_list["version"]})
-            rows = db.execute(
-                "SELECT * FROM meal_cart_items WHERE couple_id=? AND planned_date BETWEEN ? AND ? AND status IN ('accepted','shopping','cooking') ORDER BY planned_date,meal_slot",
-                (couple["id"], range_start.isoformat(), range_end.isoformat()),
-            ).fetchall()
-            if not rows:
+            if not meal_items:
                 raise ValueError("所选日期内还没有双方确认的菜品，请先在用餐日历确认")
-            meal_items = [self._meal_item_dict(row) for row in rows]
             generated = build_shopping_items(meal_items)
+            category_order = {
+                key: index for index, key in enumerate(self._category_order_in_connection(db, couple["id"]))
+            }
+            generated.sort(key=lambda item: (
+                category_order.get(normalize_shopping_category(item.get("category"), ingredient_name=item.get("canonical_name")), 99),
+                item.get("display_name", ""), item.get("specification", ""),
+            ))
+            for position, item in enumerate(generated, 1):
+                item["position"] = position
             existing = []
             if active_list:
                 existing = [dict(row) for row in db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=?", (active_list["id"],)).fetchall()]
@@ -1502,10 +1690,10 @@ class MealRecipeMixin:
             draft_id = _id("shopping_preview")
             now = datetime.now(timezone.utc).replace(microsecond=0)
             expires = (now + timedelta(minutes=15)).isoformat()
-            expected = {f"meal:{row['id']}": int(row["version"]) for row in rows}
+            expected = {f"meal:{item['id']}": int(item["version"]) for item in meal_items}
             expected["shopping_list"] = int(active_list["version"]) if active_list else 0
-            stored_payload = {"range_start": range_start.isoformat(), "range_end": range_end.isoformat(), "generated": generated}
-            preview = {"id": draft_id, "range_start": range_start.isoformat(), "range_end": range_end.isoformat(), "items": generated, "diff": diff, "meal_count": len(rows), "expires_at": expires}
+            stored_payload = {"range_start": rebuild_start, "range_end": rebuild_end, "generated": generated}
+            preview = {"id": draft_id, "range_start": rebuild_start, "range_end": rebuild_end, "items": generated, "diff": diff, "meal_count": len(meal_items), "expires_at": expires}
             db.execute(
                 """
                 INSERT INTO ui_action_drafts(id,couple_id,creator_id,action_type,payload_json,preview_json,expected_versions_json,status,expires_at,created_at)
@@ -1541,81 +1729,41 @@ class MealRecipeMixin:
                 if not item or int(item["version"]) != int(version):
                     raise MealConflictError("点菜计划已经变化，请重新生成采购清单", code="MEAL_PLAN_CHANGED")
             stored = _parse(draft["payload_json"], {})
-            generated = stored.get("generated", [])
             now = _now()
-            if not active_list:
-                list_id = _id("shopping")
-                cart = self._active_cart(db, couple["id"], create=True)
-                db.execute(
-                    "INSERT INTO shopping_lists(id,couple_id,cart_id,title,range_start,range_end,status,created_at) VALUES (?,?,?,?,?,?,'active',?)",
-                    (list_id, couple["id"], cart["id"], "采购清单", stored["range_start"], stored["range_end"], now),
-                )
-                active_list = db.execute("SELECT * FROM shopping_lists WHERE id=?", (list_id,)).fetchone()
-            else:
-                db.execute("UPDATE shopping_lists SET range_start=?,range_end=?,version=version+1 WHERE id=?", (stored["range_start"], stored["range_end"], active_list["id"]))
-            existing_rows = db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=?", (active_list["id"],)).fetchall()
-            existing = {(row["canonical_name"], row["unit_family"], row["specification"]): row for row in existing_rows}
-            generated_keys = set()
-            for value in generated:
-                key = (value["canonical_name"], value["unit_family"], value["specification"])
-                generated_keys.add(key)
-                old = existing.get(key)
-                if old and old["manual_locked"]:
-                    item_id = old["id"]
-                elif old:
-                    item_id = old["id"]
-                    db.execute(
-                        """
-                        UPDATE shopping_list_items SET display_name=?,quantity_milli=?,quantity_text=?,canonical_unit=?,unit_family=?,
-                            category=?,position=?,version=version+1,updated_at=? WHERE id=?
-                        """,
-                        (value["display_name"], value["quantity_milli"], value["quantity_text"], value["canonical_unit"], value["unit_family"], value["category"], value["position"], now, item_id),
-                    )
-                else:
-                    item_id = _id("shopping_item")
-                    db.execute(
-                        """
-                        INSERT INTO shopping_list_items(id,shopping_list_id,canonical_name,display_name,quantity_milli,quantity_text,
-                            canonical_unit,unit_family,category,specification,position,updated_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (item_id, active_list["id"], value["canonical_name"], value["display_name"], value["quantity_milli"], value["quantity_text"], value["canonical_unit"], value["unit_family"], value["category"], value["specification"], value["position"], now),
-                    )
-                db.execute("DELETE FROM shopping_item_sources WHERE shopping_item_id=?", (item_id,))
-                for source in value["sources"]:
-                    db.execute(
-                        "INSERT INTO shopping_item_sources(shopping_item_id,meal_item_id,recipe_ingredient_id,contributed_quantity_milli) VALUES (?,?,?,?)",
-                        (item_id, source["meal_item_id"], source["recipe_ingredient_id"], source["contributed_quantity_milli"]),
-                    )
-            for key, old in existing.items():
-                if key not in generated_keys and not old["manual_locked"] and not old["manually_added"]:
-                    db.execute("DELETE FROM shopping_list_items WHERE id=?", (old["id"],))
-            db.execute(
-                """
-                UPDATE meal_cart_items SET status='shopping',version=version+1,updated_at=?
-                WHERE couple_id=? AND planned_date BETWEEN ? AND ? AND status='accepted'
-                """,
-                (now, couple["id"], stored["range_start"], stored["range_end"]),
+            active_list, rebuild_start, rebuild_end, rebuild_meals = self._shopping_rebuild_scope_in_connection(
+                db, couple_id=couple["id"], range_start=stored["range_start"], range_end=stored["range_end"],
+            )
+            applied = self._apply_shopping_items_in_connection(
+                db, couple_id=couple["id"], actor_id=user_id,
+                meal_items=rebuild_meals,
+                range_start=rebuild_start, range_end=rebuild_end,
+                expected_list_version=current_list_version,
             )
             db.execute("UPDATE ui_action_drafts SET status='confirmed',idempotency_key=?,confirmed_at=? WHERE id=?", (str(payload.get("idempotency_key") or "") or None, now, preview_id))
-            result = self._shopping_list_in_connection(db, active_list["id"])
+            result = applied["shopping_list"]
             self._save_idempotent_result(db, couple["id"], user_id, "shopping.apply", payload.get("idempotency_key"), result)
-            self._audit(db, "shopping_list.applied", "shopping_list", active_list["id"], {"range_start": stored["range_start"], "range_end": stored["range_end"]}, actor_id=user_id)
-            self._event(db, couple["id"], user_id, "meals.updated", active_list["id"], {"resource": "shopping_list", "operation": "updated", "version": result["version"]})
+            self._audit(db, "shopping_list.applied", "shopping_list", result["id"], {"range_start": stored["range_start"], "range_end": stored["range_end"]}, actor_id=user_id)
+            self._event(db, couple["id"], user_id, "meals.updated", result["id"], {"resource": "shopping_list", "operation": "updated", "version": result["version"]})
         return result
 
     def _shopping_list_in_connection(self, db: sqlite3.Connection, list_id: str) -> dict:
         row = db.execute("SELECT * FROM shopping_lists WHERE id=?", (list_id,)).fetchone()
         result = dict(row)
         result["items"] = []
-        for item in db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=? ORDER BY category,position", (list_id,)).fetchall():
+        order = {key: index for index, key in enumerate(self._category_order_in_connection(db, row["couple_id"]))}
+        raw_items = db.execute("SELECT * FROM shopping_list_items WHERE shopping_list_id=? ORDER BY position,display_name", (list_id,)).fetchall()
+        raw_items = sorted(raw_items, key=lambda item: (order.get(normalize_shopping_category(item["category"], ingredient_name=item["canonical_name"]), 99), item["position"], item["display_name"]))
+        for item in raw_items:
             sources = [dict(value) for value in db.execute("SELECT * FROM shopping_item_sources WHERE shopping_item_id=?", (item["id"],)).fetchall()]
             result["items"].append(self._shopping_item_dict(item, sources))
         return result
 
     def create_shopping_item(self, payload: dict, user_id: str) -> dict:
         ingredient = normalize_ingredient(payload, 1)
-        category = str(payload.get("category") or "其他").strip()[:30] or "其他"
+        raw_category = str(payload.get("category") or "").strip()
+        if raw_category and raw_category not in CATEGORY_KEYS and raw_category not in CATEGORY_BY_LABEL:
+            raise ValueError("采购分类必须使用固定九类")
+        category = normalize_shopping_category(raw_category, ingredient_name=ingredient["canonical_name"])
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             shopping = db.execute("SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'", (couple["id"],)).fetchone()
@@ -1658,7 +1806,10 @@ class MealRecipeMixin:
             display_name = str(payload.get("name", row["display_name"])).strip()[:80]
             if not display_name:
                 raise ValueError("食材名称不能为空")
-            category = str(payload.get("category", row["category"])).strip()[:30] or "其他"
+            raw_category = str(payload.get("category", row["category"])).strip()
+            if "category" in payload and raw_category not in CATEGORY_KEYS and raw_category not in CATEGORY_BY_LABEL:
+                raise ValueError("采购分类必须使用固定九类")
+            category = normalize_shopping_category(raw_category, ingredient_name=display_name)
             quantity_fields = {"quantity", "unit", "quantity_text", "specification", "category"}
             manual_change = bool(quantity_fields.intersection(payload)) or "name" in payload
             ingredient = None
@@ -1703,21 +1854,95 @@ class MealRecipeMixin:
         return {"id": item_id, "deleted": True}
 
     def complete_shopping_list(self, payload: dict, user_id: str) -> dict:
+        self._kitchen_fields(payload, frozenset({
+            "expected_version", "allow_incomplete", "stock_checked_item_ids",
+            "stock_item_versions", "confirm_food_item_ids", "idempotency_key",
+        }), "完成采购")
+        expected_version = payload.get("expected_version")
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 1:
+            raise ValueError("采购清单版本无效")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
+            key, _ = self._kitchen_request(payload, "shopping.complete")
+            receipt = db.execute(
+                "SELECT result_json FROM mutation_idempotency WHERE couple_id=? AND user_id=? AND operation='shopping.complete' AND idempotency_key=?",
+                (couple["id"], user_id, key),
+            ).fetchone()
+            if receipt:
+                stored = json.loads(receipt["result_json"])
+                prior_id = str(stored.get("response", {}).get("id") or "")
+                if not prior_id:
+                    raise ConflictError("幂等回执缺少原采购清单，请使用新的幂等键")
+                _, prior_fingerprint = self._kitchen_request(
+                    payload, "shopping.complete", resource_id=prior_id,
+                )
+                replay = self._kitchen_replay(
+                    db, couple["id"], user_id, "shopping.complete", key, prior_fingerprint,
+                )
+                if replay is not None:
+                    return replay
             row = db.execute("SELECT * FROM shopping_lists WHERE couple_id=? AND status='active'", (couple["id"],)).fetchone()
             if not row:
                 raise KeyError("当前没有采购清单")
-            if payload.get("expected_version") is not None and int(payload["expected_version"]) != int(row["version"]):
+            key, fingerprint = self._kitchen_request(payload, "shopping.complete", resource_id=row["id"])
+            replay = self._kitchen_replay(db, couple["id"], user_id, "shopping.complete", key, fingerprint)
+            if replay is not None:
+                return replay
+            if expected_version != int(row["version"]):
                 raise MealConflictError("采购清单已被另一方修改，请刷新", details={"current_version": row["version"]})
             unchecked = db.execute("SELECT COUNT(*) FROM shopping_list_items WHERE shopping_list_id=? AND checked=0", (row["id"],)).fetchone()[0]
             if unchecked and not bool(payload.get("allow_incomplete", False)):
                 raise ConflictError("仍有未购买食材，请确认后再完成")
+            stock_ids = payload.get("stock_checked_item_ids", [])
+            stock_versions = payload.get("stock_item_versions", {})
+            if (
+                not isinstance(stock_ids, list)
+                or len(stock_ids) > 500
+                or any(not isinstance(item_id, str) or not item_id for item_id in stock_ids)
+                or len(stock_ids) != len(set(stock_ids))
+                or not isinstance(stock_versions, dict)
+            ):
+                raise ValueError("入库选择格式无效")
+            if set(stock_versions) != set(stock_ids):
+                raise ValueError("入库项目版本不完整")
+            current_item_ids = {
+                item["id"]
+                for item in db.execute(
+                    "SELECT id FROM shopping_list_items WHERE shopping_list_id=?",
+                    (row["id"],),
+                ).fetchall()
+            }
+            if not set(stock_ids).issubset(current_item_ids):
+                raise ConflictError("只能把当前采购清单中的食材转入库存")
+            raw_confirm_food_ids = payload.get("confirm_food_item_ids", [])
+            if (
+                not isinstance(raw_confirm_food_ids, list)
+                or any(not isinstance(item_id, str) or not item_id for item_id in raw_confirm_food_ids)
+                or len(raw_confirm_food_ids) != len(set(raw_confirm_food_ids))
+            ):
+                raise ValueError("食品确认项目格式无效")
+            confirm_food_ids = set(raw_confirm_food_ids)
+            if not confirm_food_ids.issubset(set(stock_ids)):
+                raise ValueError("食品确认项目必须属于本次入库选择")
+            stocked = []
+            for item_id in stock_ids:
+                stocked.append(self._stock_shopping_item_in_connection(
+                    db, couple_id=couple["id"], actor_id=user_id, shopping_item_id=str(item_id),
+                    payload={"expected_version": stock_versions[item_id], "confirm_food": item_id in confirm_food_ids},
+                ))
             now = _now()
-            db.execute("UPDATE shopping_lists SET status='completed',completed_at=?,version=version+1 WHERE id=?", (now, row["id"]))
-            self._audit(db, "shopping_list.completed", "shopping_list", row["id"], {"unchecked": unchecked}, actor_id=user_id)
-            self._event(db, couple["id"], user_id, "meals.updated", row["id"], {"resource": "shopping_list", "operation": "completed"})
-        return {"id": row["id"], "completed": True, "unchecked": int(unchecked)}
+            updated = db.execute(
+                "UPDATE shopping_lists SET status='completed',completed_at=?,version=version+1 WHERE id=? AND status='active' AND version=?",
+                (now, row["id"], expected_version),
+            ).rowcount
+            if updated != 1:
+                raise MealConflictError("采购清单已被另一方修改，请刷新")
+            result = {"id": row["id"], "completed": True, "unchecked": int(unchecked), "stocked_count": sum(1 for item in stocked if item["changed"]), "stocked_items": stocked}
+            self._kitchen_save(db, couple["id"], user_id, "shopping.complete", key, fingerprint, result)
+            self._audit(db, "shopping_list.completed", "shopping_list", row["id"], {"unchecked": unchecked, "stocked_count": result["stocked_count"]}, actor_id=user_id)
+            self._event(db, couple["id"], user_id, "meals.updated", row["id"], {"resource": "shopping_list", "operation": "completed", "stocked_count": result["stocked_count"]})
+        return result
 
     def meal_summary(self, user_id: str) -> dict:
         today = _today().isoformat()

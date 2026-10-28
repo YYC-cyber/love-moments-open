@@ -1,6 +1,126 @@
+const PWA_SHORTCUT_INTENTS = Object.freeze({ message: "message", moment: "moment" });
+const PWA_SHORTCUT_STORAGE_KEY = "love-pending-shortcut";
+const OFFLINE_QUEUE_ACTIONS = new Set(["send_text_message", "check_shopping_item"]);
+const COOKING_RESTORE_TERMINAL_STATUSES = new Set([403, 404, 409]);
+const ONLINE_ONLY_UI_ACTIONS = Object.freeze({
+  "assistant-replan-today": ["trip_replan", "智能重排行程"],
+  "assistant-recap-edit": ["shared_confirm", "旅行回忆草稿"],
+  "assistant-recap-confirm": ["shared_confirm", "确认旅行回忆"],
+  "assistant-recap-cancel": ["shared_confirm", "取消旅行回忆"],
+  "confirm-assistant-plan": ["shared_confirm", "共同确认生活方案"],
+  "assistant-select-quote": ["shared_confirm", "选择出行报价"],
+  "assistant-select-food": ["shared_confirm", "选择餐厅建议"],
+  "assistant-confirm-change": ["shared_confirm", "确认行程调整"],
+  "assistant-cancel-change": ["shared_confirm", "取消行程调整"],
+  "ai-recipe": ["ai_compose", "AI 菜谱"],
+  "confirm-recipe-draft": ["shared_confirm", "确认 AI 菜谱"],
+  "build-shopping-preview": ["inventory_update", "生成采购清单"],
+  "apply-shopping-preview": ["inventory_update", "写入采购清单"],
+  "complete-shopping": ["shopping_complete", "完成采购并转入库存"],
+  "confirm-weekly": ["shared_confirm", "确认双人周报"],
+  "save-moment": ["moment_save", "保存恋爱瞬间"],
+  "generate-trip": ["ai_compose", "生成旅行方案"],
+  "apply-revision": ["trip_replan", "确认人工行程版本"],
+  "adopt-plan": ["shared_confirm", "采用旅行方案"],
+  "build-plan": ["trip_replan", "生成混搭方案"],
+  "approve-trip": ["shared_confirm", "确认旅行方案"],
+  "confirm-route-place": ["trip_replan", "确认路线地点"],
+  "confirm-import": ["shared_confirm", "确认聊天导入"],
+  "compose-date": ["ai_compose", "生成约会方案"],
+  "confirm-date": ["shared_confirm", "确认约会方案"],
+  "confirm-smart-action": ["shared_confirm", "确认智能操作"],
+});
+
+function pwaShortcutIntentFromSearch(search = location.search) {
+  const params = new URLSearchParams(search || "");
+  if (params.has("action")) return params.get("action") === "moment" ? PWA_SHORTCUT_INTENTS.moment : null;
+  return params.get("screen") === "chat" ? PWA_SHORTCUT_INTENTS.message : null;
+}
+
+function capturePwaShortcutIntent(search = location.search) {
+  const intent = pwaShortcutIntentFromSearch(search);
+  if (!intent) {
+    const params = new URLSearchParams(search || "");
+    if (params.has("action")) try { sessionStorage.removeItem(PWA_SHORTCUT_STORAGE_KEY); } catch (_) {}
+    return null;
+  }
+  try { sessionStorage.setItem(PWA_SHORTCUT_STORAGE_KEY, intent); } catch (_) {}
+  return intent;
+}
+
+function removePwaShortcutParameter(intent) {
+  const params = new URLSearchParams(location.search || "");
+  // One launch may contain both manifest shortcuts after an intermediary has
+  // merged query strings. The chosen intent is deterministic (moment wins),
+  // and every recognised shortcut key is consumed together so a refresh can
+  // never execute the other one. Notification/deep-link parameters remain.
+  if (params.get("action") === "moment") params.delete("action");
+  if (params.get("screen") === "chat") params.delete("screen");
+  const remaining = params.toString();
+  history.replaceState(history.state, "", `${location.pathname}${remaining ? `?${remaining}` : ""}${location.hash}`);
+}
+
+function restorePwaShortcutIntent(auth, handlers) {
+  if (!auth?.authenticated || !auth?.paired) return false;
+  let intent = null;
+  try { intent = sessionStorage.getItem(PWA_SHORTCUT_STORAGE_KEY); } catch (_) {}
+  if (!Object.values(PWA_SHORTCUT_INTENTS).includes(intent)) return false;
+  try { sessionStorage.removeItem(PWA_SHORTCUT_STORAGE_KEY); } catch (_) {}
+  removePwaShortcutParameter(intent);
+  if (intent === PWA_SHORTCUT_INTENTS.message) handlers?.openChat?.();
+  else if (intent === PWA_SHORTCUT_INTENTS.moment) handlers?.openMoment?.();
+  return true;
+}
+
+function offlineMutationSpec(path, method, body) {
+  const verb = String(method || "GET").toUpperCase();
+  const payload = body && typeof body === "object" && !Array.isArray(body) ? body : null;
+  if (!payload) return null;
+  const keys = Object.keys(payload);
+  if (path === "/api/v1/messages" && verb === "POST") {
+    const allowed = new Set(["type", "content", "idempotency_key"]);
+    if (keys.some(key => !allowed.has(key)) || payload.type !== "text" || typeof payload.content !== "string" || !payload.content.trim()) return null;
+    if (typeof payload.idempotency_key !== "string" || !payload.idempotency_key.trim()) return null;
+    return { action: "send_text_message" };
+  }
+  if (/^\/api\/v1\/shopping-lists\/items\/[A-Za-z0-9._~%-]+$/.test(String(path)) && verb === "PATCH") {
+    const allowed = new Set(["checked", "expected_version", "idempotency_key"]);
+    if (keys.some(key => !allowed.has(key)) || typeof payload.checked !== "boolean") return null;
+    if (!Number.isInteger(payload.expected_version) || payload.expected_version < 1) return null;
+    if (typeof payload.idempotency_key !== "string" || !payload.idempotency_key.trim()) return null;
+    return { action: "check_shopping_item" };
+  }
+  return null;
+}
+
+function offlineQueueEntryIsValid(entry) {
+  const spec = offlineMutationSpec(entry?.path, entry?.method, entry?.body);
+  return Boolean(spec && OFFLINE_QUEUE_ACTIONS.has(entry.action) && spec.action === entry.action);
+}
+
+function offlineActionAllowed(action, online = navigator.onLine) {
+  return Boolean(online || OFFLINE_QUEUE_ACTIONS.has(action));
+}
+
+function requireOnlineMutation(action, label = "这项操作") {
+  if (offlineActionAllowed(action)) return true;
+  toast(`${label}需联网后才能继续，当前内容没有被修改`);
+  return false;
+}
+
+function guardOnlineUiAction(action) {
+  const policy = ONLINE_ONLY_UI_ACTIONS[action];
+  return !policy || requireOnlineMutation(policy[0], policy[1]);
+}
+
+const initialPwaShortcutIntent = capturePwaShortcutIntent();
+const initialParams = new URLSearchParams(location.search);
+const requestedLifeSection = initialParams.get("life_section");
+const requestedMealSection = initialParams.get("meal_section");
+
 const state = {
-  screen: ["home", "chat", "trip", "timeline", "life"].includes(new URLSearchParams(location.search).get("screen")) ? new URLSearchParams(location.search).get("screen") : (localStorage.getItem("love-screen") || "home"),
-  plan: localStorage.getItem("love-plan") || "slow",
+  screen: ["home", "chat", "trip", "timeline", "life"].includes(new URLSearchParams(location.search).get("screen")) ? new URLSearchParams(location.search).get("screen") : (privateStorage().getItem("love-screen") || "home"),
+  plan: privateStorage().getItem("love-plan") || "slow",
   privacy: "双方可见",
   callStartedAt: null,
   callId: null,
@@ -39,27 +159,54 @@ const state = {
   smartActionId: null,
   smartActionType: null,
   lifeFilter: "all",
-  lifeSection: ["overview", "meals", "wishlist", "calendar", "anniversary", "todo", "preference", "dates"].includes(localStorage.getItem("love-life-section")) ? localStorage.getItem("love-life-section") : "overview",
-  mealSection: ["recipes", "wishes", "calendar", "shopping"].includes(localStorage.getItem("love-meal-section")) ? localStorage.getItem("love-meal-section") : "recipes",
-  mealCalendarView: ["week", "month"].includes(localStorage.getItem("love-meal-calendar-view")) ? localStorage.getItem("love-meal-calendar-view") : "week",
+  lifeSection: ["overview", "meals", "wishlist", "calendar", "anniversary", "todo", "preference", "dates", "decisions"].includes(requestedLifeSection) ? requestedLifeSection : (["overview", "meals", "wishlist", "calendar", "anniversary", "todo", "preference", "dates", "decisions"].includes(privateStorage().getItem("love-life-section")) ? privateStorage().getItem("love-life-section") : "overview"),
+  mealSection: ["recipes", "wishes", "calendar", "shopping"].includes(requestedMealSection) ? requestedMealSection : (["recipes", "wishes", "calendar", "shopping"].includes(privateStorage().getItem("love-meal-section")) ? privateStorage().getItem("love-meal-section") : "recipes"),
+  mealCalendarView: ["week", "month"].includes(privateStorage().getItem("love-meal-calendar-view")) ? privateStorage().getItem("love-meal-calendar-view") : "week",
   mealMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   mealSelectedDate: new Date().toLocaleDateString("sv-SE"),
-  meals: { recipes: [], recipeDrafts: [], recipeNextCursor: null, wishes: [], cart: { items: [] }, calendar: { days: [] }, shopping: { items: [] }, shoppingPreview: null, openWishId: "", wishRecipeCandidates: [] },
-  tripSection: ["overview", "assistant", "plans", "itinerary", "stays", "tools"].includes(localStorage.getItem("love-trip-section")) ? localStorage.getItem("love-trip-section") : "overview",
+  meals: { recipes: [], recipeDrafts: [], recipeNextCursor: null, wishes: [], cart: { items: [] }, calendar: { days: [] }, shopping: { items: [] }, profiles: { profiles: [] }, pantry: { items: [] }, categoryOrder: { categories: [] }, weeklyPlan: { id: null, status: "empty", items: [] }, shoppingPreview: null, substitutionPreview: null, substitutionMealId: "", openWishId: "", wishRecipeCandidates: [] },
+  mealLoadSequence: 0,
+  tripSection: ["packing", "emergency", "expenses", "route"].includes(new URLSearchParams(location.search).get("trip_tool")) ? "tools" : (["overview", "assistant", "plans", "itinerary", "stays", "tools"].includes(privateStorage().getItem("love-trip-section")) ? privateStorage().getItem("love-trip-section") : "overview"),
+  tripToolSection: ["packing", "emergency", "expenses", "route"].includes(new URLSearchParams(location.search).get("trip_tool")) ? new URLSearchParams(location.search).get("trip_tool") : (["packing", "emergency", "expenses", "route"].includes(privateStorage().getItem("love-trip-tool-section")) ? privateStorage().getItem("love-trip-tool-section") : "packing"),
+  tripTools: { tripId: "", tripVersion: 0, packing: [], emergency: [], hospitals: [], evidence: null, offlineSnapshot: null, offlineReadOnly: false, loading: false, editingEmergency: null },
+  tripExpenses: { tripId: "", data: null, loading: false, editing: null, selected: new Set(), requestSequence: 0 },
   tripAssistant: { tripId: "", items: [], loading: false },
   tripAssistantLoadSequence: 0,
   tripLiveEpoch: 0,
   tripLive: { tripId: "", ownerUserId: null, context: null, resultAnchorContext: null, result: null, fetchedAt: 0, deliveryMode: "idle", loading: false, error: "", routes: {} },
-  timelineView: ["list", "album", "map", "report", "private", "trash"].includes(localStorage.getItem("love-timeline-view")) ? localStorage.getItem("love-timeline-view") : "list",
+  timelineView: ["list", "album", "map", "report", "private", "trash"].includes(privateStorage().getItem("love-timeline-view")) ? privateStorage().getItem("love-timeline-view") : "list",
   timelineRenderToken: 0,
+  memorySearchResult: null,
+  memorySearchLoading: false,
+  memoryCompletion: [],
+  memoryCompletionLoaded: false,
+  memoryDeepLinked: false,
+  albumDeepLinked: false,
+  futureLetters: [],
+  activeFutureLetter: null,
+  albumExport: { template: "year", tripId: "", preview: null, job: null, jobs: [], pollTimer: null },
+  voiceRecorder: null,
+  voiceStream: null,
+  voiceChunks: [],
+  voiceBlob: null,
+  voicePreviewUrl: null,
+  voiceStartedAt: 0,
+  voiceDurationMs: 0,
+  voiceTimer: null,
+  voiceRecognition: null,
+  voiceTranscriptMethod: "manual",
+  voiceTranscriptEdited: false,
   realtime: null,
   realtimeCursor: 0,
   realtimeRefresh: null,
   selectedDateVariant: null,
+  decisionSelections: new Map(),
+  datePlaceCandidates: [],
+  datePlaceCandidateId: null,
+  datePlaceSearchSequence: 0,
   installPrompt: null,
   chatImport: null,
   longPressTimer: null,
-  longPressStart: null,
   accountAutoOpened: false,
   smartDeepLinked: false,
   pushDeepLinked: false,
@@ -67,6 +214,7 @@ const state = {
   pushSynced: false,
   pushConfig: null,
   serviceWorkerRegistration: null,
+  cooking: { session: null, tick: null, wakeLock: null, deepLinked: false, restoreChecked: false, serverOffsetMs: 0, capabilityNotice: "", pantryReceipts: [] },
   destinationCandidates: [],
   destinationCandidateId: null,
   destinationExistingPlace: null,
@@ -84,7 +232,9 @@ const state = {
     activePlan: null,
     loading: false
   },
-  assistantDeepLinked: false
+  assistantDeepLinked: false,
+  expressionRequestEpoch: 0,
+  statusExpiryTimer: null,
 };
 
 const AUTH_SYNC_KEY = "love-auth-sync";
@@ -95,6 +245,17 @@ function resetTripLive(tripId = "") {
     tripId, ownerUserId: null, context: null, resultAnchorContext: null, result: null,
     fetchedAt: 0, deliveryMode: "idle", loading: false, error: "", routes: {},
   };
+}
+
+function resetMemoryDiscovery() {
+  stopVoiceResources({ discard: true });
+  state.memorySearchResult = null;
+  state.memorySearchLoading = false;
+  state.memoryCompletion = [];
+  state.memoryCompletionLoaded = false;
+  state.memoryDeepLinked = false;
+  state.futureLetters = [];
+  state.activeFutureLetter = null;
 }
 
 function avatarTheme(member) {
@@ -121,7 +282,7 @@ function broadcastAuthChange(action, username = "") {
 }
 
 window.addEventListener("storage", event => {
-  if (event.key === AUTH_SYNC_KEY && event.newValue) window.location.reload();
+  if (event.key === AUTH_SYNC_KEY && event.newValue) clearMealOfflineData(state.data?.user?.id).finally(() => window.location.reload());
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -135,9 +296,15 @@ window.addEventListener("beforeinstallprompt", event => {
   event.preventDefault();
   state.installPrompt = event;
 });
-window.addEventListener("online", () => { flushMealMutations().then(() => loadMeals({ quiet: true })).catch(() => {}); });
+window.addEventListener("online", () => {
+  flushMealMutations().then(() => loadMeals({ quiet: true })).catch(() => {});
+  if (state.tripSection === "tools" && state.tripToolSection === "expenses") loadTripExpenses({ quiet: true }).catch(() => renderTripExpenses());
+  else renderTripExpenses();
+});
+window.addEventListener("offline", () => renderTripExpenses());
 
 async function api(path, options = {}) {
+  const requestPartition = localStorage.getItem("love-active-scope");
   const response = await fetch(path, {
     ...options,
     cache: "no-store",
@@ -145,14 +312,19 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
   const body = await response.json().catch(() => ({}));
+  if (requestPartition !== localStorage.getItem("love-active-scope")) throw Object.assign(new Error("账号或权限已变化，请重新加载"), { status: 409 });
   if (!response.ok) {
     const error = new Error(body.error || `请求失败 (${response.status})`);
     error.status = response.status;
     error.code = body.code;
     error.details = body.details;
     if (response.status === 401) {
+      closeCookingScreen();
+      state.cooking.restoreChecked = false;
+      await clearMealOfflineData(state.data?.user?.id);
       resetTripLive();
       state.data = null;
+      resetMemoryDiscovery();
       state.pushSynced = false;
       state.pushSubscribed = false;
       showAccountAuth();
@@ -165,14 +337,14 @@ async function api(path, options = {}) {
 function tripCreationRequest(payload) {
   const fingerprint = JSON.stringify(payload);
   let pending = null;
-  try { pending = JSON.parse(localStorage.getItem("love-trip-generation") || "null"); } catch (_) {}
+  try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
   if (!pending || pending.fingerprint !== fingerprint) {
     pending = {
       key: globalThis.crypto?.randomUUID?.() || `trip-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       fingerprint,
       jobId: null,
     };
-    localStorage.setItem("love-trip-generation", JSON.stringify(pending));
+    privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
   }
   return pending;
 }
@@ -185,11 +357,11 @@ async function waitForTripGeneration(jobId, { timeoutMs = 150000 } = {}) {
       const job = await api(`/api/v1/trip-generation-jobs/${encodeURIComponent(jobId)}`);
       lastNetworkError = null;
       if (job.status === "completed" && job.trip) {
-        localStorage.removeItem("love-trip-generation");
+        privateStorage().removeItem("love-trip-generation");
         return job.trip;
       }
       if (job.status === "failed" || job.status === "cancelled") {
-        localStorage.removeItem("love-trip-generation");
+        privateStorage().removeItem("love-trip-generation");
         throw new Error(job.error_message || "旅行方案生成失败，请修改条件后重试");
       }
     } catch (error) {
@@ -210,9 +382,9 @@ async function createTripInBackground(payload) {
       body: JSON.stringify(payload),
     });
     pending.jobId = job.id;
-    localStorage.setItem("love-trip-generation", JSON.stringify(pending));
+    privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
     if (job.status === "completed" && job.trip) {
-      localStorage.removeItem("love-trip-generation");
+      privateStorage().removeItem("love-trip-generation");
       return job.trip;
     }
   }
@@ -221,7 +393,7 @@ async function createTripInBackground(payload) {
 
 async function resumePendingTripGeneration() {
   let pending = null;
-  try { pending = JSON.parse(localStorage.getItem("love-trip-generation") || "null"); } catch (_) {}
+  try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
   if (!pending?.jobId || !state.data || state.tripGenerationResuming) return;
   state.tripGenerationResuming = true;
   try {
@@ -230,7 +402,7 @@ async function resumePendingTripGeneration() {
     state.data.trip = trip;
     state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)];
     state.plan = trip.active_variant || "slow";
-    localStorage.setItem("love-trip-id", trip.id);
+    privateStorage().setItem("love-trip-id", trip.id);
     renderIdentity(); renderPlan(); renderHotel();
     toast("后台旅行规划已完成，五套方案已经可以查看");
   } catch (error) {
@@ -436,17 +608,17 @@ async function createVideoThumbnail(file) {
 async function uploadMediaResumable(file, visibility) {
   const resumeKey = `love-upload:${file.name}:${file.size}:${file.lastModified}:${visibility}`;
   let session = null;
-  const remembered = localStorage.getItem(resumeKey);
+  const remembered = privateStorage().getItem(resumeKey);
   if (remembered) {
     try {
       session = await api(`/api/v1/media/uploads/${encodeURIComponent(remembered)}`);
       if (Number(session.expected_size) !== file.size || session.status !== "pending") session = null;
     } catch (_) { session = null; }
-    if (!session) localStorage.removeItem(resumeKey);
+    if (!session) privateStorage().removeItem(resumeKey);
   }
   if (!session) {
     session = await api("/api/v1/media/uploads", { method: "POST", body: JSON.stringify({ name: file.name || "video", mime_type: file.type || "application/octet-stream", size_bytes: file.size, visibility, chunk_size: 4 * 1024 * 1024 }) });
-    localStorage.setItem(resumeKey, session.id);
+    privateStorage().setItem(resumeKey, session.id);
   }
   if (file.type.startsWith("video/")) {
     const thumbnail = await createVideoThumbnail(file);
@@ -473,7 +645,7 @@ async function uploadMediaResumable(file, visibility) {
     if (progress !== lastProgress && progress < 100) { lastProgress = progress; toast(`视频上传 ${progress}% · 中断后可继续`); }
   }
   const result = await api(`/api/v1/media/uploads/${encodeURIComponent(session.id)}/complete`, { method: "POST", body: "{}" });
-  localStorage.removeItem(resumeKey);
+  privateStorage().removeItem(resumeKey);
   return result;
 }
 
@@ -537,18 +709,22 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
 
-function navigate(screen, { restoreTimeline = true } = {}) {
+function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
   state.screen = screen;
-  localStorage.setItem("love-screen", screen);
+  privateStorage().setItem("love-screen", screen);
   document.querySelectorAll(".screen").forEach(el => el.classList.toggle("active", el.dataset.screen === screen));
   document.querySelectorAll(".bottom-nav [data-nav]").forEach(el => el.classList.toggle("active", el.dataset.nav === screen));
   document.querySelector(".app-header").style.display = screen === "home" ? "flex" : "none";
   if (screen === "life") setLifeSection(state.lifeSection, { scroll: false });
   if (screen === "trip") setTripSection(state.tripSection, { scroll: false });
-  if (screen === "timeline" && restoreTimeline) setTimelineView(state.timelineView, { scroll: false });
+  if (screen === "timeline" && restoreTimeline) {
+    setTimelineView(state.timelineView, { scroll: false });
+    if (!state.memoryCompletionLoaded) loadMemoryCompletion().catch(error => toast(error.message));
+    loadFutureLetters({ quiet: true });
+  }
   document.querySelector(".phone-shell").scrollTo({ top: 0, behavior: "smooth" });
   if (state.data) loadSmartSurface(screen, { quiet: true });
-  if (screen === "chat" && state.data) api("/api/v1/messages/read", { method: "POST", body: "{}" }).catch(() => {});
+  if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).catch(() => {});
 }
 
 const smartExamples = {
@@ -579,12 +755,34 @@ function offlineSafeManifest(manifest) {
 }
 
 function smartCacheKey(surface) {
-  return surface === "trip" && state.data?.trip?.id ? `love-ui-trip:${state.data.trip.id}` : `love-ui-${surface}`;
+  return `love-private:${cachePartition()}:ui:${surface}:${surface === "trip" ? state.data?.trip?.id || "" : ""}`;
+}
+
+function cachePartition(data = state.data) {
+  if (!data?.user?.id) return "";
+  return [data.user.id, data.couple?.id || "unpaired", data.permission_version ?? data.couple?.version ?? 0].map(value => encodeURIComponent(String(value))).join(":");
+}
+
+function privateStorage() {
+  const partition = localStorage.getItem("love-active-scope");
+  const key = name => name.startsWith(`love-private:${partition}:`) ? name : `love-private:${partition}:${name}`;
+  return {
+    getItem: name => partition ? localStorage.getItem(key(name)) : null,
+    setItem: (name, value) => { if (partition) localStorage.setItem(key(name), value); },
+    removeItem: name => { if (partition) localStorage.removeItem(key(name)); }
+  };
+}
+
+async function bindCachePartition(data) {
+  const next = cachePartition(data);
+  const previous = localStorage.getItem("love-active-scope");
+  if (previous && previous !== next) await clearMealOfflineData(decodeURIComponent(previous.split(":")[0]));
+  if (next) localStorage.setItem("love-active-scope", next);
 }
 
 function saveManifestCache(surface, manifest) {
   const safe = offlineSafeManifest(manifest);
-  if (validManifest(safe, surface)) localStorage.setItem(smartCacheKey(surface), JSON.stringify(safe));
+  if (validManifest(safe, surface)) privateStorage().setItem(smartCacheKey(surface), JSON.stringify(safe));
 }
 
 function surfaceHasDraftIntent(surface) {
@@ -605,8 +803,8 @@ function removeSmartActionFromManifests(actionId) {
 }
 
 function readLocalJson(key) {
-  try { return JSON.parse(localStorage.getItem(key) || "null"); }
-  catch (_) { localStorage.removeItem(key); return null; }
+  try { return JSON.parse(privateStorage().getItem(key) || "null"); }
+  catch (_) { privateStorage().removeItem(key); return null; }
 }
 
 function openMealCache() {
@@ -625,6 +823,7 @@ function openMealCache() {
 
 async function mealCachePut(storeName, key, value) {
   const db = await openMealCache().catch(() => null); if (!db) return;
+  if (!cachePartition() || !key.startsWith(`love-private:${cachePartition()}:`)) { db.close(); return; }
   await new Promise((resolve, reject) => { const tx = db.transaction(storeName, "readwrite"); tx.objectStore(storeName).put(value, key); tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
   db.close();
 }
@@ -636,44 +835,374 @@ async function mealCacheDelete(storeName, key) {
 }
 
 function mealUserCacheKey(key = "snapshot", userId = state.data?.user?.id) {
-  return userId ? `${userId}:${key}` : "";
+  return userId ? `love-private:${cachePartition()}:${key}` : "";
 }
 
 async function mealCacheGet(storeName, key) {
+  const partition = cachePartition();
   const db = await openMealCache().catch(() => null); if (!db) return null;
   const value = await new Promise((resolve, reject) => { const request = db.transaction(storeName).objectStore(storeName).get(key); request.onsuccess = () => resolve(request.result || null); request.onerror = () => reject(request.error); }).catch(() => null);
-  db.close(); return value;
+  db.close(); return partition && partition === cachePartition() ? value : null;
+}
+
+async function listOfflineMutationsForAccount() {
+  const userId = state.data?.user?.id;
+  const partition = cachePartition();
+  if (!userId || !partition) return { supported: true, items: [] };
+  if (!("indexedDB" in window)) return { supported: false, items: [] };
+  const db = await openMealCache().catch(() => null);
+  if (!db) return { supported: false, items: [] };
+  let items;
+  try {
+    items = await new Promise((resolve, reject) => {
+      const request = db.transaction("pending").objectStore("pending").getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (_) {
+    db.close();
+    return { supported: true, error: "当前设备的离线待同步记录暂时无法读取；没有删除任何内容。", items: [] };
+  }
+  db.close();
+  if (userId !== state.data?.user?.id || partition !== cachePartition()) return { supported: true, items: [] };
+  return {
+    supported: true,
+    items: items
+      .filter(item => item.userId === userId && item.partition === partition && ["pending", "needs_attention"].includes(item.status))
+      .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || ""))),
+  };
+}
+
+async function retryOfflineMutation(id) {
+  const userId = state.data?.user?.id;
+  const partition = cachePartition();
+  if (!userId || !partition) throw new Error("账号状态已变化，请重新登录");
+  const db = await openMealCache().catch(() => null);
+  if (!db) throw new Error("当前浏览器不支持离线待同步存储");
+  let changed = false;
+  let inFlight = false;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("pending", "readwrite");
+    const store = tx.objectStore("pending");
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const item = request.result;
+      if (!item || item.userId !== userId || item.partition !== partition) return;
+      if (Number(item.inFlightRevision) === pendingMutationRevision(item)) {
+        inFlight = true;
+        return;
+      }
+      if (!offlineQueueEntryIsValid(item)) {
+        tx.abort();
+        return;
+      }
+      const next = { ...item, status: "pending", updatedAt: new Date().toISOString() };
+      delete next.error;
+      delete next.inFlightRevision;
+      delete next.inFlightAt;
+      store.put(next);
+      changed = true;
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(new Error("这条离线操作格式无效，已保留原记录"));
+  });
+  db.close();
+  if (inFlight) throw new Error("这项操作正在发送，请等待服务器确认后再处理");
+  if (!changed) throw new Error("离线操作不存在或不属于当前账号");
+  if (navigator.onLine) await flushMealMutations();
+  const remaining = await listOfflineMutationsForAccount();
+  return { queued: remaining.items.some(item => item.id === id), synced: !remaining.items.some(item => item.id === id) };
+}
+
+async function discardOfflineMutation(id) {
+  const userId = state.data?.user?.id;
+  const partition = cachePartition();
+  if (!userId || !partition) throw new Error("账号状态已变化，请重新登录");
+  const db = await openMealCache().catch(() => null);
+  if (!db) throw new Error("当前浏览器不支持离线待同步存储");
+  let removed = false;
+  let inFlight = false;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("pending", "readwrite");
+    const store = tx.objectStore("pending");
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const item = request.result;
+      if (!item || item.userId !== userId || item.partition !== partition) return;
+      if (Number(item.inFlightRevision) === pendingMutationRevision(item)) {
+        inFlight = true;
+        return;
+      }
+      store.delete(id);
+      removed = true;
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+  if (inFlight) throw new Error("这项操作已经发出，不能再丢弃；请等待服务器回执");
+  if (!removed) throw new Error("离线操作不存在或不属于当前账号");
+  return { discarded: true };
+}
+
+function pendingMutationRevision(item) {
+  const revision = Number(item?.revision);
+  return Number.isInteger(revision) && revision > 0 ? revision : 1;
+}
+
+function samePendingMutationTarget(current, snapshot) {
+  return Boolean(current && snapshot
+    && current.id === snapshot.id
+    && current.userId === snapshot.userId
+    && current.partition === snapshot.partition
+    && current.action === snapshot.action
+    && current.path === snapshot.path
+    && current.method === snapshot.method);
+}
+
+async function claimPendingMutation(db, snapshot) {
+  const sentRevision = pendingMutationRevision(snapshot);
+  let claimed = null;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("pending", "readwrite");
+    const store = tx.objectStore("pending");
+    const request = store.get(snapshot.id);
+    request.onsuccess = () => {
+      const current = request.result;
+      if (!samePendingMutationTarget(current, snapshot)
+          || current.status !== "pending"
+          || pendingMutationRevision(current) !== sentRevision) {
+        return;
+      }
+      claimed = {
+        ...current,
+        revision: sentRevision,
+        inFlightRevision: sentRevision,
+        inFlightAt: new Date().toISOString(),
+      };
+      store.put(claimed);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve(claimed);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("离线操作读取失败"));
+  });
+}
+
+async function settlePendingMutation(db, sent, { succeeded = false, response = null, error = null } = {}) {
+  const sentRevision = pendingMutationRevision(sent);
+  let result = { matched: false, newer: false, needsAttention: false };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("pending", "readwrite");
+    const store = tx.objectStore("pending");
+    const request = store.get(sent.id);
+    request.onsuccess = () => {
+      const current = request.result;
+      if (!samePendingMutationTarget(current, sent)) {
+        return;
+      }
+      const currentRevision = pendingMutationRevision(current);
+      result = { matched: true, newer: currentRevision > sentRevision, needsAttention: false };
+      if (currentRevision !== sentRevision) {
+        // A newer user intent owns this record now. An old failure must not
+        // write stale status/error data over it. A successful shopping update
+        // may only advance its server precondition, inside this same atomic
+        // read/write transaction, while preserving its body and idempotency.
+        const serverVersion = Number(response?.version);
+        const sentExpectedVersion = Number(sent.body?.expected_version);
+        if (result.newer
+            && succeeded
+            && current.action === "check_shopping_item"
+            && Number.isInteger(serverVersion)
+            && serverVersion > 0
+            && (!Number.isInteger(sentExpectedVersion) || serverVersion >= sentExpectedVersion)) {
+          const next = {
+            ...current,
+            body: { ...current.body, expected_version: serverVersion },
+            status: "pending",
+            updatedAt: new Date().toISOString(),
+          };
+          delete next.error;
+          if (Number(next.inFlightRevision) === sentRevision) {
+            delete next.inFlightRevision;
+            delete next.inFlightAt;
+          }
+          store.put(next);
+        } else {
+          // Leave the newer record byte-for-byte unchanged on an old failure
+          // or an unusable old success response.
+        }
+        return;
+      }
+      if (succeeded) {
+        store.delete(current.id);
+        return;
+      }
+      const next = { ...current, updatedAt: new Date().toISOString() };
+      delete next.inFlightRevision;
+      delete next.inFlightAt;
+      if ([400, 403, 404, 409].includes(error?.status)) {
+        next.status = "needs_attention";
+        next.error = { status: error.status, message: error.message, code: error.code, details: error.details };
+        result.needsAttention = true;
+      }
+      store.put(next);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("离线操作状态更新失败"));
+  });
 }
 
 async function queueMealMutation(path, method, body) {
-  const userId = state.data?.user?.id; if (!userId) return;
-  const db = await openMealCache().catch(() => null); if (!db) return;
-  const value = { id: clientKey("offline-meal"), userId, path, method, body, createdAt: new Date().toISOString() };
-  await new Promise((resolve, reject) => { const tx = db.transaction("pending", "readwrite"); tx.objectStore("pending").put(value); tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); }); db.close();
+  const userId = state.data?.user?.id;
+  if (!userId) throw new Error("请先登录并进入情侣空间，再保存离线操作");
+  const partition = cachePartition();
+  const db = await openMealCache().catch(() => null); if (!db) throw new Error("离线存储不可用，请保留内容并联网重试");
+  if (partition !== cachePartition()) { db.close(); throw Object.assign(new Error("账号或权限已变化，请重新加载"), { status: 409 }); }
+  const id = clientKey("offline-meal");
+  const queuedBody = { ...body, idempotency_key: body.idempotency_key || id };
+  const spec = offlineMutationSpec(path, method, queuedBody);
+  if (!spec) { db.close(); throw new Error("这项操作不能离线保存，请联网后重试"); }
+  const verb = String(method).toUpperCase();
+  let value;
+  await new Promise((resolve, reject) => {
+    // Reading and replacing happens in the same read/write transaction. Real
+    // IndexedDB serialises these transactions, so rapid taps cannot both see
+    // an empty queue and create competing stale-version records.
+    const tx = db.transaction("pending", "readwrite");
+    const store = tx.objectStore("pending");
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const matches = (request.result || [])
+        .filter(item => item.status === "pending"
+          && item.action === spec.action
+          && item.userId === userId
+          && item.partition === partition
+          && item.path === path
+          && item.method === verb)
+        .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+      const existing = spec.action === "check_shopping_item" ? matches[0] : null;
+      if (existing) {
+        const existingRevision = pendingMutationRevision(existing);
+        const wasSent = Number(existing.inFlightRevision) === existingRevision;
+        value = {
+          ...existing,
+          revision: existingRevision + 1,
+          body: {
+            checked: queuedBody.checked,
+            expected_version: existing.body.expected_version,
+            // Before replay begins the key stays stable across rapid taps. If
+            // that body has already been sent, the new semantic intent needs a
+            // fresh key so the server cannot mistake it for the completed body.
+            idempotency_key: wasSent ? id : existing.body.idempotency_key,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        matches.slice(1).forEach(duplicate => store.delete(duplicate.id));
+      } else {
+        const createdAt = new Date().toISOString();
+        value = { id, action: spec.action, userId, partition, path, method: verb, body: queuedBody, status: "pending", revision: 1, createdAt, updatedAt: createdAt };
+      }
+      store.put(value);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("离线操作保存失败"));
+  });
+  db.close();
+  return value;
 }
 
 async function flushMealMutations() {
+  if (state.offlineFlushPromise) return state.offlineFlushPromise;
+  const work = performMealMutations();
+  state.offlineFlushPromise = work;
+  try { await work; } finally { if (state.offlineFlushPromise === work) state.offlineFlushPromise = null; }
+}
+
+async function performMealMutations() {
   const userId = state.data?.user?.id;
   const db = await openMealCache().catch(() => null); if (!db || !navigator.onLine || !userId) return;
   const pending = await new Promise(resolve => { const request = db.transaction("pending").objectStore("pending").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
-  for (const item of pending.filter(value => value.userId === userId)) {
+  const blocked = new Set();
+  let replayNewerIntent = false;
+  for (const item of pending.filter(value => value.partition === cachePartition()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    if (blocked.has(item.path)) continue;
+    if (item.status === "needs_attention") { blocked.add(item.path); continue; }
+    if (item.partition !== cachePartition()) break;
+    if (!offlineQueueEntryIsValid(item)) {
+      item.status = "needs_attention";
+      item.error = { status: 422, message: "离线操作格式无效，已停止自动同步", code: "invalid_offline_action" };
+      await new Promise(resolve => { const tx = db.transaction("pending", "readwrite"); tx.objectStore("pending").put(item); tx.oncomplete = resolve; tx.onerror = resolve; });
+      blocked.add(item.path);
+      toast("有一条离线操作格式无效，原内容已保留且不会自动发送");
+      continue;
+    }
+    const sent = await claimPendingMutation(db, item);
+    if (!sent) continue;
     try {
-      await api(item.path, { method: item.method, body: JSON.stringify(item.body) });
-      await new Promise(resolve => { const tx = db.transaction("pending", "readwrite"); tx.objectStore("pending").delete(item.id); tx.oncomplete = resolve; tx.onerror = resolve; });
-    } catch (error) { if (error.status === 409 || error.status === 400 || error.status === 403 || error.status === 404) await new Promise(resolve => { const tx = db.transaction("pending", "readwrite"); tx.objectStore("pending").delete(item.id); tx.oncomplete = resolve; tx.onerror = resolve; }); else break; }
+      const response = await api(sent.path, { method: sent.method, body: JSON.stringify(sent.body) });
+      if (sent.partition !== cachePartition()) break;
+      const settled = await settlePendingMutation(db, sent, { succeeded: true, response });
+      if (settled.newer) replayNewerIntent = true;
+    } catch (error) {
+      if (sent.partition !== cachePartition()) break;
+      const settled = await settlePendingMutation(db, sent, { error });
+      if (settled.newer) {
+        replayNewerIntent = true;
+        if (!error.status) break;
+        continue;
+      }
+      if (settled.needsAttention) {
+        blocked.add(item.path);
+        toast("有一条离线操作需要处理，原内容已保留");
+      } else break;
+    }
   }
   db.close();
+  if (replayNewerIntent && navigator.onLine && userId === state.data?.user?.id) await performMealMutations();
 }
 
 async function clearMealOfflineData(userId) {
-  if (!userId) return;
-  localStorage.removeItem(`love-offline-meals:${userId}`);
+  userId = userId || decodeURIComponent((localStorage.getItem("love-active-scope") || "").split(":")[0]);
+  const prefix = userId ? `love-private:${encodeURIComponent(userId)}:` : null;
+  for (let index = localStorage.length - 1; index >= 0; index--) {
+    const key = localStorage.key(index);
+    if ((prefix && key?.startsWith(prefix)) || (key?.startsWith("love-") && !key.startsWith("love-private:") && key !== AUTH_SYNC_KEY)) localStorage.removeItem(key);
+  }
+  localStorage.removeItem("love-active-scope");
+  stopRealtime();
+  if (typeof stopVoiceResources === "function") stopVoiceResources({ discard: true });
+  resetTripLive(); state.data = null;
+  state.memorySearchResult = null; state.memorySearchLoading = false;
+  state.memoryCompletion = []; state.memoryCompletionLoaded = false; state.memoryDeepLinked = false;
+  state.expressionRequestEpoch += 1;
+  if (typeof clearTimeout === "function") clearTimeout(state.statusExpiryTimer);
+  state.statusExpiryTimer = null;
+  state.manifests = {}; state.smartIntentDrafts = {}; state.chatImport = null;
+  state.destinationCandidates = []; state.destinationSearchCache.clear(); state.routeLegs = null; state.sharedDetail = null;
+  state.tripTools = { tripId: "", tripVersion: 0, packing: [], emergency: [], hospitals: [], evidence: null, offlineSnapshot: null, offlineReadOnly: false, loading: false, editingEmergency: null };
+  state.tripExpenses = { tripId: "", data: null, loading: false, editing: null, selected: new Set(), requestSequence: Number(state.tripExpenses?.requestSequence || 0) + 1 };
+  if (state.decisionSelections instanceof Map) state.decisionSelections.clear();
+  else state.decisionSelections = new Map();
+  state.datePlaceCandidates = []; state.datePlaceCandidateId = null;
+  state.datePlaceSearchSequence = Number(state.datePlaceSearchSequence || 0) + 1;
+  state.lifeAssistant = { today: null, plans: [], notifications: [], unreadCount: 0, summary: null, activePlan: null, loading: false };
+  state.meals = { recipes: [], recipeDrafts: [], recipeNextCursor: null, wishes: [], cart: { items: [] }, calendar: { days: [] }, shopping: { items: [] }, profiles: { profiles: [] }, pantry: { items: [] }, categoryOrder: { categories: [] }, weeklyPlan: { id: null, status: "empty", items: [] }, shoppingPreview: null, substitutionPreview: null, substitutionMealId: "", openWishId: "", wishRecipeCandidates: [] };
+  document.querySelectorAll("input,textarea").forEach(input => { if (input.type !== "checkbox" && input.type !== "radio") input.value = ""; });
   const db = await openMealCache().catch(() => null); if (!db) return;
   await new Promise(resolve => {
     const tx = db.transaction(["cache", "pending"], "readwrite");
-    tx.objectStore("cache").delete(mealUserCacheKey("snapshot", userId));
+    const keys = tx.objectStore("cache").getAllKeys();
+    keys.onsuccess = () => keys.result.filter(key => (prefix && String(key).startsWith(prefix)) || !String(key).startsWith("love-private:")).forEach(key => tx.objectStore("cache").delete(key));
     const request = tx.objectStore("pending").getAll();
-    request.onsuccess = () => request.result.filter(item => item.userId === userId).forEach(item => tx.objectStore("pending").delete(item.id));
+    request.onsuccess = () => request.result.filter(item => item.userId === userId || !item.partition).forEach(item => tx.objectStore("pending").delete(item.id));
     tx.oncomplete = resolve; tx.onerror = resolve;
   });
   db.close();
@@ -726,12 +1255,14 @@ async function loadSmartSurface(surface, { quiet = false } = {}) {
     saveManifestCache(surface, manifest);
     renderSmartSurface(surface, manifest);
   } catch (error) {
+    if (error.status) { delete state.manifests[surface]; renderSmartSurface(surface, null, error.message); return; }
     if (!state.manifests[surface]) renderSmartSurface(surface, null, error.message);
     if (!quiet) toast(error.message);
   }
 }
 
 async function composeSmartSurface(surface, intent, button) {
+  if (!requireOnlineMutation("ai_compose", "智能整理")) return;
   state.composingSmartSurfaces.add(surface);
   button.disabled = true; button.textContent = "整理中…";
   try {
@@ -811,6 +1342,310 @@ function openMomentComposer(label = "回忆") {
   openModal("momentModal");
 }
 
+function voiceMimeType() {
+  if (!globalThis.MediaRecorder) return "";
+  return ["audio/mp4", "audio/webm;codecs=opus", "audio/ogg;codecs=opus"]
+    .find(type => MediaRecorder.isTypeSupported?.(type)) || "";
+}
+
+function stopVoiceResources({ discard = false } = {}) {
+  if (state.voiceRecorder?.state === "recording") state.voiceRecorder.stop();
+  state.voiceRecognition?.stop?.();
+  state.voiceRecognition = null;
+  state.voiceStream?.getTracks?.().forEach(track => track.stop());
+  state.voiceStream = null;
+  clearInterval(state.voiceTimer); state.voiceTimer = null;
+  if (discard) {
+    state.voiceBlob = null; state.voiceChunks = []; state.voiceStartedAt = 0; state.voiceDurationMs = 0;
+    if (state.voicePreviewUrl) URL.revokeObjectURL(state.voicePreviewUrl);
+    state.voicePreviewUrl = null;
+    const preview = document.getElementById("voicePreview");
+    if (preview) { preview.hidden = true; preview.removeAttribute("src"); preview.load(); }
+  }
+}
+
+function openVoiceMemoryComposer() {
+  if (!navigator.onLine) { toast("录音保存需要联网，当前没有修改任何内容"); return; }
+  if (!navigator.mediaDevices?.getUserMedia || !globalThis.MediaRecorder || !voiceMimeType()) {
+    toast("当前浏览器不支持安全录音，请换用最新版 Safari、Chrome 或 Edge"); return;
+  }
+  stopVoiceResources({ discard: true });
+  document.getElementById("voiceMemoryName").value = "";
+  document.getElementById("voiceTranscript").value = "";
+  document.getElementById("voiceOccurredAt").value = datetimeLocalValue(new Date());
+  document.getElementById("voiceMood").value = "";
+  document.getElementById("voiceVisibility").value = "shared";
+  document.getElementById("voiceRevealField").hidden = true;
+  document.getElementById("voiceRecordStatus").textContent = "尚未录音";
+  document.getElementById("voiceRecordTimer").textContent = "00:00";
+  document.querySelector('[data-action="start-voice-recording"]').disabled = false;
+  document.querySelector('[data-action="stop-voice-recording"]').disabled = true;
+  document.querySelector('[data-action="reset-voice-recording"]').disabled = true;
+  state.voiceTranscriptMethod = "manual";
+  state.voiceTranscriptEdited = false;
+  openModal("voiceMemoryModal");
+}
+
+async function startVoiceRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const mimeType = voiceMimeType();
+  state.voiceStream = stream; state.voiceChunks = []; state.voiceBlob = null;
+  state.voiceStartedAt = Date.now(); state.voiceDurationMs = 0;
+  const recorder = new MediaRecorder(stream, { mimeType });
+  state.voiceRecorder = recorder;
+  recorder.ondataavailable = event => { if (event.data?.size) state.voiceChunks.push(event.data); };
+  recorder.onstop = () => {
+    state.voiceDurationMs = Math.max(1, Date.now() - state.voiceStartedAt);
+    state.voiceBlob = new Blob(state.voiceChunks, { type: mimeType.split(";", 1)[0] });
+    state.voiceStream?.getTracks?.().forEach(track => track.stop()); state.voiceStream = null;
+    if (state.voicePreviewUrl) URL.revokeObjectURL(state.voicePreviewUrl);
+    state.voicePreviewUrl = URL.createObjectURL(state.voiceBlob);
+    const preview = document.getElementById("voicePreview"); preview.src = state.voicePreviewUrl; preview.hidden = false;
+    document.getElementById("voiceRecordStatus").textContent = "录音已完成，可先试听再保存";
+    document.querySelector('[data-action="start-voice-recording"]').disabled = true;
+    document.querySelector('[data-action="stop-voice-recording"]').disabled = true;
+    document.querySelector('[data-action="reset-voice-recording"]').disabled = false;
+  };
+  recorder.start(500);
+  const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+  if (Recognition) {
+    const recognition = new Recognition(); recognition.lang = "zh-CN"; recognition.continuous = true; recognition.interimResults = false;
+    recognition.onresult = event => {
+      const text = Array.from(event.results).slice(event.resultIndex).map(result => result[0]?.transcript || "").join("");
+      if (text) {
+        document.getElementById("voiceTranscript").value += text;
+        if (!state.voiceTranscriptEdited) state.voiceTranscriptMethod = "browser";
+        document.getElementById("voiceTranscriptSource").textContent = state.voiceTranscriptEdited
+          ? "文字包含你的手工填写或校正，将保持标记为本人填写。"
+          : "浏览器本地识别结果（未经服务端验证），可在保存前修改。";
+      }
+    };
+    recognition.onerror = () => { document.getElementById("voiceTranscriptSource").textContent = "浏览器识别不可用，原音仍会保留，可手工补充文字。"; };
+    try { recognition.start(); state.voiceRecognition = recognition; } catch (_) {}
+  }
+  document.getElementById("voiceRecordStatus").textContent = "正在录音，请保持页面在前台";
+  document.querySelector('[data-action="start-voice-recording"]').disabled = true;
+  document.querySelector('[data-action="stop-voice-recording"]').disabled = false;
+  state.voiceTimer = setInterval(() => {
+    const seconds = Math.floor((Date.now() - state.voiceStartedAt) / 1000);
+    document.getElementById("voiceRecordTimer").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  }, 250);
+}
+
+function stopVoiceRecording() {
+  if (state.voiceStartedAt) state.voiceDurationMs = Math.max(1, Date.now() - state.voiceStartedAt);
+  if (state.voiceRecorder?.state === "recording") state.voiceRecorder.stop();
+  state.voiceRecognition?.stop?.(); state.voiceRecognition = null;
+  clearInterval(state.voiceTimer); state.voiceTimer = null;
+}
+
+async function saveVoiceMemory() {
+  if (!requireOnlineMutation("moment_save", "保存语音回忆")) return;
+  if (!state.voiceBlob?.size) throw new Error("请先完成一段录音");
+  const title = document.getElementById("voiceMemoryName").value.trim();
+  if (!title) throw new Error("请先填写标题");
+  const occurred = document.getElementById("voiceOccurredAt").value;
+  if (!occurred) throw new Error("请选择发生时间");
+  const visibility = document.getElementById("voiceVisibility").value;
+  const revealValue = document.getElementById("voiceRevealAt").value;
+  if (visibility === "delayed" && !revealValue) throw new Error("请选择公开时间");
+  const extension = state.voiceBlob.type === "audio/mp4" ? "m4a" : state.voiceBlob.type === "audio/ogg" ? "ogg" : "webm";
+  const file = new File([state.voiceBlob], `voice-${Date.now()}.${extension}`, { type: state.voiceBlob.type });
+  const media = await uploadMedia(file, "private");
+  const transcriptBody = document.getElementById("voiceTranscript").value;
+  const durationMs = Math.max(1, state.voiceDurationMs || Date.now() - state.voiceStartedAt);
+  const result = await api("/api/v1/voice-memories", {
+    method: "POST", headers: { "Idempotency-Key": clientKey("voice") },
+    body: JSON.stringify({
+      media_id: media.id, title, note: "", occurred_at: new Date(occurred).toISOString(), location: "",
+      mood: document.getElementById("voiceMood").value.trim(), visibility,
+      reveal_at: revealValue ? new Date(revealValue).toISOString() : null, duration_ms: durationMs,
+      ...(transcriptBody ? { transcript: { body: transcriptBody, language: "zh-CN", method: state.voiceTranscriptMethod, status: "ready" } } : {}),
+    }),
+  });
+  stopVoiceResources({ discard: true }); closeModals(); await loadBootstrap({ quiet: true });
+  await setTimelineView("list", { scroll: false }); toast(result.transcript ? "原声和文字已保存" : "原声已保存，本次没有附加文字");
+}
+
+async function loadFutureLetters({ quiet = false } = {}) {
+  try {
+    const [mine, delivered] = await Promise.all([api("/api/v1/future-letters?scope=mine"), api("/api/v1/future-letters?scope=delivered")]);
+    const byId = new Map([...(mine.items || []), ...(delivered.items || [])].map(item => [item.id, item]));
+    state.futureLetters = [...byId.values()].sort((a, b) => String(b.delivered_at || b.created_at).localeCompare(String(a.delivered_at || a.created_at)));
+    renderFutureLetters();
+  } catch (error) { if (!quiet) toast(error.message); }
+}
+
+function renderFutureLetters() {
+  const host = document.getElementById("futureLetterList"); if (!host) return;
+  host.innerHTML = state.futureLetters.length ? state.futureLetters.map(item => {
+    const label = item.status === "draft" ? "私密草稿" : item.status === "sealed" ? "已封存" : "已送达";
+    const when = item.deliver_at ? new Date(item.deliver_at).toLocaleString("zh-CN") : item.delivered_at ? new Date(item.delivered_at).toLocaleString("zh-CN") : "尚未设定送达时间";
+    return `<button class="future-letter-card" data-action="open-future-letter-detail" data-id="${escapeHtml(item.id)}"><small>${label} · ${escapeHtml(when)}</small><strong>${escapeHtml(item.title || "未来信")}</strong><p>${item.status === "sealed" ? "正文已封存，取消后才能重新查看与编辑。" : item.status === "delivered" ? "信件已经送达，可以打开查看。" : "只有你能看到这份草稿。"}</p></button>`;
+  }).join("") : `<p class="muted">还没有未来信。写下后，对方在到期前不会看到任何提示。</p>`;
+}
+
+function openFutureLetterComposer(letter = null) {
+  state.activeFutureLetter = letter;
+  document.getElementById("futureLetterForm").hidden = false;
+  document.getElementById("futureLetterSealPanel").hidden = true;
+  document.getElementById("futureLetterId").value = letter?.id || "";
+  document.getElementById("futureLetterVersion").value = letter?.version || "";
+  document.getElementById("futureLetterName").value = letter?.title || "";
+  document.getElementById("futureLetterBody").value = letter?.body || "";
+  document.getElementById("futureLetterTitle").textContent = letter ? "编辑未来信草稿" : "写给未来的一封信";
+  openModal("futureLetterModal");
+}
+
+async function openFutureLetterDetail(id) {
+  const item = await api(`/api/v1/future-letters/${encodeURIComponent(id)}`); state.activeFutureLetter = item;
+  document.getElementById("futureLetterDetailTitle").textContent = item.title || "未来信";
+  const actions = item.status === "draft" && item.is_author
+    ? `<div class="future-letter-actions"><button data-action="edit-future-letter" data-id="${escapeHtml(item.id)}">继续编辑</button><button data-action="prepare-seal-future-letter">设定送达时间</button><button data-action="delete-future-letter">删除草稿</button></div>`
+    : item.status === "sealed" && item.is_author
+      ? `<div class="future-letter-actions"><button data-action="cancel-future-letter">取消封存并恢复草稿</button></div>`
+      : item.status === "delivered"
+        ? `<div class="future-letter-actions">${item.converted ? "<span>已保存为共同瞬间</span>" : `<button data-action="convert-future-letter">保存为共同瞬间</button>`}</div>` : "";
+  document.getElementById("futureLetterDetail").innerHTML = `<p class="form-note">${item.status === "sealed" ? `预计 ${escapeHtml(new Date(item.deliver_at).toLocaleString("zh-CN"))} 送达` : item.status === "delivered" ? `已于 ${escapeHtml(new Date(item.delivered_at).toLocaleString("zh-CN"))} 送达` : "仅自己可见的草稿"}</p>${item.body === null ? `<div class="empty-view"><p>正文已安全封存。到期前只能取消封存，不能预览或分享。</p></div>` : `<article class="card"><p>${escapeHtml(item.body).replace(/\n/g, "<br>")}</p></article>`}${actions}`;
+  closeModals(); openModal("futureLetterDetailModal");
+}
+
+function albumExportPayload(includeSelection = false) {
+  const payload = {
+    template: state.albumExport.template,
+    audience: document.getElementById("albumExportAudience").value,
+  };
+  if (payload.template === "trip") payload.trip_id = state.albumExport.tripId;
+  else payload.year = Number(document.getElementById("albumExportYear").value);
+  if (includeSelection) {
+    const selected = [...document.querySelectorAll("#albumExportItems input[type=checkbox]:checked")];
+    payload.selection = selected.map(input => ({ resource_type: input.dataset.resourceType, resource_id: input.dataset.resourceId }));
+    payload.expected_versions = Object.fromEntries(selected.map(input => [`${input.dataset.resourceType}:${input.dataset.resourceId}`, Number(input.dataset.version)]));
+  }
+  return payload;
+}
+
+const albumSourceLabels = {
+  human: "本人填写",
+  real_api: "真实接口",
+  ai: "AI 建议",
+  imported: "导入内容",
+  legacy_unknown: "来源未记录",
+};
+
+async function previewAlbumExport() {
+  if (!navigator.onLine) throw new Error("生成 PDF 需要联网，当前没有写入任何任务");
+  const host = document.getElementById("albumExportItems");
+  host.innerHTML = `<p class="muted">正在核对当前权限与可选内容…</p>`;
+  const preview = await api("/api/v1/album-exports/preview", { method: "POST", body: JSON.stringify(albumExportPayload()) });
+  state.albumExport.preview = preview;
+  document.getElementById("albumExportNotice").textContent = `${preview.date_range}${preview.date_filter_notice ? ` · ${preview.date_filter_notice}` : ""}。个人私密内容默认不勾选，只有你逐项选择后才会进入个人 PDF。`;
+  host.innerHTML = preview.items.length ? preview.items.map(item => `<label class="album-export-item"><input type="checkbox" data-resource-type="${escapeHtml(item.resource_type)}" data-resource-id="${escapeHtml(item.resource_id)}" data-version="${item.version}" ${item.default_selected ? "checked" : ""}><span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(String(item.event_at || "").slice(0, 10))} · ${item.visibility === "shared" ? "双方可见" : "仅自己可见，将写入个人纪念册"} · ${escapeHtml(albumSourceLabels[item.source_type] || "来源未记录")}</small><em>${escapeHtml(item.summary || "无文字说明")}</em></span></label>`).join("") : `<div class="empty-view"><h3>这个范围内没有可导出的回忆</h3><p>未来信、已删除内容和当前无权查看的内容不会出现在这里。</p></div>`;
+  document.getElementById("createAlbumExport").disabled = !preview.items.length || !navigator.onLine;
+}
+
+function stopAlbumExportPolling() {
+  if (state.albumExport.pollTimer) clearTimeout(state.albumExport.pollTimer);
+  state.albumExport.pollTimer = null;
+}
+
+function albumJobMatchesCurrentScope(job) {
+  const scope = albumExportPayload();
+  if (job.template !== scope.template || job.audience !== scope.audience) return false;
+  return scope.template === "trip"
+    ? job.trip_id === scope.trip_id
+    : Number(job.year) === Number(scope.year);
+}
+
+function albumJobMatchesCurrentContext(job) {
+  if (job.template !== state.albumExport.template) return false;
+  return job.template !== "trip" || job.trip_id === state.albumExport.tripId;
+}
+
+function renderAlbumExportRecentJobs() {
+  const host = document.getElementById("albumExportRecentJobs");
+  if (!host) return;
+  const labels = {
+    queued: "等待生成", running: "正在生成", completed: "可下载",
+    failed: "生成失败", cancelled: "已取消", expired: "已过期",
+  };
+  host.innerHTML = state.albumExport.jobs.length
+    ? state.albumExport.jobs.slice(0, 8).map(job => {
+      const scope = job.template === "trip" ? "本次旅行" : `${job.year} 年`;
+      const audience = job.audience === "personal" ? "个人版" : "共享版";
+      return `<button type="button" class="album-export-job-row" data-action="restore-album-export" data-id="${escapeHtml(job.id)}"><span><strong>${escapeHtml(labels[job.status] || job.status)} · ${escapeHtml(audience)}</strong><small>${escapeHtml(scope)} · ${escapeHtml(new Date(job.created_at).toLocaleString("zh-CN"))}</small></span><b>${job.id === state.albumExport.job?.id ? "当前" : "查看"}</b></button>`;
+    }).join("")
+    : `<p class="muted">当前范围还没有可恢复的生成记录。</p>`;
+}
+
+async function loadAlbumExportJobs({ restoreLatest = true } = {}) {
+  const result = await api("/api/v1/album-exports");
+  state.albumExport.jobs = (result.items || []).filter(albumJobMatchesCurrentContext);
+  renderAlbumExportRecentJobs();
+  const exactJobs = state.albumExport.jobs.filter(albumJobMatchesCurrentScope);
+  if (restoreLatest && exactJobs.length) {
+    await pollAlbumExport(exactJobs[0].id);
+  } else if (!exactJobs.length) {
+    state.albumExport.job = null;
+    document.getElementById("downloadAlbumExport").hidden = true;
+    document.getElementById("cancelAlbumExport").hidden = true;
+    document.getElementById("albumExportStatus").textContent = state.albumExport.jobs.length
+      ? "当前范围没有生成记录；可以从“最近生成记录”恢复其他个人版或年份。"
+      : "当前范围还没有生成记录，可以从下方内容新建纪念册。";
+  }
+}
+
+async function pollAlbumExport(jobId) {
+  stopAlbumExportPolling();
+  try {
+    const job = await api(`/api/v1/album-exports/${encodeURIComponent(jobId)}`);
+    state.albumExport.job = job;
+    const existing = state.albumExport.jobs.findIndex(item => item.id === job.id);
+    if (existing >= 0) state.albumExport.jobs[existing] = job;
+    else if (albumJobMatchesCurrentContext(job)) state.albumExport.jobs.unshift(job);
+    renderAlbumExportRecentJobs();
+    const status = document.getElementById("albumExportStatus");
+    const download = document.getElementById("downloadAlbumExport");
+    const cancel = document.getElementById("cancelAlbumExport");
+    if (job.status === "completed") {
+      const expires = new Date(job.expires_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+      status.textContent = `纪念册已完成，下载将在 ${expires} 过期。${job.warnings?.includes("media_missing") ? "部分缺失照片已用安全占位替代。" : ""}`;
+      download.href = `/api/v1/album-exports/${encodeURIComponent(job.id)}/download`;
+      download.hidden = false; cancel.hidden = true;
+      return;
+    }
+    if (["failed", "cancelled", "expired"].includes(job.status)) {
+      status.textContent = job.status === "expired" ? "下载已过期，请重新生成。" : job.status === "cancelled" ? "生成已取消。" : "内容权限或版本已经变化，请重新预览。";
+      download.hidden = true; cancel.hidden = true; return;
+    }
+    status.textContent = job.status === "queued" ? "已加入生成队列…" : "正在恋屿服务器安全生成 PDF…";
+    download.hidden = true;
+    cancel.hidden = false;
+    state.albumExport.pollTimer = setTimeout(() => void pollAlbumExport(jobId), 1200);
+  } catch (error) {
+    document.getElementById("albumExportStatus").textContent = error.message;
+  }
+}
+
+async function openAlbumExport(template, tripId = "") {
+  stopAlbumExportPolling();
+  state.albumExport = { template, tripId, preview: null, job: null, jobs: [], pollTimer: null };
+  document.getElementById("albumExportYear").value = String(new Date().getFullYear());
+  document.getElementById("albumYearField").hidden = template === "trip";
+  document.getElementById("albumExportAudience").value = "shared";
+  document.getElementById("albumExportTitle").textContent = template === "trip" ? "制作本次旅行纪念册" : "制作年度纸质纪念册";
+  document.getElementById("albumExportStatus").textContent = "";
+  document.getElementById("downloadAlbumExport").hidden = true;
+  document.getElementById("cancelAlbumExport").hidden = true;
+  document.getElementById("albumExportRecentJobs").innerHTML = `<p class="muted">正在检查一小时内可恢复的任务…</p>`;
+  document.getElementById("createAlbumExport").disabled = !navigator.onLine;
+  openModal("albumExportModal");
+  try { await previewAlbumExport(); await loadAlbumExportJobs(); } catch (error) {
+    document.getElementById("createAlbumExport").disabled = true;
+    document.getElementById("albumExportItems").innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function datetimeLocalValue(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -850,9 +1685,36 @@ function openCalendarComposer(entryType = "event") {
   form.reset(); delete form.dataset.itemId; delete form.dataset.version;
   document.getElementById("calendarModalTitle").textContent = entryType === "anniversary" ? "添加纪念日" : entryType === "todo" ? "添加双人待办" : "添加共同事项";
   document.getElementById("calendarType").value = entryType;
-  document.getElementById("calendarStart").value = new Date().toISOString().slice(0, 10);
+  document.getElementById("calendarAllDay").checked = true;
+  setCalendarAllDay(true);
+  document.getElementById("calendarStart").value = new Date().toLocaleDateString("sv-SE");
+  document.getElementById("calendarEnd").value = "";
   document.getElementById("calendarRecurrence").value = entryType === "anniversary" ? "yearly" : "none";
+  const participants = document.getElementById("calendarParticipants");
+  participants.innerHTML = [state.data?.user, state.data?.partner].filter(Boolean).map(person => `<option value="${escapeHtml(person.id)}">${escapeHtml(person.nickname)}</option>`).join("");
+  document.getElementById("calendarBlocksTime").checked = false;
+  document.getElementById("calendarPrefillNotice").hidden = true;
   openModal("calendarModal");
+}
+
+function setCalendarAllDay(allDay) {
+  const start = document.getElementById("calendarStart");
+  const end = document.getElementById("calendarEnd");
+  const normalize = (input, fallbackHour) => {
+    const day = String(input.value || new Date().toLocaleDateString("sv-SE")).slice(0, 10);
+    input.type = allDay ? "date" : "datetime-local";
+    input.value = allDay ? day : `${day}T${fallbackHour}`;
+  };
+  normalize(start, "09:00");
+  if (end.value) normalize(end, "10:00"); else end.type = allDay ? "date" : "datetime-local";
+  end.required = !allDay && document.getElementById("calendarBlocksTime").checked;
+}
+
+function calendarApiTime(value, allDay) {
+  if (allDay || !value) return value || null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error("日历时间格式无效");
+  return parsed.toISOString();
 }
 
 function extractTravelDestination(intent = "") {
@@ -872,7 +1734,7 @@ function renderDestinationSelection(place = null, candidateId = null) {
   const host = document.getElementById("tripDestinationSelection");
   if (!host) return;
   if (!place) { host.innerHTML = ""; return; }
-  const source = ({ amap: "高德地点", google_maps: "Google Maps 地点", manual: "本人确认范围" })[place.provider] || "已确认地点";
+  const source = ({ amap: "高德地点", google_maps: "Google Maps 地点", manual: "手动范围（未地图核验）" })[place.provider] || "已确认地点";
   const area = [place.country, place.province, place.city, place.district, place.formatted_address].filter(Boolean).join(" · ");
   host.innerHTML = `<div class="confirmed-place"><strong>✓ 已确认：${escapeHtml(place.name)}</strong><br>${escapeHtml(area || "没有详细地址")} · ${escapeHtml(source)}</div>`;
   state.destinationCandidateId = candidateId;
@@ -904,7 +1766,7 @@ function renderDestinationCandidates(result) {
   const caption = providers.has("google_maps") ? "高德与全球地图建议" : providers.has("amap") ? "高德地点建议" : "可确认的地点范围";
   host.innerHTML = state.destinationCandidates.length ? `<div class="destination-candidate-caption"><strong>${caption}</strong><span>点击一项确认</span></div>` + state.destinationCandidates.map(item => {
     const area = [...new Set([item.country, item.province, item.city, item.district, item.formatted_address].filter(Boolean))].join(" · ");
-    const source = ({ amap: "高德", google_maps: "Google Maps", manual: "本人确认" })[item.provider] || item.provider;
+    const source = ({ amap: "高德", google_maps: "Google Maps", manual: "手动范围（未地图核验）" })[item.provider] || item.provider;
     return `<button type="button" class="destination-candidate" role="option" data-action="select-destination" data-candidate-id="${escapeHtml(item.candidate_id)}"><span class="destination-candidate-pin" aria-hidden="true">⌖</span><span class="destination-candidate-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(area || "没有详细地址")}</small></span><span class="destination-source-badge">${escapeHtml(source)}</span></button>`;
   }).join("") : `<div class="destination-search-empty">${escapeHtml(result.notice || "没有查到候选地点，请补充城市或国家后重试。")}</div>`;
 }
@@ -969,6 +1831,7 @@ function scheduleDestinationSuggestions(delay = 500) {
 function openTripComposer(destination = "", editingTrip = null) {
   const form = document.getElementById("tripForm");
   form.reset(); clearDestinationResolution({ cancelSearch: true });
+  document.getElementById("tripPrefillNotice").hidden = true;
   if (editingTrip) form.dataset.tripId = editingTrip.id; else delete form.dataset.tripId;
   const start = new Date(Date.now() + 30 * 86400000);
   const end = new Date(start.getTime() + 2 * 86400000);
@@ -1004,7 +1867,7 @@ function scrollToContent(selector) {
 function setTripSection(section = "overview", { scroll = true } = {}) {
   const allowed = ["overview", "assistant", "plans", "itinerary", "stays", "tools"];
   state.tripSection = allowed.includes(section) ? section : "overview";
-  localStorage.setItem("love-trip-section", state.tripSection);
+  privateStorage().setItem("love-trip-section", state.tripSection);
   document.querySelectorAll("[data-trip-section]").forEach(button => button.classList.toggle("active", button.dataset.tripSection === state.tripSection));
   document.querySelectorAll("[data-trip-panel]").forEach(panel => { panel.hidden = panel.dataset.tripPanel !== state.tripSection; });
   const sticky = document.querySelector(".sticky-trip-actions");
@@ -1013,13 +1876,342 @@ function setTripSection(section = "overview", { scroll = true } = {}) {
     renderTripLive();
     loadTripAssistant({ quiet: true }).catch(error => toast(error.message));
   }
+  if (state.tripSection === "tools") {
+    if (state.tripToolSection === "expenses") loadTripExpenses({ quiet: true }).catch(error => toast(error.message));
+    else loadTripTools({ quiet: true }).catch(error => toast(error.message));
+  }
   if (scroll) document.querySelector('[data-screen="trip"] .content')?.scrollIntoView({ block: "start" });
 }
 
+function setTripToolSection(section = "packing") {
+  state.tripToolSection = ["packing", "emergency", "expenses", "route"].includes(section) ? section : "packing";
+  privateStorage().setItem("love-trip-tool-section", state.tripToolSection);
+  document.querySelectorAll("[data-trip-tool-section]").forEach(button => button.classList.toggle("active", button.dataset.tripToolSection === state.tripToolSection));
+  document.querySelectorAll("[data-trip-tool-panel]").forEach(panel => { panel.hidden = panel.dataset.tripToolPanel !== state.tripToolSection; });
+}
+
+function tripOfflineCacheKey(tripId = state.data?.trip?.id) {
+  return tripId ? `trip-offline:${tripId}` : "";
+}
+
+function validateTripOfflineSnapshot(value, tripId = state.data?.trip?.id, now = Date.now()) {
+  if (!value || value.schema_version !== 1 || !tripId || value.trip?.id !== tripId) return null;
+  const identity = value.identity || {};
+  if (identity.user_id !== state.data?.user?.id || identity.couple_id !== state.data?.couple?.id || Number(identity.permission_version) !== Number(state.data?.permission_version ?? state.data?.couple?.version ?? 0)) return null;
+  const generated = Date.parse(value.generated_at || ""), expires = Date.parse(value.expires_at || "");
+  if (!Number.isFinite(generated) || !Number.isFinite(expires) || generated > now + 300000 || expires <= now || expires <= generated || expires - generated > 86401000) return null;
+  if (!Array.isArray(value.itinerary) || !Array.isArray(value.packing?.items) || !Array.isArray(value.emergency?.items)) return null;
+  return value;
+}
+
+function readTripOfflineSnapshot(tripId = state.data?.trip?.id) {
+  const key = tripOfflineCacheKey(tripId); if (!key) return null;
+  const value = readLocalJson(key);
+  const valid = validateTripOfflineSnapshot(value, tripId);
+  if (!valid) privateStorage().removeItem(key);
+  return valid;
+}
+
+function evictTripOfflineSnapshot(tripId = state.data?.trip?.id) {
+  const key = tripOfflineCacheKey(tripId); if (key) privateStorage().removeItem(key);
+  if (state.tripTools.tripId === tripId) state.tripTools.offlineSnapshot = null;
+}
+
+function maskReference(value) {
+  const text = String(value || "");
+  return text.length <= 4 ? "••••" : `${text.slice(0, 2)}••••${text.slice(-2)}`;
+}
+
+const emergencyFieldDefinitions = {
+  hotel: [["address", "酒店地址"], ["phone", "前台电话", "tel"], ["check_in_at", "入住时间", "datetime-local"], ["check_out_at", "退房时间", "datetime-local"], ["front_desk_note", "前台说明", "textarea"]],
+  booking: [["provider", "预订平台"], ["booking_type", "订单类型"], ["booking_reference", "订单号"], ["support_phone", "客服电话", "tel"], ["status_note", "订单说明", "textarea"]],
+  contact: [["name", "联系人姓名"], ["relationship", "关系"], ["phone", "联系电话", "tel"], ["note", "说明", "textarea"]],
+  insurance: [["provider", "保险公司"], ["policy_number", "保单号"], ["assistance_phone", "救援电话", "tel"], ["coverage_summary", "保障摘要", "textarea"], ["valid_from", "生效日期", "date"], ["valid_to", "失效日期", "date"]],
+  return: [["transport_type", "返程方式", "transport"], ["carrier", "承运方"], ["service_number", "航班 / 车次"], ["departure_place", "出发地"], ["departure_at", "出发时间", "datetime-local"], ["arrival_place", "到达地"], ["arrival_at", "到达时间", "datetime-local"], ["booking_reference", "订单号"]],
+  other: [["note", "必要说明", "textarea"]],
+};
+
+function emergencyLocalDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function renderEmergencyFormFields(details = null) {
+  const host = document.getElementById("tripEmergencyFields");
+  const type = document.getElementById("tripEmergencyType")?.value || "hotel";
+  if (!host) return;
+  if (type === "hospital") {
+    host.innerHTML = '<p class="form-note">医院名称、地址和坐标来自真实地图候选，不能在这里手工改写。</p>';
+    return;
+  }
+  const values = details || state.tripTools.editingEmergency?.details || {};
+  host.innerHTML = (emergencyFieldDefinitions[type] || emergencyFieldDefinitions.other).map(([key, label, kind = "text"]) => {
+    const raw = values[key] ?? "";
+    const value = kind === "datetime-local" ? emergencyLocalDateTime(raw) : String(raw);
+    if (kind === "textarea") return `<label class="field"><span>${escapeHtml(label)}</span><textarea data-emergency-field="${escapeHtml(key)}" maxlength="1000" rows="3">${escapeHtml(value)}</textarea></label>`;
+    if (kind === "transport") return `<label class="field"><span>${escapeHtml(label)}</span><select data-emergency-field="${escapeHtml(key)}"><option value="">请选择</option>${[["flight","飞机"],["train","火车"],["bus","长途汽车"],["ship","轮船"],["car","自驾 / 打车"],["other","其他"]].map(([code, text]) => `<option value="${code}" ${value === code ? "selected" : ""}>${text}</option>`).join("")}</select></label>`;
+    return `<label class="field"><span>${escapeHtml(label)}</span><input data-emergency-field="${escapeHtml(key)}" type="${escapeHtml(kind)}" maxlength="300" value="${escapeHtml(value)}"></label>`;
+  }).join("");
+}
+
+function collectEmergencyDetails() {
+  const details = {};
+  document.querySelectorAll("#tripEmergencyFields [data-emergency-field]").forEach(control => {
+    const raw = String(control.value || "").trim();
+    if (!raw) return;
+    details[control.dataset.emergencyField] = control.type === "datetime-local" ? new Date(raw).toISOString() : raw;
+  });
+  return details;
+}
+
+function resetEmergencyForm() {
+  const form = document.getElementById("tripEmergencyForm");
+  state.tripTools.editingEmergency = null;
+  form?.reset();
+  const type = document.getElementById("tripEmergencyType");
+  if (type) type.disabled = false;
+  const save = document.getElementById("tripEmergencySaveButton");
+  if (save) save.textContent = "保存应急卡";
+  const cancel = document.getElementById("tripEmergencyCancelButton");
+  if (cancel) cancel.hidden = true;
+  renderEmergencyFormFields({});
+}
+
+function beginEmergencyEdit(item) {
+  if (!item?.editable_by_me || state.tripTools.offlineReadOnly) return;
+  state.tripTools.editingEmergency = item;
+  const type = document.getElementById("tripEmergencyType");
+  type.value = item.entry_type; type.disabled = true;
+  document.getElementById("tripEmergencyVisibility").value = item.visibility;
+  document.getElementById("tripEmergencyTitle").value = item.title;
+  document.getElementById("tripEmergencySaveButton").textContent = "保存修改";
+  document.getElementById("tripEmergencyCancelButton").hidden = false;
+  renderEmergencyFormFields(item.details || {});
+  document.getElementById("tripEmergencyForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function emergencyDetailsMarkup(item) {
+  const labels = { address: "地址", phone: "电话", check_in_at: "入住", check_out_at: "退房", front_desk_note: "前台说明", provider: "平台", booking_type: "订单类型", booking_reference: "订单号", support_phone: "客服电话", status_note: "状态说明", name: "姓名 / 地点", relationship: "关系", note: "说明", policy_number: "保单号", assistance_phone: "救援电话", coverage_summary: "保障摘要", valid_from: "生效日", valid_to: "失效日", latitude: "纬度", longitude: "经度", verified_at: "核验时间", transport_type: "交通方式", carrier: "承运方", service_number: "班次", departure_place: "出发地", departure_at: "出发时间", arrival_place: "到达地", arrival_at: "到达时间" };
+  return Object.entries(item.details || {}).map(([key, raw]) => {
+    const value = ["booking_reference", "policy_number"].includes(key) ? maskReference(raw) : String(raw);
+    return `<div><dt>${escapeHtml(labels[key] || key)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+  }).join("") || "<p>没有额外详情</p>";
+}
+
+function parseExpenseAmountInput(value) {
+  const text = String(value || "").trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  const centsText = `${whole}${fraction.padEnd(2, "0")}`.replace(/^0+(?=\d)/, "");
+  const cents = BigInt(centsText || "0");
+  if (cents < 1n || cents > 9007199254740991n) return null;
+  return parseInt(cents.toString(), 10);
+}
+
+function formatExpenseCents(value, currency = "CNY") {
+  if (!Number.isSafeInteger(value)) return "金额无效";
+  const negative = value < 0; const absolute = Math.abs(value);
+  const whole = Math.floor(absolute / 100); const fraction = String(absolute % 100).padStart(2, "0");
+  const prefix = currency === "CNY" ? "¥" : `${currency} `;
+  return `${negative ? "-" : ""}${prefix}${whole}.${fraction}`;
+}
+
+const expenseCategoryLabels = { transport: "交通", lodging: "住宿", food: "餐饮", tickets: "门票", shopping: "购物", other: "其他" };
+
+function resetExpenseForm() {
+  state.tripExpenses.editing = null;
+  const form = document.getElementById("tripExpenseForm"); form?.reset();
+  const payer = document.getElementById("tripExpensePayer"); if (payer && state.data?.user?.id) payer.value = state.data.user.id;
+  const beneficiary = document.getElementById("tripExpenseBeneficiary"); if (beneficiary && state.data?.user?.id) beneficiary.value = state.data.user.id;
+  const date = document.getElementById("tripExpenseDate"); if (date) date.value = new Date().toLocaleDateString("sv-SE");
+  const field = document.getElementById("tripExpenseBeneficiaryField"); if (field) field.hidden = true;
+  const save = document.getElementById("tripExpenseSaveButton"); if (save) save.textContent = "记录花费";
+  const cancel = document.getElementById("tripExpenseCancelButton"); if (cancel) cancel.hidden = true;
+  renderTripExpenses();
+}
+
+function beginExpenseEdit(item) {
+  if (!item || item.deleted || !navigator.onLine) return;
+  state.tripExpenses.editing = item;
+  document.getElementById("tripExpenseAmount").value = `${Math.floor(item.amount_cents / 100)}.${String(item.amount_cents % 100).padStart(2, "0")}`;
+  document.getElementById("tripExpensePayer").value = item.payer_id;
+  document.getElementById("tripExpenseCategory").value = item.category;
+  document.getElementById("tripExpenseSplit").value = item.split_mode;
+  document.getElementById("tripExpenseBeneficiary").value = item.beneficiary_id || state.data.user.id;
+  document.getElementById("tripExpenseBeneficiaryField").hidden = item.split_mode !== "personal";
+  document.getElementById("tripExpenseDate").value = item.occurred_on;
+  document.getElementById("tripExpenseNote").value = item.note || "";
+  document.getElementById("tripExpenseSaveButton").textContent = item.settled_at ? "保存并重新计入未结清" : "保存修改";
+  document.getElementById("tripExpenseCancelButton").hidden = false;
+  document.getElementById("tripExpenseForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function tripExpenseItemMarkup(item, { deleted = false } = {}) {
+  const settled = Boolean(item.settled_at);
+  const meta = `${expenseCategoryLabels[item.category] || item.category} · ${escapeHtml(item.payer_name)}付款 · ${item.split_mode === "equal" ? "两人均分" : `${escapeHtml(item.beneficiary_name || "一人")}承担`} · ${escapeHtml(item.occurred_on)}`;
+  const selection = !deleted && !settled ? `<input type="checkbox" data-expense-settle="${escapeHtml(item.id)}" data-version="${item.version}" aria-label="选择 ${escapeHtml(item.note || expenseCategoryLabels[item.category] || "花费")} 线下结清" ${state.tripExpenses.selected.has(item.id) ? "checked" : ""}>` : "<span></span>";
+  const actions = deleted
+    ? `<button data-action="restore-expense" data-id="${escapeHtml(item.id)}" data-version="${item.version}">恢复</button>`
+    : `<button data-action="edit-expense" data-id="${escapeHtml(item.id)}">编辑</button><button class="danger-text" data-action="delete-expense" data-id="${escapeHtml(item.id)}" data-version="${item.version}">删除</button>`;
+  return `<article class="trip-tool-item trip-expense-item" data-expense-card="${escapeHtml(item.id)}">${selection}<div class="trip-expense-copy"><strong>${escapeHtml(item.note || expenseCategoryLabels[item.category] || "旅行花费")}</strong><small>${meta}${settled ? ` · ${escapeHtml(item.settled_by_name || "伴侣")}已标记线下结清` : ""}</small></div><span class="trip-expense-amount">${escapeHtml(formatExpenseCents(item.amount_cents, item.currency))}</span><div class="trip-expense-actions">${actions}</div></article>`;
+}
+
+function expenseNetAfterSelection(items, members, currentUserId, selected) {
+  if (members.length !== 2 || !currentUserId) return 0;
+  const [memberA, memberB] = members.map(member => member.id);
+  const paid = { [memberA]: 0, [memberB]: 0 }; const owed = { [memberA]: 0, [memberB]: 0 };
+  items.filter(item => !item.settled_at && !selected.has(item.id)).forEach(item => {
+    paid[item.payer_id] += item.amount_cents;
+    if (item.split_mode === "equal") { const half = Math.floor(item.amount_cents / 2); owed[memberA] += half + item.amount_cents % 2; owed[memberB] += half; }
+    else owed[item.beneficiary_id] += item.amount_cents;
+  });
+  return paid[currentUserId] - owed[currentUserId];
+}
+
+function renderTripExpenses() {
+  const value = state.tripExpenses.data;
+  const online = navigator.onLine;
+  const members = value?.members || state.data?.coupleContext?.members?.map(member => ({ id: member.id, nickname: member.nickname })) || [];
+  const memberOptions = members.map(member => `<option value="${escapeHtml(member.id)}">${escapeHtml(member.nickname)}</option>`).join("");
+  for (const id of ["tripExpensePayer", "tripExpenseBeneficiary"]) {
+    const select = document.getElementById(id); if (!select) continue;
+    const previous = select.value; select.innerHTML = memberOptions;
+    select.value = previous && members.some(member => member.id === previous) ? previous : (state.data?.user?.id || members[0]?.id || "");
+  }
+  const dateInput = document.getElementById("tripExpenseDate");
+  if (dateInput && !dateInput.value && !state.tripExpenses.editing) dateInput.value = new Date().toLocaleDateString("sv-SE");
+  const active = value?.items?.filter(item => !item.settled_at) || [];
+  const settled = value?.items?.filter(item => item.settled_at) || [];
+  const available = new Set(active.map(item => item.id));
+  state.tripExpenses.selected.forEach(id => { if (!available.has(id)) state.tripExpenses.selected.delete(id); });
+  const balance = value?.balance;
+  const balanceHost = document.getElementById("tripExpenseBalance");
+  if (balanceHost) {
+    const label = !balance ? (state.tripExpenses.loading ? "正在读取余额" : "还没有花费记录") : balance.direction === "partner_owes_me" ? `${balance.partner_name}应线下补给我 ${formatExpenseCents(balance.net_cents)}` : balance.direction === "i_owe_partner" ? `我应线下补给${balance.partner_name} ${formatExpenseCents(Math.abs(balance.net_cents))}` : "目前已经结清";
+    balanceHost.innerHTML = `<strong>${escapeHtml(label)}</strong><small>${balance ? `${balance.unsettled_count} 笔未结清 · 合计 ${formatExpenseCents(balance.total_unsettled_cents)} · 仅供线下核对` : "金额只在当前旅行花费页面显示"}</small>`;
+  }
+  const activeHost = document.getElementById("tripExpenseList");
+  if (activeHost) activeHost.innerHTML = active.length ? active.map(item => tripExpenseItemMarkup(item)).join("") : `<div class="empty-view"><p>${state.tripExpenses.loading ? "正在读取旅行花费…" : "还没有待结清花费，可以记录第一笔。"}</p></div>`;
+  const settledHost = document.getElementById("tripExpenseSettledList");
+  if (settledHost) settledHost.innerHTML = settled.length ? settled.map(item => tripExpenseItemMarkup(item)).join("") : '<div class="empty-view"><p>还没有已结清记录。</p></div>';
+  const deletedHost = document.getElementById("tripExpenseDeletedList");
+  if (deletedHost) deletedHost.innerHTML = value?.deleted_items?.length ? value.deleted_items.map(item => tripExpenseItemMarkup(item, { deleted: true })).join("") : '<div class="empty-view"><p>还没有可恢复的记录。</p></div>';
+  document.querySelectorAll('[data-trip-tool-panel="expenses"] button,[data-trip-tool-panel="expenses"] input,[data-trip-tool-panel="expenses"] select').forEach(control => { control.disabled = !online; control.title = online ? "" : "旅行花费只支持联网操作"; });
+  const settle = document.getElementById("tripExpenseSettleButton"); if (settle) settle.disabled = !online || state.tripExpenses.selected.size === 0;
+  const settlePreview = document.getElementById("tripExpenseSettlePreview");
+  if (settlePreview) {
+    const after = expenseNetAfterSelection(value?.items || [], members, state.data?.user?.id, state.tripExpenses.selected);
+    const direction = after > 0 ? `${balance?.partner_name || "伴侣"}届时应补给我 ${formatExpenseCents(after)}` : after < 0 ? `我届时应补给${balance?.partner_name || "伴侣"} ${formatExpenseCents(Math.abs(after))}` : "届时净额为 ¥0.00";
+    settlePreview.textContent = state.tripExpenses.selected.size ? `已选 ${state.tripExpenses.selected.size} 笔；结清后${direction}。` : "勾选后会预览剩余净额，不会发起付款。";
+  }
+}
+
+async function loadTripExpenses({ quiet = false } = {}) {
+  const tripId = state.data?.trip?.id; if (!tripId) return;
+  const sequence = ++state.tripExpenses.requestSequence;
+  state.tripExpenses.loading = true; renderTripExpenses();
+  try {
+    const result = await api(`/api/v1/trips/${encodeURIComponent(tripId)}/expenses`);
+    if (sequence !== state.tripExpenses.requestSequence || tripId !== state.data?.trip?.id) return;
+    state.tripExpenses = { ...state.tripExpenses, tripId, data: result, loading: false };
+  } catch (error) {
+    if (sequence !== state.tripExpenses.requestSequence || tripId !== state.data?.trip?.id) return;
+    state.tripExpenses.loading = false;
+    if (!quiet) toast(error.status ? error.message : "旅行花费需要联网查看，当前没有修改任何记录");
+    throw error;
+  } finally {
+    if (sequence === state.tripExpenses.requestSequence) renderTripExpenses();
+  }
+}
+
+function renderTripTools() {
+  setTripToolSection(state.tripToolSection);
+  const tools = state.tripTools;
+  const offline = Boolean(tools.offlineReadOnly);
+  const banner = document.getElementById("tripOfflineBanner");
+  if (banner) {
+    banner.hidden = !offline;
+    if (offline && tools.offlineSnapshot) banner.innerHTML = `<strong>离线副本 · 只读</strong><p>生成于 ${escapeHtml(timeLabel(tools.offlineSnapshot.generated_at))} · 到期 ${escapeHtml(timeLabel(tools.offlineSnapshot.expires_at))}。修改需联网。</p>`;
+  }
+  document.querySelectorAll('[data-trip-tool-panel="packing"] button,[data-trip-tool-panel="packing"] input,[data-trip-tool-panel="packing"] select,[data-trip-tool-panel="emergency"] button,[data-trip-tool-panel="emergency"] input,[data-trip-tool-panel="emergency"] textarea,[data-trip-tool-panel="emergency"] select').forEach(control => {
+    const typeLocked = control.id === "tripEmergencyType" && Boolean(tools.editingEmergency);
+    control.disabled = offline || typeLocked;
+    control.title = offline ? "需要联网" : typeLocked ? "应急卡类型创建后不可修改" : "";
+  });
+  const evidence = document.getElementById("tripPackingEvidence");
+  if (evidence) evidence.textContent = tools.evidence?.label || (offline ? "来自已确认旅行的离线副本" : "按旅行天数和活动生成；天气不可用时会明确说明。");
+  const members = state.data?.coupleContext?.members || [];
+  const options = [`<option value="shared">共同携带</option>`, ...members.map(member => `<option value="${escapeHtml(member.id)}">${escapeHtml(member.nickname)}</option>`), `<option value="none">不需要</option>`].join("");
+  const packingHost = document.getElementById("tripPackingList");
+  if (packingHost) packingHost.innerHTML = tools.packing.length ? tools.packing.map(item => `<article class="trip-tool-item"><label class="trip-tool-check"><input type="checkbox" data-packing-check="${escapeHtml(item.id)}" data-version="${item.version}" ${item.checked ? "checked" : ""} ${offline ? "disabled" : ""}><span>${escapeHtml(item.label)}</span></label><select data-packing-assignee="${escapeHtml(item.id)}" data-version="${item.version}" ${offline ? "disabled" : ""}>${options.replace(`value="${item.assigned_to}"`, `value="${item.assigned_to}" selected`)}</select><small>${escapeHtml(item.source_type === "human" ? "手动添加" : "规则建议")}</small><button class="danger-text" data-action="delete-packing" data-id="${escapeHtml(item.id)}" data-version="${item.version}" ${offline ? "disabled" : ""}>删除</button></article>`).join("") : `<div class="empty-view"><p>${offline ? "离线副本中没有行李项目" : "还没有行李项目，可以生成建议或手动添加。"}</p></div>`;
+  const emergencyHost = document.getElementById("tripEmergencyList");
+  if (emergencyHost) emergencyHost.innerHTML = tools.emergency.length ? tools.emergency.map(item => `<details class="trip-tool-item emergency-item"><summary><span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.visibility_label)} · ${escapeHtml(["real_api", "cache"].includes(item.source_type) ? "真实地图核验" : "真人填写")}</small></span></summary><dl>${emergencyDetailsMarkup(item)}</dl>${item.editable_by_me && !offline ? `<div class="inline-tool-form"><button data-action="edit-emergency" data-id="${escapeHtml(item.id)}">编辑</button><button class="danger-text" data-action="delete-emergency" data-id="${escapeHtml(item.id)}" data-version="${item.version}">删除</button></div>` : ""}</details>`).join("") : `<div class="empty-view"><p>${offline ? "离线副本中没有可查看的应急卡" : "还没有应急卡。新内容默认仅自己可见。"}</p></div>`;
+  const hospitalHost = document.getElementById("tripHospitalResults");
+  if (hospitalHost) hospitalHost.innerHTML = tools.hospitals.map(item => `<article class="trip-hospital-candidate"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.formatted_address || item.address || "")}</small></div><button data-action="save-hospital" data-candidate-id="${escapeHtml(item.candidate_id)}" ${offline ? "disabled" : ""}>保存</button></article>`).join("");
+}
+
+async function refreshTripOfflineSnapshot(tripId = state.data?.trip?.id) {
+  if (!tripId || !navigator.onLine) return null;
+  try {
+    const snapshot = await api(`/api/v1/trips/${encodeURIComponent(tripId)}/offline-snapshot`);
+    const valid = validateTripOfflineSnapshot(snapshot, tripId);
+    if (!valid) throw new Error("离线副本格式无效");
+    privateStorage().setItem(tripOfflineCacheKey(tripId), JSON.stringify(valid));
+    return valid;
+  } catch (error) {
+    if ([401, 403, 404].includes(Number(error.status))) evictTripOfflineSnapshot(tripId);
+    if (error.status) throw error;
+    return readTripOfflineSnapshot(tripId);
+  }
+}
+
+async function loadTripTools({ quiet = false } = {}) {
+  const trip = state.data?.trip; if (!trip) return;
+  const tripId = trip.id;
+  state.tripTools.loading = true;
+  try {
+    const [packing, emergency] = await Promise.all([
+      api(`/api/v1/trips/${encodeURIComponent(tripId)}/packing`),
+      api(`/api/v1/trips/${encodeURIComponent(tripId)}/emergency`),
+    ]);
+    if (tripId !== state.data?.trip?.id) return;
+    state.tripTools = { ...state.tripTools, tripId, tripVersion: Number(packing.trip_version || emergency.trip_version || trip.version), packing: packing.items || [], emergency: emergency.items || [], offlineReadOnly: false, loading: false };
+    const approval = trip.approval_state || {};
+    const requiredApprovals = Number(approval.required_count || 2);
+    const currentRevisionConfirmed = requiredApprovals > 0 && Number(approval.approved_count || 0) >= requiredApprovals;
+    if (currentRevisionConfirmed) {
+      try {
+        state.tripTools.offlineSnapshot = await refreshTripOfflineSnapshot(tripId);
+      } catch (error) {
+        if (![400, 409].includes(Number(error.status))) throw error;
+        evictTripOfflineSnapshot(tripId);
+        state.tripTools.offlineSnapshot = null;
+      }
+    } else {
+      // The server intentionally refuses snapshots until the current revision
+      // has both approvals.  Do not issue a request that is known to be
+      // invalid (and do not retain an older confirmed revision as current).
+      evictTripOfflineSnapshot(tripId);
+      state.tripTools.offlineSnapshot = null;
+    }
+  } catch (error) {
+    if ([401, 403, 404].includes(Number(error.status))) { evictTripOfflineSnapshot(tripId); throw error; }
+    if (error.status) throw error;
+    const cached = readTripOfflineSnapshot(tripId);
+    if (!cached) throw error;
+    state.tripTools = { ...state.tripTools, tripId, tripVersion: cached.trip.version, packing: cached.packing.items, emergency: cached.emergency.items, offlineSnapshot: cached, offlineReadOnly: true, loading: false };
+    if (!quiet) toast("网络不可用，正在显示 24 小时内的只读离线副本");
+  } finally {
+    state.tripTools.loading = false; renderTripTools();
+  }
+}
+
 function setLifeSection(section = "overview", { scroll = true } = {}) {
-  const allowed = ["overview", "meals", "wishlist", "calendar", "anniversary", "todo", "preference", "dates"];
+  const allowed = ["overview", "meals", "wishlist", "calendar", "anniversary", "todo", "preference", "dates", "decisions"];
   state.lifeSection = allowed.includes(section) ? section : "overview";
-  localStorage.setItem("love-life-section", state.lifeSection);
+  privateStorage().setItem("love-life-section", state.lifeSection);
   document.querySelectorAll("[data-life-section]").forEach(button => button.classList.toggle("active", button.dataset.lifeSection === state.lifeSection));
   document.querySelectorAll("[data-life-panel]").forEach(panel => {
     panel.hidden = !String(panel.dataset.lifePanel || "").split(/\s+/).includes(state.lifeSection);
@@ -1032,7 +2224,8 @@ function setLifeSection(section = "overview", { scroll = true } = {}) {
     anniversary: ["纪念日", "重要日期会按年展示，也能随时编辑"],
     todo: ["双人待办", "一起完成生活里的每一件小事"],
     preference: ["懂你备忘", "保存口味、尺码、过敏和礼物偏好"],
-    dates: ["智能约会", "五套方案、双方投票和共同确认"]
+    dates: ["智能约会", "五套方案、双方投票和共同确认"],
+    decisions: ["双人决策", "先各自选择，双方提交后一起揭晓"]
   };
   const [title, subtitle] = copy[state.lifeSection];
   const pageTitle = document.getElementById("lifePageTitle");
@@ -1061,6 +2254,7 @@ function setLifeSection(section = "overview", { scroll = true } = {}) {
     setMealSection(state.mealSection, { load: false });
     if (!state.meals.recipes.length) loadMeals({ quiet: true });
   }
+  if (state.lifeSection === "decisions") renderDecisions();
   if (scroll) document.querySelector('[data-screen="life"] .content')?.scrollIntoView({ block: "start" });
 }
 
@@ -1071,7 +2265,7 @@ function setLifeFilter(filter = "all") {
 
 async function setTimelineView(view = "list", { scroll = true } = {}) {
   state.timelineView = ["list", "album", "map", "report", "private", "trash"].includes(view) ? view : "list";
-  localStorage.setItem("love-timeline-view", state.timelineView);
+  privateStorage().setItem("love-timeline-view", state.timelineView);
   document.querySelectorAll('[data-screen="timeline"] [data-view]').forEach(button => button.classList.toggle("active", button.dataset.view === state.timelineView));
   const moreViews = new Set(["report", "private", "trash"]);
   const moreMenu = document.querySelector('[data-screen="timeline"] .timeline-more');
@@ -1137,10 +2331,10 @@ function renderMessages() {
     const media = message.type === "image" && mediaUrl ? `<img class="message-media" src="${imagePreviewUrl}" alt="${escapeHtml(message.content)}" loading="lazy">`
       : message.type === "voice" && mediaUrl ? `<audio controls preload="metadata" src="${mediaUrl}"></audio>`
       : message.type === "video" && mediaUrl ? `<video class="message-media" controls preload="metadata" poster="${imagePreviewUrl}" src="${mediaUrl}"></video>` : "";
-    const status = message.mine ? `<small class="message-status">${message.delivery_status === "read" ? "已读" : "已送达"}</small>` : "";
-    const meta = groupEnd ? `<span class="message-meta"><time>${timeLabel(message.sent_at)}</time>${status}</span>` : "";
-    const side = message.mine ? "mine" : "theirs";
-    return `${divider}<div class="message-row ${side}${groupClasses}"><div class="message ${side}" data-message-id="${escapeHtml(message.id)}" title="长按收藏为瞬间">${media}<p>${escapeHtml(message.content)}</p></div>${meta}</div>`;
+    const status = message.mine ? `<span class="message-status">${message.delivery_status === "read" ? "已读" : "已送达"}</span>` : "";
+    const expression = message.mine && message.type === "text"
+      ? `<button class="message-save" data-action="expression-help" data-message-id="${escapeHtml(message.id)}">帮我表达</button>` : "";
+    return `${divider}<div class="message ${message.mine ? "mine" : "theirs"}${groupClasses}" data-message-id="${escapeHtml(message.id)}" title="长按收藏为瞬间">${media}<p>${escapeHtml(message.content)}</p><time>${timeLabel(message.sent_at)}${status}</time>${expression}<button class="message-save" data-action="save-message" data-message-id="${escapeHtml(message.id)}">收藏为瞬间</button></div>`;
   }).join("");
   document.getElementById("messages").innerHTML = html || `<div class="empty-view"><p>还没有消息，发一句“想你了”开始聊天吧。</p></div>`;
 }
@@ -1223,8 +2417,21 @@ function renderIdentity() {
 function renderCoupleContext() {
   const context = state.data?.coupleContext;
   if (!context?.members?.length) return;
-  const me = context.members.find(member => member.is_me);
-  const partner = context.members.find(member => !member.is_me);
+  clearTimeout(state.statusExpiryTimer); state.statusExpiryTimer = null;
+  const now = Date.now();
+  const members = context.members.map(member => {
+    const expires = member.expires_at ? new Date(member.expires_at).getTime() : NaN;
+    return Number.isFinite(expires) && expires <= now
+      ? { ...member, status_code: null, status_text: null, emoji: null, expires_at: null, status_age_minutes: null }
+      : member;
+  });
+  const futureExpiries = members.map(member => member.expires_at ? new Date(member.expires_at).getTime() : NaN).filter(value => Number.isFinite(value) && value > now);
+  if (futureExpiries.length) state.statusExpiryTimer = setTimeout(() => {
+    if (!state.data?.user) return;
+    api("/api/v1/couple/context").then(value => { if (state.data) { state.data.coupleContext = value; renderCoupleContext(); } }).catch(() => renderCoupleContext());
+  }, Math.min(...futureExpiries) - now + 250);
+  const me = members.find(member => member.is_me);
+  const partner = members.find(member => !member.is_me);
   const statusText = partner?.status_text || "还没有分享状态";
   const statusAge = partner?.status_age_minutes == null ? "" : partner.status_age_minutes < 60
     ? `${Math.max(1, partner.status_age_minutes)} 分钟前更新`
@@ -1234,7 +2441,7 @@ function renderCoupleContext() {
     ? `${partner.city || "未设置城市"} · ${statusAge}${partner.status_stale ? " · 状态可能已过期" : ""}`
     : (partner?.city ? `${partner.city} · 当地 ${timeLabel(partner.local_time)}` : "点这里也分享你的状态");
   document.querySelector(".weather").textContent = partner?.weather ? `${partner.city} ${partner.weather.temperature}° · ${partner.weather.label}` : (partner?.city ? `${partner.city} · 天气待同步` : "设置城市后同步天气");
-  document.getElementById("coupleContextGrid").innerHTML = context.members.map(member => {
+  document.getElementById("coupleContextGrid").innerHTML = members.map(member => {
     const weather = member.weather ? `${member.weather.temperature}° ${member.weather.label}` : "天气待同步";
     const statusMeta = member.status_age_minutes == null ? "" : member.status_age_minutes < 60 ? `${Math.max(1, member.status_age_minutes)} 分钟前` : member.status_age_minutes < 1440 ? `${Math.floor(member.status_age_minutes / 60)} 小时前` : `${Math.floor(member.status_age_minutes / 1440)} 天前`;
     return `<article class="context-person" ${member.is_me ? 'data-action="edit-status" role="button" tabindex="0"' : ""}><strong>${escapeHtml(member.nickname)} · ${escapeHtml(member.city || "未设置城市")}</strong><span>当地 ${timeLabel(member.local_time)}</span><small>${escapeHtml(weather)}${member.status_text ? ` · ${escapeHtml(member.emoji || "")} ${escapeHtml(member.status_text)}（${escapeHtml(statusMeta)}${member.status_stale ? "，可能已过期" : ""}）` : ""}</small></article>`;
@@ -1280,14 +2487,85 @@ function renderDatePlans() {
   const current = plans[0];
   preview.innerHTML = `<span class="eyebrow ink">NEXT DATE</span><h3>${escapeHtml(current.title)}</h3><p>${escapeHtml(current.city)} · ${shortDate(current.plan_date)} · ${escapeHtml(current.status)}</p><div class="inline-actions"><button data-life-section="dates">查看方案与投票</button></div>`;
   host.innerHTML = plans.map(plan => {
-    const variants = (plan.variants || []).map(variant => `<div class="date-variant"><div><strong>${escapeHtml(variant.name)} · ${money(variant.expected_cost_cents)}</strong><small>${escapeHtml(variant.summary)} · ${escapeHtml(variant.intensity)}</small></div>${plan.status === "voting" ? `<button class="${plan.my_vote === variant.id ? "selected" : ""}" data-action="vote-date" data-date-id="${plan.id}" data-variant-id="${variant.id}">${plan.my_vote === variant.id ? "已投票" : "投这套"}</button>` : ""}</div>`).join("");
+    const sourceLabel = value => ({ human: "真人填写", real_api: "真实接口", rules: "规则推导", ai: "AI 建议", cache: "历史缓存", mock: "模拟数据", legacy_unknown: "来源未记录", unavailable: "暂无数据" })[value] || "来源未记录";
+    const evidenceLabel = value => {
+      if (!value) return "";
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? "" : ` · ${parsed.toLocaleString("zh-CN", { hour12: false })}`;
+    };
+    const variants = (plan.variants || []).map(variant => {
+      const items = (variant.items || []).map(item => `<li><div><b>${escapeHtml(item.startTime || "待安排")} · ${escapeHtml(item.title)}</b><small>${escapeHtml(item.note || "")} · ${Number(item.durationMinutes || 0)} 分钟 · 预算预估 ${money(item.costCents || 0)}</small><small>预计通勤：${escapeHtml(item.commuteMode || "待核对")} ${Number(item.commuteMinutes || 0)} 分钟（${escapeHtml(sourceLabel(item.commuteSource || "rules"))}）</small><small>${escapeHtml(item.weatherRisk || "天气数据不可用，出发前请确认")}</small></div><div class="date-provenance"><span>地点：${escapeHtml(sourceLabel(item.placeSource))}${item.provider ? ` · ${escapeHtml(item.provider)}` : ""}${escapeHtml(evidenceLabel(item.evidenceAt))}</span><span>推荐：${escapeHtml(sourceLabel(item.recommendationSource))}</span><span>价格：${escapeHtml(sourceLabel(item.priceSource))}</span><span>天气：${escapeHtml(sourceLabel(item.weatherSource))}${item.weatherProvider ? ` · ${escapeHtml(item.weatherProvider)}` : ""}${escapeHtml(evidenceLabel(item.weatherEvidenceAt))}</span></div></li>`).join("");
+      return `<div class="date-variant"><div class="grow"><strong>${escapeHtml(variant.name)} · ${money(variant.expected_cost_cents)}</strong><small>${escapeHtml(variant.summary)} · ${escapeHtml(variant.intensity)}</small>${items ? `<ul class="date-variant-items">${items}</ul>` : ""}</div>${plan.status === "voting" ? `<button class="${plan.my_vote === variant.id ? "selected" : ""}" data-action="vote-date" data-date-id="${plan.id}" data-variant-id="${variant.id}">${plan.my_vote === variant.id ? "已投票" : "投这套"}</button>` : ""}</div>`;
+    }).join("");
     let actions = "";
     if (plan.status === "voting" && plan.my_vote) actions = `<button data-action="compose-date" data-date-id="${plan.id}" data-variant-id="${plan.my_vote}">采用我选的方案</button>`;
     if (plan.status === "pending_confirmation") actions = `<button data-action="confirm-date" data-date-id="${plan.id}" data-version="${plan.version}" ${plan.confirmed_by_me ? "disabled" : ""}>${plan.confirmed_by_me ? "已确认，等待 TA" : "确认最终约会"}</button>`;
     if (plan.status === "confirmed") actions = `<button data-action="complete-date" data-date-id="${plan.id}">约会完成，保存回忆</button>`;
     if (plan.status === "completed") actions = `<button data-nav="timeline">已成为恋爱瞬间</button>`;
-    return `<article class="date-plan-card card"><header><button class="shared-open" data-action="open-shared-detail" data-resource-type="date_plan" data-id="${escapeHtml(plan.id)}"><span class="eyebrow ink">${escapeHtml(plan.status.toUpperCase())}</span><h3>${escapeHtml(plan.title)}</h3><p>${shortDate(plan.plan_date)} · ${escapeHtml(plan.start_time)}–${escapeHtml(plan.end_time)} · ${escapeHtml(plan.city)}</p><em class="shared-open-hint">查看详情与双方评论 →</em></button><b>${money(plan.budget_cents)}</b></header><div class="date-variants">${variants}</div>${actions ? `<div class="inline-actions">${actions}</div>` : ""}</article>`;
+    const timezoneNote = plan.preferences?.timezone_confirmed === false
+      ? `<p class="date-generation-note">目的地时区尚未确认，日历冲突按双方当前共同设置估算；出行前请核对当地时间。</p>`
+      : "";
+    return `<article class="date-plan-card card"><header><button class="shared-open" data-action="open-shared-detail" data-resource-type="date_plan" data-id="${escapeHtml(plan.id)}"><span class="eyebrow ink">${escapeHtml(plan.status.toUpperCase())}</span><h3>${escapeHtml(plan.title)}</h3><p>${shortDate(plan.plan_date)} · ${escapeHtml(plan.start_time)}–${escapeHtml(plan.end_time)} · ${escapeHtml(plan.location?.name || plan.city)}</p><em class="shared-open-hint">查看详情与双方评论 →</em></button><b>${money(plan.budget_cents)}</b></header>${plan.generation_message ? `<p class="date-generation-note">${escapeHtml(plan.generation_message)}</p>` : ""}${timezoneNote}<div class="date-variants">${variants}</div>${actions ? `<div class="inline-actions">${actions}</div>` : ""}</article>`;
   }).join("");
+}
+
+function decisionStatusLabel(status) {
+  return ({ open: "选择中", awaiting_extension: "等待延长", revealed: "已揭晓", pending_confirmation: "等待双方确认", confirmed: "已确认", cancelled: "已取消" })[status] || status;
+}
+
+function decisionChosenIds(decision) {
+  const selected = state.decisionSelections.get(decision.id);
+  return selected instanceof Set ? selected : new Set();
+}
+
+function decisionResolutionIds(decision) {
+  return Array.isArray(decision.resolution?.option_ids) ? decision.resolution.option_ids : [];
+}
+
+function renderDecisions() {
+  const host = document.getElementById("decisionList");
+  if (!host) return;
+  const decisions = state.data?.decisions || [];
+  if (!decisions.length) {
+    host.innerHTML = `<article class="empty-card"><strong>还没有双人决策</strong><p>创建 2–6 个选项，两个人各自提交后才会一起揭晓。</p><button data-action="new-decision">创建第一个决策</button></article>`;
+    return;
+  }
+  host.innerHTML = decisions.map(decision => {
+    const selected = decisionChosenIds(decision);
+    const revealed = ["revealed", "pending_confirmation", "confirmed", "converted"].includes(decision.status);
+    const labels = new Map((decision.options || []).map(option => [option.id, option.label]));
+    const resolutionIds = decisionResolutionIds(decision);
+    const choiceButtons = (decision.options || []).map(option => `<button type="button" class="decision-option ${selected.has(option.id) ? "selected" : ""}" data-decision-option="${escapeHtml(option.id)}" data-decision-id="${escapeHtml(decision.id)}" ${decision.status !== "open" ? "disabled" : ""}><span>${selected.has(option.id) ? "✓" : "○"}</span>${escapeHtml(option.label)}</button>`).join("");
+    const votes = revealed && Array.isArray(decision.votes) ? `<div class="decision-reveal"><strong>双方选择已揭晓</strong>${decision.votes.map((vote, index) => `<p>${index === 0 ? "一方" : "另一方"}：${(vote.options || []).map(option => escapeHtml(option.label)).join("、") || "未选择"}</p>`).join("")}</div>` : "";
+    let actions = "";
+    if (decision.status === "open") {
+      actions = `<button data-action="submit-decision-vote" data-id="${escapeHtml(decision.id)}" ${selected.size ? "" : "disabled"}>${decision.submitted_by_me ? "更新我的选择" : "秘密提交选择"}</button>`;
+    } else if (["revealed", "pending_confirmation"].includes(decision.status)) {
+      const candidates = resolutionIds.length ? resolutionIds : [...new Set((decision.votes || []).flatMap(vote => vote.option_ids || []))];
+      actions = candidates.map(id => `<button data-action="resolve-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(id)}" data-version="${decision.version}">共同确认“${escapeHtml(labels.get(id) || "这个选项")}”</button>`).join("");
+    } else if (decision.status === "confirmed") {
+      actions = resolutionIds.map(optionId => `<div class="decision-conversion-choice"><strong>使用“${escapeHtml(labels.get(optionId) || "这个选项")}”</strong><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="meal_wish">预填想吃清单</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="date_plan">预填约会</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="trip">预填旅行</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="hotel_search">预填酒店查询</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="restaurant_search">预填餐厅查询</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="calendar_todo">预填待办</button></div>`).join("");
+    }
+    return `<article class="decision-card card" data-decision-id="${escapeHtml(decision.id)}"><header><div><span class="eyebrow ink">${escapeHtml(decisionStatusLabel(decision.status))}</span><h3>${escapeHtml(decision.title)}</h3><p>${decision.selection_mode === "multiple" ? "可多选" : "单选"} · 截止 ${new Date(decision.closes_at).toLocaleString("zh-CN")}</p></div></header><div class="decision-options">${choiceButtons}</div>${!revealed ? `<p class="decision-privacy">${decision.submitted_by_me ? "你已秘密提交" : "你还未提交"} · ${decision.partner_submitted ? "TA 已提交" : "TA 尚未提交"}。揭晓前不会显示任何选择或票数。</p>` : votes}<div class="inline-actions decision-actions">${actions}</div></article>`;
+  }).join("");
+}
+
+function clearDatePlaceSelection() {
+  state.datePlaceCandidateId = null;
+  state.datePlaceCandidates = [];
+  const host = document.getElementById("datePlaceCandidates");
+  if (host) { host.innerHTML = ""; host.hidden = true; }
+  const selection = document.getElementById("datePlaceSelection");
+  if (selection) selection.textContent = "尚未选择具体地点";
+  const submit = document.querySelector("#dateForm button[type=submit]");
+  if (submit) submit.disabled = true;
+}
+
+function renderDatePlaceCandidates(items) {
+  const host = document.getElementById("datePlaceCandidates");
+  state.datePlaceCandidates = items;
+  host.hidden = false;
+  host.innerHTML = items.length ? items.map(item => `<button type="button" role="option" data-action="select-date-place" data-candidate-id="${escapeHtml(item.candidate_id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.country, item.province, item.city, item.district, item.formatted_address].filter(Boolean).join(" · "))}</small><em>${escapeHtml(({ amap: "高德真实地点", geoapify: "Geoapify 真实地点", google_maps: "Google Maps 真实地点", manual: "手动范围（未地图核验）" })[item.provider] || "地图候选")}</em></button>`).join("") : `<p>没有找到具体地点，请补充城市或地区后重试。</p>`;
 }
 
 function tripVariant(style) {
@@ -1374,7 +2652,7 @@ function isBroadFoodDestination(destination) {
 }
 
 function foodAreaForDay(day, trip) {
-  const stored = localStorage.getItem(`love-food-area-${trip?.id}-${day.day_number}`);
+  const stored = privateStorage().getItem(`love-food-area-${trip?.id}-${day.day_number}`);
   const existing = (day.items || []).flatMap(item => item.food_recommendations || []).find(shop => shop.search_area)?.search_area;
   return stored || existing || (isBroadFoodDestination(trip?.destination) ? "" : (trip?.destination || ""));
 }
@@ -1929,7 +3207,19 @@ function renderWishlist() {
   if (!list) return;
   const article = document.querySelector(".wishlist");
   const completed = list.items.filter(item => item.completed_at).length;
-  article.innerHTML = `<div class="card-top"><div><span class="eyebrow ink">THIS MONTH</span><h2>${escapeHtml(list.title)}</h2></div><div class="wishlist-head"><span>${completed} / ${list.items.length}</span><button data-action="open-wishlist-editor">＋ 添加</button></div></div>${list.items.length ? list.items.map(item => `<div class="wish-row"><button class="wish-toggle ${item.completed_at ? "checked" : ""}" data-action="toggle-wish" data-id="${escapeHtml(item.id)}" data-completed="${item.completed_at ? "1" : "0"}" aria-label="${item.completed_at ? "恢复" : "完成"}${escapeHtml(item.text)}"><i></i></button><button class="grow shared-open" data-action="open-shared-detail" data-resource-type="wishlist_item" data-id="${escapeHtml(item.id)}">${item.completed_at ? `<s>${escapeHtml(item.text)}</s>` : `<strong>${escapeHtml(item.text)}</strong>`}<small>${escapeHtml(item.note || "暂无备注")}</small><em class="shared-open-hint">查看详情与双方评论 →</em></button><div class="wish-actions"><button data-action="edit-wish" data-id="${escapeHtml(item.id)}">编辑</button><button data-action="delete-wish" data-id="${escapeHtml(item.id)}" data-version="${item.version}">删除</button></div></div>`).join("") : `<div class="empty-view"><span>✓</span><h3>写下第一个共同愿望</h3><p>保存后双方都能查看、编辑和完成。</p></div>`}`;
+  const kindLabels = { general: "共同愿望", gift: "礼物心愿", meal: "想吃", travel: "想去" };
+  article.innerHTML = `<div class="card-top"><div><span class="eyebrow ink">THIS MONTH</span><h2>${escapeHtml(list.title)}</h2></div><div class="wishlist-head"><span>${completed} / ${list.items.length}</span><button data-action="open-wishlist-editor">＋ 添加</button></div></div>${list.items.length ? list.items.map(item => {
+    const mayToggle = item.item_kind !== "gift" || item.is_creator;
+    const toggle = mayToggle ? `<button class="wish-toggle ${item.completed_at ? "checked" : ""}" data-action="toggle-wish" data-id="${escapeHtml(item.id)}" data-completed="${item.completed_at ? "1" : "0"}" aria-label="${item.completed_at ? "恢复" : "完成"}${escapeHtml(item.text)}"><i></i></button>` : `<span class="wish-toggle" aria-hidden="true"><i></i></span>`;
+    let privateActions = "";
+    if (!item.is_creator && item.item_kind === "gift" && !item.completed_at) {
+      privateActions = item.my_claim
+        ? `${item.my_claim.private_note ? `<small>我的私密备注：${escapeHtml(item.my_claim.private_note)}</small>` : ""}<button data-action="complete-wish-claim" data-id="${escapeHtml(item.id)}" data-version="${item.my_claim.version}">我已准备好</button><button data-action="release-wish-claim" data-id="${escapeHtml(item.id)}" data-version="${item.my_claim.version}">取消认领</button>`
+        : item.can_claim ? `<button data-action="claim-wish" data-id="${escapeHtml(item.id)}" data-version="${item.version}">私密认领</button>` : "";
+    }
+    const sharedControls = item.item_kind === "gift" && !item.is_creator ? "" : `<button data-action="edit-wish" data-id="${escapeHtml(item.id)}">编辑</button><button data-action="delete-wish" data-id="${escapeHtml(item.id)}" data-version="${item.version}">删除</button>`;
+    return `<div class="wish-row">${toggle}<button class="grow shared-open" data-action="open-shared-detail" data-resource-type="wishlist_item" data-id="${escapeHtml(item.id)}">${item.completed_at ? `<s>${escapeHtml(item.text)}</s>` : `<strong>${escapeHtml(item.text)}</strong>`}<small>${escapeHtml(kindLabels[item.item_kind] || "共同愿望")} · ${escapeHtml(item.note || "暂无备注")}</small><em class="shared-open-hint">查看详情与双方评论 →</em></button><div class="wish-actions">${privateActions}${sharedControls}</div></div>`;
+  }).join("") : `<div class="empty-view"><span>✓</span><h3>写下第一个共同愿望</h3><p>保存后双方都能查看、编辑和完成。</p></div>`}`;
 }
 
 function renderDailyQuestion() {
@@ -2000,6 +3290,189 @@ function renderTimeline() {
   document.getElementById("timelineStats").textContent = `${moments.length} 个瞬间 · ${cities.size} 座城市`;
 }
 
+const memoryCompletionLabels = {
+  missing_text: ["补一句回忆", "照片、视频或语音还没有文字说明"],
+  missing_location: ["补充地点", "这条回忆还没有记录发生地点"],
+  missing_partner_description: ["写下我的视角", "对方已经写过，你也可以补充自己的感受"],
+  provisional_date: ["确认发生时间", "当前是系统暂用时间，确认后才会改动"],
+};
+
+function memorySearchTypeLabel(item) {
+  return item.resource_type === "trip" ? "旅行" : momentTypeLabel(item.event_type);
+}
+
+function renderMemorySearch() {
+  const host = document.getElementById("memorySearchResults");
+  const chips = document.getElementById("memoryParsedFilters");
+  if (!host || !chips) return;
+  if (state.memorySearchLoading && !state.memorySearchResult) {
+    host.innerHTML = `<p class="muted">正在查找你当前有权查看的回忆…</p>`;
+    chips.innerHTML = "";
+    return;
+  }
+  const result = state.memorySearchResult;
+  if (!result) { host.innerHTML = ""; chips.innerHTML = ""; return; }
+  const filters = result.parsed_filters || {};
+  const filterLabels = [
+    filters.keyword && ["keyword", `关键词：${filters.keyword}`],
+    filters.location && ["location", `地点：${filters.location}`],
+    filters.start_date && ["date", `${filters.start_date}${filters.end_date ? ` 至 ${filters.end_date}` : " 起"}`],
+    filters.content_type && filters.content_type !== "all" && ["content_type", `类型：${filters.content_type}`],
+    filters.person_id && ["person_id", `人物：${filters.person_id === state.data?.user?.id ? "我" : state.data?.partner?.nickname || "对方"}`],
+  ].filter(Boolean);
+  chips.innerHTML = filterLabels.map(([key, label]) => `<button type="button" data-action="clear-memory-filter" data-filter="${escapeHtml(key)}">${escapeHtml(label)} ×</button>`).join("");
+  const items = result.items || [];
+  host.innerHTML = items.length ? `${items.map(item => {
+    const ownPrivate = item.resource_type === "moment" && item.visibility !== "shared";
+    const descriptions = (item.descriptions || []).map(description => `<p class="memory-result-description"><b>${escapeHtml(description.nickname || "我")}</b>：${escapeHtml(description.body)}</p>`).join("");
+    const manageLabel = item.resource_type === "moment" ? "补充或合并双方描述" : "补充我的描述";
+    return `<article class="memory-result-card"><button class="memory-result-open" data-action="open-memory-result" data-resource-type="${escapeHtml(item.resource_type)}" data-id="${escapeHtml(item.resource_id)}" data-private="${ownPrivate ? "1" : "0"}"><small>${escapeHtml(new Date(item.event_at).toLocaleDateString("zh-CN"))} · ${escapeHtml(memorySearchTypeLabel(item))}${item.location ? ` · ${escapeHtml(item.location)}` : ""}</small><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.summary || "暂无正文")}</p><em>${escapeHtml(item.provenance?.source_label || "来源未记录")} · ${escapeHtml(item.provenance?.date_source_label || "时间来源未记录")}</em></button>${descriptions}${ownPrivate ? `<button class="quiet" data-action="describe-memory" data-resource-type="moment" data-id="${escapeHtml(item.resource_id)}">补充仅自己的描述</button>` : `<button class="quiet" data-action="manage-memory-descriptions" data-resource-type="${escapeHtml(item.resource_type)}" data-id="${escapeHtml(item.resource_id)}">${manageLabel}</button>`}</article>`;
+  }).join("")}${result.next_cursor ? `<button class="quiet memory-load-more" data-action="load-more-memories" data-cursor="${escapeHtml(result.next_cursor)}">加载更多</button>` : ""}` : `<div class="empty-view"><span>⌕</span><h3>没有找到</h3><p>${escapeHtml(result.empty_reason || "试试缩短关键词或调整日期范围。")}</p></div>`;
+}
+
+async function searchMemories({ append = false, cursor = "" } = {}) {
+  if (state.memorySearchLoading) return;
+  const payload = {
+    q: document.getElementById("memorySearchQuery")?.value.trim() || "",
+    start_date: document.getElementById("memorySearchStart")?.value || "",
+    end_date: document.getElementById("memorySearchEnd")?.value || "",
+    type: document.getElementById("memorySearchType")?.value || "all",
+    limit: 20,
+  };
+  if (cursor) payload.cursor = cursor;
+  state.memorySearchLoading = true;
+  if (!append) state.memorySearchResult = null;
+  renderMemorySearch();
+  try {
+    const result = await api("/api/v1/memories/search", { method: "POST", body: JSON.stringify(payload) });
+    if (append && state.memorySearchResult) result.items = [...state.memorySearchResult.items, ...(result.items || [])];
+    state.memorySearchResult = result;
+  } finally {
+    state.memorySearchLoading = false;
+    renderMemorySearch();
+  }
+}
+
+function clearMemorySearch() {
+  document.getElementById("memorySearchForm")?.reset();
+  state.memorySearchResult = null;
+  renderMemorySearch();
+}
+
+async function clearMemoryFilter(filter) {
+  const parsed = state.memorySearchResult?.parsed_filters || {};
+  document.getElementById("memorySearchQuery").value = [
+    filter !== "person_id" && parsed.person_id ? (parsed.person_id === state.data?.user?.id ? "我" : state.data?.partner?.nickname || "对方") : "",
+    filter !== "location" && parsed.location ? `在${parsed.location}记录的` : "",
+    filter !== "keyword" ? parsed.keyword || "" : "",
+  ].filter(Boolean).join(" ");
+  document.getElementById("memorySearchStart").value = filter === "date" ? "" : parsed.start_date || "";
+  document.getElementById("memorySearchEnd").value = filter === "date" ? "" : parsed.end_date || "";
+  document.getElementById("memorySearchType").value = filter === "content_type" ? "all" : parsed.content_type || "all";
+  await searchMemories();
+}
+
+function renderMemoryCompletion() {
+  const host = document.getElementById("memoryCompletionList");
+  if (!host) return;
+  if (!state.memoryCompletionLoaded) { host.innerHTML = `<p class="muted">正在检查可补全的回忆…</p>`; return; }
+  host.innerHTML = state.memoryCompletion.length ? state.memoryCompletion.map(item => {
+    const [title, summary] = memoryCompletionLabels[item.suggestion_kind] || ["补全回忆", "为这条记录补充更多信息"];
+    return `<article class="memory-completion-item"><div><small>${escapeHtml(item.resource_type === "trip" ? "旅行" : "瞬间")} · ${escapeHtml(item.provenance?.source_label || "来源未记录")} · ${escapeHtml(item.provenance?.date_source_label || "时间来源未记录")}</small><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(summary)}</p></div><div class="memory-completion-actions"><button data-action="complete-memory-suggestion" data-id="${escapeHtml(item.id)}">${escapeHtml(title)}</button><button class="quiet" data-action="snooze-memory-suggestion" data-id="${escapeHtml(item.id)}">7 天后</button><button class="quiet" data-action="dismiss-memory-suggestion" data-id="${escapeHtml(item.id)}">忽略</button></div></article>`;
+  }).join("") : `<p class="muted">当前没有需要补全的回忆。</p>`;
+}
+
+async function loadMemoryCompletion({ refresh = false } = {}) {
+  if (!state.data?.user) return;
+  if (refresh) await api("/api/v1/memories/completion/refresh", { method: "POST", body: "{}" });
+  const result = await api("/api/v1/memories/completion");
+  state.memoryCompletion = result.items || [];
+  state.memoryCompletionLoaded = true;
+  renderMemoryCompletion();
+}
+
+async function describeMemory(resourceType, resourceId, { defaultVisibility = "private" } = {}) {
+  const current = await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions`);
+  const mine = (current.items || []).find(item => item.author_id === state.data?.user?.id);
+  const body = window.prompt("写下你的视角", mine?.body || "");
+  if (body === null || !body.trim()) return;
+  const share = defaultVisibility === "shared" || window.confirm("是否让对方也看到这段补充？\n确定：双方可见；取消：仅自己可见");
+  await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions/me`, {
+    method: "PUT",
+    body: JSON.stringify({ body: body.trim(), visibility: share ? "shared" : "private", expected_version: Number(mine?.version || 0) }),
+  });
+  await searchMemories();
+  toast("补充描述已保存");
+}
+
+async function manageMemoryDescriptions(resourceType, resourceId) {
+  let current = await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions`);
+  const proposal = current.merge_proposal;
+  if (proposal?.can_confirm) {
+    if (!window.confirm(`对方提议把双方描述合并为共同正文：\n\n${proposal.body}\n\n确认采用吗？`)) return;
+    await api(`/api/v1/memories/moments/${encodeURIComponent(resourceId)}/merge-confirm`, {
+      method: "POST", body: JSON.stringify({ proposal_id: proposal.proposal_id, expected_version: Number(proposal.version) }),
+    });
+    await Promise.all([searchMemories(), loadBootstrap({ quiet: true })]);
+    toast("双方描述已合并为共同正文");
+    return;
+  }
+  if (proposal) {
+    toast("合并提议已发送，等待对方确认");
+    return;
+  }
+  let mine = (current.items || []).find(item => item.author_id === state.data?.user?.id);
+  if (!mine || mine.visibility !== "shared") {
+    const body = window.prompt("写下你愿意与对方分享的视角", mine?.body || "");
+    if (body === null || !body.trim()) return;
+    await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions/me`, {
+      method: "PUT",
+      body: JSON.stringify({ body: body.trim(), visibility: "shared", expected_version: Number(mine?.version || 0) }),
+    });
+    current = await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions`);
+  }
+  const shared = (current.items || []).filter(item => item.visibility === "shared");
+  if (resourceType !== "moment" || shared.length < 2) {
+    await searchMemories();
+    toast("描述已保存；等对方补充后可以共同合并");
+    return;
+  }
+  const suggested = shared.map(item => `${item.nickname}：${item.body}`).join("\n");
+  const body = window.prompt("整理成双方共同认可的正文（发送后需由对方确认）", suggested);
+  if (body === null || !body.trim()) return;
+  const expectedVersions = Object.fromEntries(shared.map(item => [item.author_id, Number(item.version)]));
+  await api(`/api/v1/memories/moments/${encodeURIComponent(resourceId)}/merge-proposal`, {
+    method: "POST",
+    body: JSON.stringify({ body: body.trim(), expected_parent_version: Number(current.parent_version), expected_versions: expectedVersions }),
+  });
+  await searchMemories();
+  toast("合并提议已发送，等待对方确认");
+}
+
+async function completeMemorySuggestion(item) {
+  const parent = await api(`/api/v1/memories/${encodeURIComponent(item.resource_type)}/${encodeURIComponent(item.resource_id)}/descriptions`);
+  const payload = { action: "complete", expected_version: Number(item.version), idempotency_key: clientKey("memory-complete") };
+  if (["missing_text", "missing_partner_description"].includes(item.suggestion_kind)) {
+    const body = window.prompt("写下你的视角", "");
+    if (body === null || !body.trim()) return;
+    Object.assign(payload, { body: body.trim(), visibility: "shared" });
+  } else if (item.suggestion_kind === "missing_location") {
+    const location = window.prompt("这段回忆发生在哪里？", "");
+    if (location === null || !location.trim()) return;
+    Object.assign(payload, { location: location.trim(), expected_parent_version: Number(parent.parent_version) });
+  } else if (item.suggestion_kind === "provisional_date") {
+    const value = window.prompt("确认发生时间（例如 2024-02-14 18:30）", "");
+    if (value === null || !value.trim()) return;
+    const parsed = new Date(value.trim().replace(" ", "T"));
+    if (Number.isNaN(parsed.getTime())) throw new Error("时间格式不正确，请按 2024-02-14 18:30 填写");
+    if (!window.confirm(`确认把回忆时间改为 ${parsed.toLocaleString("zh-CN")}？`)) return;
+    Object.assign(payload, { occurred_at: parsed.toISOString(), expected_parent_version: Number(parent.parent_version) });
+  }
+  await api(`/api/v1/memories/completion/${encodeURIComponent(item.id)}/respond`, { method: "POST", body: JSON.stringify(payload) });
+  await Promise.all([loadMemoryCompletion(), loadBootstrap({ quiet: true })]);
+  toast("回忆已经补全");
+}
+
 function renderMomentSelection(title, moments, emptyText = "这里还没有可显示的共同回忆。") {
   const items = moments || [];
   document.getElementById("timelineBody").innerHTML = `<div class="year-mark"><span>${escapeHtml(title)}</span><i></i></div>` + (items.length
@@ -2060,7 +3533,7 @@ function mealCalendarBounds() {
 
 function setMealSection(section = "recipes", { load = true } = {}) {
   state.mealSection = ["recipes", "wishes", "calendar", "shopping"].includes(section) ? section : "recipes";
-  localStorage.setItem("love-meal-section", state.mealSection);
+  privateStorage().setItem("love-meal-section", state.mealSection);
   document.querySelectorAll("[data-meal-section]").forEach(button => button.classList.toggle("active", button.dataset.mealSection === state.mealSection));
   document.querySelectorAll("[data-meal-panel]").forEach(panel => { panel.hidden = panel.dataset.mealPanel !== state.mealSection; });
   if (load && state.data) loadMeals({ quiet: true });
@@ -2068,6 +3541,9 @@ function setMealSection(section = "recipes", { load = true } = {}) {
 
 async function loadMeals({ quiet = false } = {}) {
   if (!state.data) return;
+  const requestSequence = ++state.mealLoadSequence;
+  const requestUserId = state.data?.user?.id;
+  const requestPartition = localStorage.getItem("love-active-scope");
   const bounds = mealCalendarBounds();
   const query = new URLSearchParams({ limit: "50" });
   const search = document.getElementById("recipeSearchInput")?.value.trim();
@@ -2081,18 +3557,23 @@ async function loadMeals({ quiet = false } = {}) {
   if (difficulty) query.set("difficulty", difficulty);
   if (maxMinutes) query.set("max_minutes", maxMinutes);
   try {
-    const [recipes, wishes, cart, calendar, shopping] = await Promise.all([
+    const [recipes, wishes, cart, calendar, shopping, profiles, pantry, categoryOrder, weeklyPlan] = await Promise.all([
       api(`/api/v1/recipes?${query}`), api("/api/v1/meal-wishes"), api("/api/v1/meal-cart"),
-      api(`/api/v1/meal-calendar?from=${bounds.start}&to=${bounds.end}`), api("/api/v1/shopping-lists/active")
+      api(`/api/v1/meal-calendar?from=${bounds.start}&to=${bounds.end}`), api("/api/v1/shopping-lists/active"),
+      api("/api/v1/food-profiles"), api("/api/v1/pantry/items"), api("/api/v1/shopping-category-order"),
+      api("/api/v1/weekly-meal-plans/active")
     ]);
-    state.meals = { ...state.meals, recipes: recipes.items, recipeNextCursor: recipes.next_cursor, recipeTotal: recipes.total, wishes: wishes.items, cart, calendar, shopping };
+    if (requestSequence !== state.mealLoadSequence || state.data?.user?.id !== requestUserId || localStorage.getItem("love-active-scope") !== requestPartition) return;
+    state.meals = { ...state.meals, recipes: recipes.items, recipeNextCursor: recipes.next_cursor, recipeTotal: recipes.total, wishes: wishes.items, cart, calendar, shopping, profiles, pantry, categoryOrder, weeklyPlan };
     const cacheKey = mealUserCacheKey();
-    localStorage.setItem(`love-offline-meals:${state.data.user.id}`, JSON.stringify({ ...state.meals, recipeDrafts: [] }));
+    privateStorage().setItem(`love-offline-meals:${state.data.user.id}`, JSON.stringify({ ...state.meals, recipeDrafts: [] }));
     mealCachePut("cache", cacheKey, { ...state.meals, recipeDrafts: [] }).catch(() => {});
-    localStorage.removeItem("love-offline-meals");
+    privateStorage().removeItem("love-offline-meals");
     flushMealMutations().catch(() => {});
     renderMeals();
   } catch (error) {
+    if (requestSequence !== state.mealLoadSequence) return;
+    if (error.status || !state.data?.user) { if (!quiet) toast(error.message); return; }
     const cached = await mealCacheGet("cache", mealUserCacheKey()) || readLocalJson(`love-offline-meals:${state.data.user.id}`);
     if (cached) { state.meals = { ...state.meals, ...cached }; renderMeals(); }
     if (!quiet) toast(error.message);
@@ -2100,7 +3581,7 @@ async function loadMeals({ quiet = false } = {}) {
 }
 
 function renderMeals() {
-  renderRecipeList(); renderMealWishes(); renderMealCalendar(); renderShoppingList();
+  renderRecipeList(); renderMealWishes(); renderWeeklyMealPlan(); renderMealCalendar(); renderShoppingList(); renderFoodProfiles(); renderPantry(); renderShoppingCategoryOrder();
   const summary = state.data?.mealSummary || {};
   const label = document.getElementById("lifeMealSummary");
   if (label) label.textContent = summary.next_meal ? `${shortDate(summary.next_meal.date)} · ${summary.next_meal.name}` : `${state.meals.wishes.length} 个想吃 · ${state.meals.shopping?.items?.filter(item => !item.checked).length || 0} 项待采购`;
@@ -2210,12 +3691,65 @@ async function openWishRecipePicker(wishId) {
 function mealStatusButtons(item) {
   const actions = [];
   if (!["completed", "cancelled"].includes(item.status)) actions.push(`<button data-action="edit-meal" data-id="${item.id}">修改安排</button>`);
+  if (["selected", "accepted", "shopping"].includes(item.status) && item.recipe_snapshot?.ingredients?.length) actions.push(`<button data-action="open-ingredient-substitutions" data-id="${item.id}">食材替代</button>`);
   if (item.status === "selected") actions.push(`<button data-action="meal-status" data-id="${item.id}" data-version="${item.version}" data-status="accepted">确认这道菜</button>`);
-  if (item.status === "shopping") actions.push(`<button data-action="meal-status" data-id="${item.id}" data-version="${item.version}" data-status="cooking">开始做饭</button>`);
-  if (item.status === "cooking") actions.push(`<button data-action="meal-status" data-id="${item.id}" data-version="${item.version}" data-status="completed">完成并归档</button>`);
+  if (["accepted", "shopping", "cooking"].includes(item.status)) actions.push(`<button data-action="open-cooking" data-meal-id="${item.id}" data-version="${item.version}">${item.status === "cooking" ? "继续烹饪" : "开始做饭"}</button>`);
   if (!["completed", "cancelled"].includes(item.status)) actions.push(`<button data-action="cancel-meal" data-id="${item.id}" data-version="${item.version}">取消</button>`);
   if (["completed", "cancelled"].includes(item.status)) actions.push(`<button data-action="repeat-meal" data-id="${item.id}">再安排一次</button>`);
   return actions.join("");
+}
+
+function mealItemById(mealId) {
+  const cartItem = state.meals.cart?.items?.find(item => item.id === mealId);
+  if (cartItem) return cartItem;
+  for (const day of state.meals.calendar?.days || []) {
+    const item = Object.values(day.meals || {}).flat().find(value => value.id === mealId);
+    if (item) return item;
+  }
+  return null;
+}
+
+function substitutionSourceRef(ingredient, index) {
+  return String(ingredient?.id || `position:${Number(ingredient?.position ?? index)}`);
+}
+
+function renderIngredientSubstitutionPicker(meal) {
+  const host = document.getElementById("ingredientSubstitutionContent");
+  if (!host) return;
+  const ingredients = meal?.recipe_snapshot?.ingredients || [];
+  host.innerHTML = `<p class="form-note">${escapeHtml(meal.name)} · 选择要核对的具体食材。只生成建议，不会自动修改。</p><div class="ingredient-substitution-source">${ingredients.map((item, index) => `<button data-action="preview-ingredient-substitutions" data-ref="${escapeHtml(substitutionSourceRef(item, index))}"><strong>${escapeHtml(item.name || item.canonical_name || "未命名食材")}</strong><small>${escapeHtml(item.display_quantity || item.quantity_text || "用量待核对")}${item.preparation ? ` · ${escapeHtml(item.preparation)}` : ""}</small></button>`).join("")}</div>`;
+}
+
+function renderIngredientSubstitutionPreview(preview) {
+  const host = document.getElementById("ingredientSubstitutionContent");
+  if (!host) return;
+  const source = preview?.source_ingredient?.name || "这项食材";
+  const items = preview?.items || [];
+  const cards = items.map(item => {
+    const statusLabel = item.safety_status === "allowed" ? "当前资料未发现冲突" : item.safety_status === "blocked" ? "命中严重过敏，禁止应用" : "需要人工核对，不能自动应用";
+    const allergens = item.added_allergens?.length ? item.added_allergens.map(value => `${escapeHtml(value.name)}（${escapeHtml(value.basis || "当前配料表")}）`).join("、") : "当前配料表未新增已识别的常见过敏原";
+    const shopping = item.shopping_preview;
+    const changes = shopping?.changes || {};
+    const shoppingSummary = shopping ? `新增 ${Number(shopping.diff?.add || 0)}、更新 ${Number(shopping.diff?.update || 0)}、移除 ${Number(shopping.diff?.remove || 0)}` : "需要重新预览";
+    const changedNames = [...(changes.add || []), ...(changes.update || []), ...(changes.remove || [])];
+    return `<article class="ingredient-substitution-card ${item.safety_status === "blocked" ? "blocked" : ""}"><span class="substitution-status">${statusLabel}</span><h3>${escapeHtml(item.from_ingredient.name)} → ${escapeHtml(item.to_ingredient.name)}</h3><p>${escapeHtml(item.ratio_note)} · 适用：${escapeHtml((item.suitable_methods || []).join("、"))}</p><p><b>味道：</b>${escapeHtml(item.flavor_change)}<br><b>质地：</b>${escapeHtml(item.texture_change)}</p><p><b>新增过敏提示：</b>${allergens}</p><p><b>采购变化：</b>${escapeHtml(shoppingSummary)}${changedNames.length ? ` · ${escapeHtml(changedNames.join("、"))}` : ""}</p><p>${escapeHtml(item.safety_message)} · 来源：${escapeHtml(item.source_label || "本地校准规则")}</p><div class="ingredient-substitution-actions">${item.can_apply && shopping ? `<button class="apply-substitution" data-action="apply-ingredient-substitution" data-id="${escapeHtml(item.id)}" data-version="${Number(item.version)}">确认替换并更新采购</button>` : ""}<button data-action="dismiss-ingredient-substitution" data-id="${escapeHtml(item.id)}" data-version="${Number(item.version)}">不采用</button></div></article>`;
+  }).join("");
+  host.innerHTML = `<button class="secondary-button" data-action="open-ingredient-substitutions" data-id="${escapeHtml(preview.meal_item_id)}">← 换一项食材</button><p class="form-note">${escapeHtml(source)}：以下结果来自本地校准规则，并已按当前配料表与双方已保存的饮食资料核对。只有标记为可应用的建议才会显示确认按钮。</p>${cards || `<div class="empty-view"><h3>暂无经过核对的替代规则</h3><p>${escapeHtml(preview.message || "可以手动编辑菜谱，但不要把未知替代当作安全结论。")}</p></div>`}`;
+}
+
+function renderWeeklyMealPlan() {
+  const host = document.getElementById("weeklyMealPlanContent");
+  if (!host) return;
+  const plan = state.meals.weeklyPlan || { status: "empty", items: [] };
+  if (!plan.id) {
+    host.innerHTML = `<p class="form-note">还没有待确认的一周菜单。生成只使用本地规则，不调用付费模型。</p>`;
+    return;
+  }
+  const statusLabels = { draft: "待双方确认", pending_confirmation: "已有一人确认", applied: "已生效", cancelled: "已取消" };
+  const slotLabels = { breakfast: "早餐", lunch: "午餐", dinner: "晚餐", snack: "加餐" };
+  const rows = (plan.items || []).map(item => `<article class="meal-row"><div class="grow"><strong>${shortDate(item.date)} · ${slotLabels[item.meal_slot] || item.meal_slot} · ${escapeHtml(item.recipe?.name || "待选择菜品")}</strong><small>${escapeHtml(item.planned_time || "")} · ${item.servings} 人份${item.likely_on_hand?.length ? ` · 家中可能已有：${escapeHtml(item.likely_on_hand.join("、"))}` : ""}</small><em>${escapeHtml((item.reason_labels || []).join(" · ") || "请手动选择安全菜谱")}</em></div></article>`).join("");
+  const canConfirm = ["draft", "pending_confirmation"].includes(plan.status) && !(plan.items || []).some(item => item.status !== "planned");
+  host.innerHTML = `<div class="meal-section-head"><div><strong>${shortDate(plan.starts_on)}—${shortDate(plan.ends_on)} · ${statusLabels[plan.status] || plan.status}</strong><p>${plan.confirmations?.member_a_confirmed ? "一方已确认" : ""}${plan.confirmations?.member_a_confirmed && plan.confirmations?.member_b_confirmed ? " · " : ""}${plan.confirmations?.member_b_confirmed ? "另一方已确认" : ""}</p></div><div class="meal-status-actions">${canConfirm ? `<button data-action="confirm-weekly-meal-plan" data-id="${escapeHtml(plan.id)}" data-version="${plan.version}">确认当前菜单</button>` : ""}${["draft", "pending_confirmation"].includes(plan.status) ? `<button data-action="cancel-weekly-meal-plan" data-id="${escapeHtml(plan.id)}" data-version="${plan.version}">取消</button>` : ""}</div></div>${rows}${(plan.warnings || []).map(value => `<p class="form-note">${escapeHtml(value)}</p>`).join("")}`;
 }
 
 function renderMealCalendar() {
@@ -2256,11 +3790,55 @@ function renderShoppingList() {
   if (!shopping.items?.length) { host.innerHTML = `<div class="empty-view"><span>⌑</span><h3>采购清单还是空的</h3><p>先确认菜单，再点击“生成清单”查看差异后保存。</p></div>`; return; }
   let category = ""; const rows = [];
   for (const item of shopping.items) {
-    if (item.category !== category) { category = item.category; rows.push(`<h4 class="shopping-category">${escapeHtml(category)}</h4>`); }
+    if (item.category_key !== category) { category = item.category_key; rows.push(`<h4 class="shopping-category">${escapeHtml(item.category_label || "其他")}</h4>`); }
     const sources = (item.sources || []).map(source => source.recipe_name).filter(Boolean).join("、");
-    rows.push(`<article class="shopping-row ${item.checked ? "checked" : ""}"><input type="checkbox" data-shopping-check="${item.id}" data-version="${item.version}" ${item.checked ? "checked" : ""} aria-label="${escapeHtml(item.display_name)}已购买"><div><strong>${escapeHtml(item.display_name)} · ${escapeHtml(item.display_quantity)}</strong><small>${item.manual_locked ? "手动锁定" : sources ? `来自：${escapeHtml(sources)}` : "手动添加"}</small></div><div class="shopping-row-actions"><button data-action="edit-shopping-item" data-id="${item.id}" aria-label="编辑${escapeHtml(item.display_name)}">编辑</button><button data-action="delete-shopping-item" data-id="${item.id}" data-version="${item.version}" aria-label="删除${escapeHtml(item.display_name)}">×</button></div></article>`);
+    const canStock = item.checked && item.category_key !== "household";
+    rows.push(`<article class="shopping-row ${item.checked ? "checked" : ""}"><input type="checkbox" data-shopping-check="${item.id}" data-version="${item.version}" ${item.checked ? "checked" : ""} aria-label="${escapeHtml(item.display_name)}已购买"><div><strong>${escapeHtml(item.display_name)} · ${escapeHtml(item.display_quantity)}</strong><small>${item.manual_locked ? "手动锁定" : sources ? `来自：${escapeHtml(sources)}` : "手动添加"}</small></div><div class="shopping-row-actions">${canStock ? `<button data-action="stock-shopping-item" data-id="${item.id}" data-version="${item.version}" data-category="${escapeHtml(item.category_key)}">放入库存</button>` : ""}<button data-action="edit-shopping-item" data-id="${item.id}" aria-label="编辑${escapeHtml(item.display_name)}">编辑</button><button data-action="delete-shopping-item" data-id="${item.id}" data-version="${item.version}" aria-label="删除${escapeHtml(item.display_name)}">×</button></div></article>`);
   }
   host.innerHTML = `<p class="form-note">${shortDate(shopping.range_start)} 至 ${shortDate(shopping.range_end)} · 已买 ${shopping.items.filter(item => item.checked).length}/${shopping.items.length}</p>${rows.join("")}`;
+}
+
+function renderFoodProfiles() {
+  const host = document.getElementById("foodProfilePanel");
+  if (!host) return;
+  const profiles = state.meals.profiles?.profiles || [];
+  host.innerHTML = profiles.map(profile => {
+    const allergies = (profile.allergies || []).map(item => `${escapeHtml(item.allergen_key)}（${item.severity === "severe" ? "严重过敏" : "尽量避免"}）`).join("、") || "未记录过敏原";
+    const avoidances = (profile.avoidances || []).map(item => escapeHtml(item.canonical_name)).join("、") || "未记录忌口食材";
+    const liked = (profile.preferences?.liked_tags || []).map(escapeHtml).join("、") || "未记录";
+    const disliked = (profile.preferences?.disliked_tags || []).map(escapeHtml).join("、") || "未记录";
+    return `<article class="meal-row"><div class="grow"><strong>${escapeHtml(profile.nickname)}的饮食资料</strong><small>过敏：${allergies}</small><small>忌口：${avoidances}</small><small>喜欢：${liked} · 不喜欢：${disliked}</small></div></article>`;
+  }).join("") || `<p class="form-note">还没有饮食资料。</p>`;
+  const mine = profiles.find(profile => profile.user_id === state.data?.user?.id);
+  const form = document.getElementById("foodProfileForm");
+  if (mine && form && document.activeElement?.form !== form) {
+    form.dataset.version = String(mine.version || 0);
+    const avoidKeys = new Set((mine.allergies || []).filter(item => item.severity === "avoid").map(item => item.allergen_key));
+    const severeKeys = new Set((mine.allergies || []).filter(item => item.severity === "severe").map(item => item.allergen_key));
+    document.querySelectorAll("#foodAllergenAvoid option").forEach(option => { option.selected = avoidKeys.has(option.value); });
+    document.querySelectorAll("#foodAllergenSevere option").forEach(option => { option.selected = severeKeys.has(option.value); });
+    const avoidanceSelect = document.getElementById("foodAvoidanceIngredients");
+    const avoided = new Set((mine.avoidances || []).map(item => item.ingredient_id));
+    avoidanceSelect.innerHTML = (state.meals.pantry?.items || []).map(item => `<option value="${escapeHtml(item.ingredient_id)}" ${avoided.has(item.ingredient_id) ? "selected" : ""}>${escapeHtml(item.canonical_name)}</option>`).join("");
+    document.getElementById("foodLikedTags").value = (mine.preferences?.liked_tags || []).join("，");
+    document.getElementById("foodDislikedTags").value = (mine.preferences?.disliked_tags || []).join("，");
+  }
+}
+
+function renderPantry() {
+  const host = document.getElementById("pantryPanel");
+  if (!host) return;
+  const labels = { have: "有", low: "少", out: "无" };
+  const locationLabels = { ambient: "常温", chilled: "冷藏", frozen: "冷冻" };
+  const items = state.meals.pantry?.items || [];
+  host.innerHTML = items.map(item => `<article class="meal-row"><div class="grow"><strong>${escapeHtml(item.canonical_name)} · ${labels[item.state] || item.state}</strong><small>${locationLabels[item.storage_location] || "未指定位置"}${item.expires_on ? ` · 到期 ${shortDate(item.expires_on)}` : ""}${item.quantity_note ? ` · ${escapeHtml(item.quantity_note)}` : ""}</small></div><div class="meal-status-actions">${Object.entries(labels).map(([value, label]) => `<button class="${item.state === value ? "active" : ""}" data-action="set-pantry-state" data-id="${item.id}" data-version="${item.version}" data-state="${value}">${label}</button>`).join("")}</div></article>`).join("") || `<p class="form-note">家里还没有登记食材。采购勾选后，也可以一键放进这里。</p>`;
+}
+
+function renderShoppingCategoryOrder() {
+  const host = document.getElementById("shoppingCategoryOrder");
+  if (!host) return;
+  const categories = state.meals.categoryOrder?.categories || [];
+  host.innerHTML = categories.map((item, index) => `<article class="meal-row"><div class="grow"><strong>${escapeHtml(item.label)}</strong></div><div class="meal-status-actions"><button data-action="move-shopping-category" data-index="${index}" data-direction="-1" ${index === 0 ? "disabled" : ""}>上移</button><button data-action="move-shopping-category" data-index="${index}" data-direction="1" ${index === categories.length - 1 ? "disabled" : ""}>下移</button></div></article>`).join("");
 }
 
 async function openRecipeDetail(recipeOrId, draftId = "", wishId = "") {
@@ -2271,6 +3849,13 @@ async function openRecipeDetail(recipeOrId, draftId = "", wishId = "") {
       recipe = await api(`/api/v1/recipes/${encodeURIComponent(recipeOrId)}`);
       mealCachePut("cache", cacheKey, recipe).catch(() => {});
     } catch (error) {
+      if (error.status >= 400 && error.status < 500) {
+        await mealCacheDelete("cache", cacheKey);
+        state.meals.openRecipe = null;
+        document.getElementById("recipeDetailContent").innerHTML = "";
+        if (document.getElementById("recipeDetailModal").classList.contains("open")) closeModals();
+        throw error;
+      }
       recipe = await mealCacheGet("cache", cacheKey);
       if (!recipe) throw error;
       toast("当前离线，正在显示最近缓存的菜谱");
@@ -2287,7 +3872,16 @@ async function openRecipeDetail(recipeOrId, draftId = "", wishId = "") {
   const imageVerifier = canAttachImage ? `<details class="recipe-image-verifier"><summary>维护这张菜谱的成品图</summary><h3>${cover ? "替换准确成品图" : "补充准确成品图"}</h3><p>这里只用于维护菜谱资料；做菜时可以忽略。只能选择这道菜、这种做法的真实成品图。</p><input id="recipeExactCoverInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif"><label class="check-field"><input id="recipeExactCoverConfirmed" type="checkbox"><span>我已核对菜品名称、外观和当前做法版本一致</span></label>${draftId ? "" : `<button data-action="upload-recipe-image" data-id="${escapeHtml(recipe.id)}">${recipe.source_type === "built_in" ? "复制菜谱并保存图片" : "保存这张准确图片"}</button>`}</details>` : "";
   const variants = (recipe.variants || []).map(item => `<button class="${item.id === recipe.id ? "active" : ""}" data-action="open-recipe-variant" data-id="${escapeHtml(item.id)}"><strong>${escapeHtml(item.variant_name || item.cooking_method || "经典做法")}</strong><small>${escapeHtml(item.cooking_method || "")} · ${Number(item.prep_minutes) + Number(item.cook_minutes) + Number(item.passive_minutes || 0)} 分钟</small></button>`).join("");
   const variantPanel = !draftId && variants ? `<section class="recipe-variants"><div class="recipe-media-heading"><div><h3>不同做法</h3><p>同一道菜按具体做法分开保存，食材、调料和步骤不会混用。</p></div>${recipe.variants.length > 1 ? `<button data-action="compare-recipe-variants" data-dish-id="${escapeHtml(recipe.dish_id)}">比较做法</button>` : ""}</div><div class="recipe-variant-list">${variants}</div><div id="recipeVariantComparison"></div></section>` : "";
-  document.getElementById("recipeDetailContent").innerHTML = `${recipeCoverMarkup(cover, recipe.name, true)}${imageVerifier}<div class="recipe-detail-head"><span class="recipe-badge">${escapeHtml(recipe.dish_name || recipe.name)} · ${escapeHtml(recipe.variant_name || recipe.cooking_method || "经典做法")}</span><h2 id="recipeDetailTitle">${escapeHtml(recipe.name)}</h2><p>${escapeHtml(source)} · ${baseServings} 人份 · 准备 ${recipe.prep_minutes} 分钟 · 烹饪 ${recipe.cook_minutes} 分钟${recipe.passive_minutes ? ` · 浸泡/冷藏/发酵等待 ${formatRecipeDuration(recipe.passive_minutes * 60)}` : ""}</p>${recipe.method_tags?.length ? `<div class="recipe-method-tags">${recipe.method_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}</div>${variantPanel}<div class="recipe-detail-columns"><div class="recipe-serving-control"><h3>食材和调味</h3><label>按人数换算 <input id="recipeDetailServings" type="number" min="1" max="20" value="${baseServings}" aria-label="按人数换算食材"></label></div><div id="recipeDetailIngredients">${renderRecipeIngredients(recipe, baseServings)}</div><h3>一步一步做</h3><ol id="recipeDetailSteps" class="recipe-step-list">${recipe.steps.map((step, index) => `<li class="recipe-step-card"><div class="recipe-step-number">${index + 1}</div><div><strong>${escapeHtml(step.title || `第 ${index + 1} 步`)}</strong><p>${escapeHtml(step.instruction)}</p><div class="recipe-step-meta">${step.heat_level ? `<span>火力：${escapeHtml(step.heat_level)}</span>` : ""}${step.timer_seconds ? `<span>参考：${formatRecipeDuration(step.timer_seconds)}</span>` : `<span>无需单独计时</span>`}</div>${step.key_point ? `<small>完成判断：${escapeHtml(step.key_point)}</small>` : ""}</div></li>`).join("")}</ol>${recipe.tips?.length ? `<h3>小贴士</h3><ul>${recipe.tips.map(tip => `<li>${escapeHtml(tip)}</li>`).join("")}</ul>` : ""}${renderRecipeAllergens(recipe)}</div>${draftId ? "" : renderRecipeVideos(recipe)}<div class="recipe-detail-actions">${draftId ? `<button data-action="confirm-recipe-draft" data-id="${escapeHtml(draftId)}">核对后保存这份菜谱</button>` : `<button data-action="schedule-recipe" data-id="${escapeHtml(recipe.id)}" data-name="${escapeHtml(recipe.name)}" data-wish-id="${escapeHtml(wishId)}">${wishId ? "加入点菜车" : "安排到用餐日历"}</button>${wishId ? "" : `<button data-action="wish-recipe" data-id="${escapeHtml(recipe.id)}" data-name="${escapeHtml(recipe.name)}">先放进想吃清单</button>`}${owned ? `<button data-action="edit-recipe" data-id="${escapeHtml(recipe.id)}">编辑菜谱</button><button data-action="delete-recipe" data-id="${escapeHtml(recipe.id)}" data-version="${recipe.version}">删除菜谱</button>` : ""}`}</div>`;
+  document.getElementById("recipeDetailContent").innerHTML = `${recipeCoverMarkup(cover, recipe.name, true)}${imageVerifier}<div class="recipe-detail-head"><span class="recipe-badge">${escapeHtml(recipe.dish_name || recipe.name)} · ${escapeHtml(recipe.variant_name || recipe.cooking_method || "经典做法")}</span><h2 id="recipeDetailTitle">${escapeHtml(recipe.name)}</h2><p>${escapeHtml(source)} · ${baseServings} 人份 · 准备 ${recipe.prep_minutes} 分钟 · 烹饪 ${recipe.cook_minutes} 分钟${recipe.passive_minutes ? ` · 浸泡/冷藏/发酵等待 ${formatRecipeDuration(recipe.passive_minutes * 60)}` : ""}</p>${recipe.method_tags?.length ? `<div class="recipe-method-tags">${recipe.method_tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}</div>${variantPanel}<div class="recipe-detail-columns"><div class="recipe-serving-control"><h3>食材和调味</h3><label>按人数换算 <input id="recipeDetailServings" type="number" min="1" max="20" value="${baseServings}" aria-label="按人数换算食材"></label></div><div id="recipeDetailIngredients">${renderRecipeIngredients(recipe, baseServings)}</div><h3>一步一步做</h3><ol id="recipeDetailSteps" class="recipe-step-list">${recipe.steps.map((step, index) => `<li class="recipe-step-card"><div class="recipe-step-number">${index + 1}</div><div><strong>${escapeHtml(step.title || `第 ${index + 1} 步`)}</strong><p>${escapeHtml(step.instruction)}</p><div class="recipe-step-meta">${step.heat_level ? `<span>火力：${escapeHtml(step.heat_level)}</span>` : ""}${step.timer_seconds ? `<span>参考：${formatRecipeDuration(step.timer_seconds)}</span>` : `<span>无需单独计时</span>`}</div>${step.key_point ? `<small>完成判断：${escapeHtml(step.key_point)}</small>` : ""}</div></li>`).join("")}</ol>${recipe.tips?.length ? `<h3>小贴士</h3><ul>${recipe.tips.map(tip => `<li>${escapeHtml(tip)}</li>`).join("")}</ul>` : ""}${renderRecipeAllergens(recipe)}${renderCoupleFoodSafety(recipe)}</div>${draftId ? "" : renderRecipeVideos(recipe)}<div class="recipe-detail-actions">${draftId ? `<button data-action="confirm-recipe-draft" data-id="${escapeHtml(draftId)}">核对后保存这份菜谱</button>` : `<button data-action="schedule-recipe" data-id="${escapeHtml(recipe.id)}" data-name="${escapeHtml(recipe.name)}" data-wish-id="${escapeHtml(wishId)}">${wishId ? "加入点菜车" : "安排到用餐日历"}</button>${wishId ? "" : `<button data-action="wish-recipe" data-id="${escapeHtml(recipe.id)}" data-name="${escapeHtml(recipe.name)}">先放进想吃清单</button>`}${owned ? `<button data-action="edit-recipe" data-id="${escapeHtml(recipe.id)}">编辑菜谱</button><button data-action="delete-recipe" data-id="${escapeHtml(recipe.id)}" data-version="${recipe.version}">删除菜谱</button>` : ""}`}</div>`;
+  if (!draftId) {
+    const cookingButton = document.createElement("button");
+    cookingButton.type = "button";
+    cookingButton.dataset.action = "open-cooking";
+    cookingButton.dataset.recipeId = recipe.id;
+    cookingButton.dataset.visibility = recipe.visibility === "private" ? "private" : "shared";
+    cookingButton.textContent = "打开烹饪模式";
+    document.querySelector("#recipeDetailContent .recipe-detail-actions")?.prepend(cookingButton);
+  }
   openModal("recipeDetailModal");
 }
 
@@ -2322,6 +3916,15 @@ function renderRecipeAllergens(recipe) {
     : "";
   const note = escapeHtml(recipe.allergen_note || "仅按当前配料表识别；豆角、红豆、绿豆、豌豆等不会自动归为大豆，复合调味料以包装标签为准。");
   return `<section class="recipe-allergen-report"><h3>过敏原提示（按配料识别）</h3>${confirmed}${packaged}<p class="form-note">${note}</p></section>`;
+}
+
+function renderCoupleFoodSafety(recipe) {
+  const safety = recipe.food_safety;
+  if (!safety) return "";
+  const labels = { safe: "未发现与已保存资料冲突", needs_review: "需要两个人再次核对", blocked: "命中严重过敏资料，请勿按此菜谱制作" };
+  const conflicts = [...(safety.severe_conflicts || []), ...(safety.avoid_conflicts || [])].map(item => `${item.allergen_key}（${(item.sources || []).join("、") || "当前配料"}）`);
+  const avoided = (safety.ingredient_avoidances || []).map(item => item.canonical_name);
+  return `<section class="recipe-couple-safety"><h3>结合两个人饮食资料</h3><p class="recipe-allergens ${safety.status === "safe" ? "safe" : ""}">${escapeHtml(labels[safety.status] || "需要核对")}</p>${conflicts.length ? `<p>涉及：${conflicts.map(escapeHtml).join("、")}</p>` : ""}${avoided.length ? `<p>忌口食材：${avoided.map(escapeHtml).join("、")}</p>` : ""}<p class="form-note">${escapeHtml(safety.note || "只按当前配料和已保存资料核对。")}</p></section>`;
 }
 
 function formatRecipeDuration(seconds) {
@@ -2423,7 +4026,7 @@ async function renderTimelineView(view, renderToken = state.timelineRenderToken)
     } else if (view === "report") {
       const report = await api(`/api/v1/timeline/reports/${new Date().getFullYear()}`);
       if (renderToken !== state.timelineRenderToken) return;
-      host.innerHTML = `<div class="year-mark"><span>${report.year} 年度报告</span><i></i></div><div class="report-grid"><span><b>${report.moments}</b>瞬间</span><span><b>${report.messages}</b>消息</span><span><b>${report.trips}</b>已结束旅行</span><span><b>${report.planned_trips || 0}</b>计划中旅行</span><span><b>${Math.round(report.call_seconds/60)}</b>通话分钟</span><span><b>${report.cities}</b>回忆城市</span><span><b>${report.completed_todos}</b>完成待办</span></div><p class="form-note">${escapeHtml(report.privacy)}</p>`;
+      host.innerHTML = `<div class="year-mark"><span>${report.year} 年度报告</span><i></i></div><div class="report-grid"><span><b>${report.moments}</b>瞬间</span><span><b>${report.messages}</b>消息</span><span><b>${report.trips}</b>已结束旅行</span><span><b>${report.planned_trips || 0}</b>计划中旅行</span><span><b>${Math.round(report.call_seconds/60)}</b>通话分钟</span><span><b>${report.cities}</b>回忆城市</span><span><b>${report.completed_todos}</b>完成待办</span></div><p class="form-note">${escapeHtml(report.privacy)}</p><button class="primary-button" data-action="open-year-album">制作 ${report.year} 年纸质纪念册</button>`;
     } else if (view === "private") {
       renderMomentSelection("仅我的内容", (state.data?.moments || []).filter(moment => moment.creator_id === state.data.user.id && moment.visibility !== "shared"), "你还没有仅自己可见或延时公开的瞬间。");
     } else if (view === "trash") {
@@ -2451,8 +4054,78 @@ function renderChatImportDraft(draft) {
   host.innerHTML = `<p><span class="mock-badge">${escapeHtml(draft.source_label || (draft.mock ? "演示识别" : "真实 OCR"))} · 请逐条确认</span></p>${draft.items.map(item => `<label class="import-row"><select data-import-speaker="${item.id}"><option value="me" ${item.speaker === "me" ? "selected" : ""}>我</option><option value="partner" ${item.speaker === "partner" ? "selected" : ""}>对方</option></select><input data-import-content="${item.id}" value="${escapeHtml(item.content)}" maxlength="4000"><input data-import-selected="${item.id}" type="checkbox" ${item.selected ? "checked" : ""} aria-label="是否导入"></label>`).join("")}<div class="import-actions"><button class="secondary-button" data-action="cancel-import">取消草稿</button><button class="primary-button" data-action="confirm-import">确认并导入</button></div>`;
 }
 
+function privacyGrantLabel(value, labels) {
+  return labels[value] || value || "未知";
+}
+
+function renderAccountPrivacy(privacy) {
+  const usageHost = document.getElementById("privacyUsage");
+  const grantsHost = document.getElementById("privacyGrants");
+  if (!usageHost || !grantsHost) return;
+  if (privacy?.error) {
+    const message = escapeHtml(privacy.error);
+    usageHost.innerHTML = `<p class="form-note">${message}</p>`;
+    grantsHost.innerHTML = `<p class="form-note">授权记录暂时无法读取；设备、媒体和离线操作仍可继续管理。</p>`;
+    return;
+  }
+  const usage = privacy?.usage || {};
+  const featureLabels = {
+    ui_compose: "智能界面整理", trip_plan: "旅行规划", trip_replan: "旅行局部调整",
+    date_plan: "约会方案", life_assistant: "双人生活助理", recipe: "菜谱建议",
+  };
+  const featureRows = Object.entries(usage.feature_counts || {}).sort((left, right) => Number(right[1]) - Number(left[1]));
+  const costText = (usage.costs || []).length
+    ? usage.costs.map(item => `${escapeHtml(item.currency)} ${Number(item.amount).toFixed(6)}`).join("、")
+    : Number(usage.sent_attempts || 0) ? "暂无可核算费用" : "本月未产生费用";
+  usageHost.innerHTML = `<article class="device-row"><div class="grow"><strong>${escapeHtml(privacy.month || "本月")} · ${Number(usage.sent_attempts || 0)} 次真实发出</strong><small>总记录 ${Number(usage.attempts || 0)} 次 · Token ${Number(usage.total_tokens || 0).toLocaleString("zh-CN")} · ${costText}</small>${Number(usage.unknown_cost_attempts || 0) ? `<small>${Number(usage.unknown_cost_attempts)} 次调用缺少可核算单价，不能误显示为免费</small>` : ""}</div><span class="mock-badge">${escapeHtml(privacy.timezone || "UTC")}</span></article>${featureRows.length ? `<p class="form-note">${featureRows.map(([feature, count]) => `${escapeHtml(privacyGrantLabel(feature, featureLabels))} ${Number(count)} 次`).join(" · ")}</p>` : `<p class="form-note">本月还没有由当前账号发起的 AI 调用。</p>`}`;
+  const surfaceLabels = { home: "首页", chat: "消息", trip: "旅行", timeline: "时光", life: "我们" };
+  const resourceLabels = { moment: "恋爱瞬间", message: "聊天消息", trip: "旅行", media: "媒体", recipe: "菜谱" };
+  const statusLabels = { active: "有效", expired: "已过期", revoked: "已撤回" };
+  grantsHost.innerHTML = (privacy.grants || []).length ? privacy.grants.map(grant => `<article class="device-row"><div class="grow"><strong>${escapeHtml(privacyGrantLabel(grant.surface, surfaceLabels))} · ${escapeHtml(privacyGrantLabel(grant.resource_type, resourceLabels))}</strong><small>${escapeHtml(grant.purpose)} · ${grant.usage_scope === "selected_content" ? "本次勾选内容" : "历史授权范围"} · 创建于 ${new Date(grant.created_at).toLocaleString("zh-CN")}</small><small>资源标识 ${escapeHtml(grant.resource_id)}${grant.last_used_at ? ` · 最近使用 ${new Date(grant.last_used_at).toLocaleString("zh-CN")}` : " · 尚未使用"}</small></div>${grant.status === "active" ? `<button data-action="revoke-ai-grant" data-id="${escapeHtml(grant.id)}" data-version="${Number(grant.version)}">撤回</button>` : `<span class="mock-badge">${escapeHtml(statusLabels[grant.status] || grant.status)}</span>`}</article>`).join("") : `<p class="form-note">当前账号没有保存过按次 AI 内容授权。</p>`;
+}
+
+function offlineMutationDisplay(item) {
+  const labels = { send_text_message: "待发送文字消息", check_shopping_item: "待同步采购勾选" };
+  return labels[item.action] || "待同步操作";
+}
+
+function renderOfflineSyncStatus(queue) {
+  const host = document.getElementById("offlineSyncStatus");
+  if (!host) return;
+  if (!queue?.supported) {
+    host.innerHTML = `<p class="form-note">当前浏览器不支持离线待同步存储；断网时请不要关闭尚未提交的页面。</p>`;
+    return;
+  }
+  if (queue.error) {
+    host.innerHTML = `<p class="form-note">${escapeHtml(queue.error)}</p>`;
+    return;
+  }
+  const items = queue.items || [];
+  const isSending = item => Number(item.inFlightRevision) === pendingMutationRevision(item);
+  const sending = items.filter(isSending).length;
+  const pending = items.filter(item => item.status === "pending" && !isSending(item)).length;
+  const attention = items.filter(item => item.status === "needs_attention").length;
+  if (!items.length) {
+    host.innerHTML = `<p class="form-note">当前设备没有待同步操作。</p>`;
+    return;
+  }
+  host.innerHTML = `<p class="form-note">正在发送 ${sending} 条 · 等待同步 ${pending} 条 · 需要处理 ${attention} 条</p>${items.map(item => {
+    const sendingNow = isSending(item);
+    const status = sendingNow ? "请求已经发出，正在等待服务器确认" : item.status === "needs_attention" ? `需要处理${item.error?.status ? `（HTTP ${Number(item.error.status)}）` : ""}` : navigator.onLine ? "等待下一次同步" : "联网后自动同步";
+    const controls = sendingNow ? `<span class="mock-badge">发送中 · 不可丢弃</span>` : `<button data-action="retry-offline-mutation" data-id="${escapeHtml(item.id)}">重试</button><button class="danger-text" data-action="discard-offline-mutation" data-id="${escapeHtml(item.id)}">丢弃</button>`;
+    return `<article class="device-row"><div class="grow"><strong>${escapeHtml(offlineMutationDisplay(item))}</strong><small>${new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN")} · ${status}</small></div>${controls}</article>`;
+  }).join("")}`;
+}
+
 async function loadAccountCenter() {
-  const [result, media, trash] = await Promise.all([api("/api/v1/account/devices"), api("/api/v1/media"), api("/api/v1/media/trash")]);
+  const [result, media, trash] = await Promise.all([
+    api("/api/v1/account/devices"), api("/api/v1/media"), api("/api/v1/media/trash"),
+  ]);
+  const [privacyResult, offlineResult] = await Promise.allSettled([
+    api("/api/v1/account/privacy"), listOfflineMutationsForAccount(),
+  ]);
+  const privacy = privacyResult.status === "fulfilled" ? privacyResult.value : { error: "AI 用量与授权暂时无法读取，请稍后重试。" };
+  const offlineQueue = offlineResult.status === "fulfilled" ? offlineResult.value : { supported: true, error: "离线待同步记录暂时无法读取；没有删除任何内容。", items: [] };
   const user = state.data?.user; const partner = state.data?.partner;
   const identityCard = document.getElementById("accountIdentityCard");
   if (identityCard && user && partner) {
@@ -2462,6 +4135,8 @@ async function loadAccountCenter() {
   const mediaRow = item => `<article class="account-media-row">${["image", "video"].includes(item.kind) ? `<span class="media-preview-wrap"><img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy">${item.kind === "video" ? `<i aria-hidden="true">▶</i>` : ""}</span>` : `<span class="media-kind">♫</span>`}<div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${item.visibility === "private" ? "仅自己" : item.visibility === "delayed" ? "延时公开" : "双方可见"} · ${(Number(item.size_bytes) / 1024 / 1024).toFixed(1)} MB${item.metadata_stripped ? " · 隐私信息已清理" : ""}</small></div>${item.owner_id === state.data?.user?.id ? `<button data-action="trash-media" data-id="${item.id}">清理</button>` : ""}</article>`;
   document.getElementById("accountMediaList").innerHTML = media.items.length ? media.items.map(mediaRow).join("") : `<p class="form-note">还没有上传媒体。</p>`;
   document.getElementById("accountMediaTrash").innerHTML = trash.items.length ? trash.items.map(item => `<article class="account-media-row"><div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${new Date(item.deleted_at).toLocaleString("zh-CN")}</small></div><button data-action="restore-media" data-id="${item.id}" data-version="${item.version}">恢复</button><button class="danger-text" data-action="purge-media" data-id="${item.id}">永久删除</button></article>`).join("") : `<p class="form-note">回收站为空。</p>`;
+  renderAccountPrivacy(privacy);
+  renderOfflineSyncStatus(offlineQueue);
   openModal("accountModal");
   refreshPushStatus({ resync: true }).catch(error => renderPushStatus(error.message, "warning"));
 }
@@ -2678,25 +4353,49 @@ async function loadBootstrap({ quiet = false } = {}) {
   try {
     const previousUserId = state.data?.user?.id || state.tripLive.ownerUserId;
     const bootstrap = await api("/api/v1/bootstrap");
-    if (previousUserId && bootstrap.user?.id !== previousUserId) resetTripLive();
+    await bindCachePartition(bootstrap);
+    if (previousUserId && bootstrap.user?.id !== previousUserId) {
+      resetTripLive();
+      resetMemoryDiscovery();
+    }
     state.data = bootstrap;
-    if (state.data.needs_pairing) { showPairing(); return; }
-    const preferredTripId = localStorage.getItem("love-trip-id");
+    state.online = true;
+    if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
+    const requestedTripId = new URLSearchParams(location.search).get("trip_id");
+    const preferredTripId = requestedTripId || privateStorage().getItem("love-trip-id");
     const preferredTrip = (state.data.trips || []).find(item => item.id === preferredTripId);
-    if (preferredTrip) state.data.trip = preferredTrip;
+    if (preferredTrip) {
+      state.data.trip = preferredTrip;
+      privateStorage().setItem("love-trip-id", preferredTrip.id);
+    }
     const availableStyles = (state.data.trip?.variants || []).map(variant => variant.style);
     if (!availableStyles.includes(state.plan)) state.plan = state.data.trip?.active_variant || availableStyles[0] || "slow";
-    state.online = true;
-    localStorage.setItem("love-offline-trip", JSON.stringify({ user: state.data.user, partner: state.data.partner, couple: state.data.couple, trip: state.data.trip, coupleContext: state.data.coupleContext, weeklyReview: state.data.weeklyReview, datePlans: state.data.datePlans }));
+    privateStorage().setItem("love-offline-trip", JSON.stringify({ user: state.data.user, partner: state.data.partner, couple: state.data.couple, permission_version: state.data.permission_version, trip: state.data.trip, coupleContext: state.data.coupleContext, weeklyReview: state.data.weeklyReview, datePlans: state.data.datePlans }));
     hideAuth();
-    renderIdentity(); renderMessages(); renderPlan(); renderHotel(); renderWishlist(); renderDailyQuestion(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderLifeData();
+    renderIdentity(); renderMessages(); renderPlan(); renderHotel(); renderWishlist(); renderDailyQuestion(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderDecisions(); renderLifeData();
     await Promise.all([loadMeals({ quiet: true }), loadLifeAssistant({ quiet: true })]);
     // Reapply the user's active sub-page after any background/SSE refresh. This
     // keeps the visible panel and its primary action in sync while the DOM is
     // being updated by real-time events from the partner account.
     setTripSection(state.tripSection, { scroll: false });
     setLifeSection(state.lifeSection, { scroll: false });
-    if (state.screen === "timeline") await setTimelineView(state.timelineView, { scroll: false });
+    if (state.screen === "timeline") {
+      await setTimelineView(state.timelineView, { scroll: false });
+      await loadFutureLetters({ quiet: true });
+    }
+    restorePwaShortcutIntent(
+      { authenticated: true, paired: true },
+      {
+        openChat() {
+          navigate("chat", { markRead: false });
+          requestAnimationFrame(() => document.getElementById("chatInput")?.focus());
+        },
+        openMoment() {
+          navigate("timeline");
+          openMomentComposer("回忆");
+        },
+      },
+    );
     api("/api/v1/couple/context").then(context => { if (state.data) { state.data.coupleContext = context; renderCoupleContext(); } }).catch(() => {});
     api("/api/v1/media/usage").then(usage => {
       const megabytes = (Number(usage.owner_bytes || usage.total_bytes || 0) / 1024 / 1024).toFixed(1);
@@ -2725,7 +4424,31 @@ async function loadBootstrap({ quiet = false } = {}) {
       state.assistantDeepLinked = true;
       await openLifeAssistantPlan(assistantPlanTarget);
     }
-    if (!quiet) toast("共同空间已同步");
+    const cookingRestoreClosed = await resumeCookingDeepLink();
+    if (!state.memoryDeepLinked && new URLSearchParams(location.search).get("memory_search") === "1") {
+      state.memoryDeepLinked = true;
+      navigate("timeline");
+      const panel = document.getElementById("memorySearchPanel");
+      if (panel) panel.open = true;
+      await loadMemoryCompletion();
+      requestAnimationFrame(() => document.getElementById("memorySearchQuery")?.focus());
+    }
+    if (new URLSearchParams(location.search).get("memory_tools") === "1") {
+      state.memoryDeepLinked = true;
+      navigate("timeline");
+      await loadFutureLetters({ quiet: true });
+      requestAnimationFrame(() => {
+        const tools = document.querySelector(".memory-tools");
+        tools?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+        tools?.querySelector?.("button")?.focus?.();
+      });
+    }
+    if (!state.albumDeepLinked && new URLSearchParams(location.search).get("album") === "1") {
+      state.albumDeepLinked = true;
+      navigate("timeline");
+      await openAlbumExport("year");
+    }
+    if (!quiet && !cookingRestoreClosed) toast("共同空间已同步");
   } catch (error) {
     state.online = false;
     if (error.status !== 401) {
@@ -2739,7 +4462,7 @@ function loadOfflineSnapshot() {
   const cached = readLocalJson("love-offline-trip");
   if (!cached?.user || !cached?.partner || !cached?.couple) return false;
   state.data = { ...cached, messages: [], moments: [], wishlist: { id: null, title: "离线状态", items: [] }, dailyQuestion: null };
-  hideAuth(); renderIdentity(); renderMessages(); renderPlan(); renderHotel(); renderWishlist(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderLifeData();
+  hideAuth(); renderIdentity(); renderMessages(); renderPlan(); renderHotel(); renderWishlist(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderDecisions(); renderLifeData();
   const cachedMeals = readLocalJson(`love-offline-meals:${state.data.user.id}`); if (cachedMeals) { state.meals = { ...state.meals, ...cachedMeals }; renderMeals(); }
   setTripSection(state.tripSection, { scroll: false });
   setLifeSection(state.lifeSection, { scroll: false });
@@ -2753,7 +4476,7 @@ async function startRealtime() {
   state.realtimeCursor = Math.max(state.realtimeCursor, Number(snapshot.latest_sequence || 0));
   const source = new EventSource(`/api/v1/realtime/stream?after=${state.realtimeCursor}`, { withCredentials: true });
   state.realtime = source;
-  const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
+  const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
   const receive = event => {
     let realtimeEvent = null;
     try { realtimeEvent = JSON.parse(event.data); state.realtimeCursor = Math.max(state.realtimeCursor, Number(realtimeEvent.sequence || event.lastEventId || 0)); } catch (_) {}
@@ -2770,6 +4493,13 @@ async function startRealtime() {
         && document.getElementById("sharedDetailModal").classList.contains("open")) {
       openSharedDetail(state.sharedDetail.resource_type, state.sharedDetail.resource_id, { refresh: true }).catch(() => {});
     }
+    if (["meals.updated", "kitchen.updated"].includes(realtimeEvent?.event_type)) loadMeals({ quiet: true }).catch(() => {});
+    if (realtimeEvent?.event_type === "trip.tools_updated" && realtimeEvent?.payload?.resource === "trip_expense"
+        && realtimeEvent.resource_id === state.data?.trip?.id && state.tripSection === "tools" && state.tripToolSection === "expenses") {
+      loadTripExpenses({ quiet: true }).catch(() => {});
+      return;
+    }
+    if (realtimeEvent?.event_type === "future_letter.delivered") loadFutureLetters({ quiet: true }).catch(() => {});
     clearTimeout(state.realtimeRefresh);
     state.realtimeRefresh = setTimeout(() => loadBootstrap({ quiet: true }), 180);
   };
@@ -2809,6 +4539,12 @@ function showPairing() {
   document.getElementById("pairingView").hidden = false;
 }
 
+function closeCookingForUnpairedAccount() {
+  closeCookingScreen();
+  state.cooking.restoreChecked = false;
+  state.cooking.deepLinked = false;
+}
+
 function hideAuth() {
   document.getElementById("authGate").classList.add("hidden");
 }
@@ -2817,8 +4553,8 @@ async function initializeAuth() {
   try {
     const result = await api("/api/v1/auth/me");
     state.registrationEnabled = result.registration_enabled !== false;
-    if (!result.authenticated) { showAccountAuth(); return; }
-    if (!result.pairing?.paired) { showPairing(); return; }
+    if (!result.authenticated) { await clearMealOfflineData(); showAccountAuth(); return; }
+    if (!result.pairing?.paired) { await clearMealOfflineData(); closeCookingForUnpairedAccount(); showPairing(); return; }
     await loadBootstrap({ quiet: true });
   } catch (error) {
     const restored = loadOfflineSnapshot();
@@ -2865,14 +4601,14 @@ function openModal(id) {
   modal.classList.add("open");
   modal.setAttribute("aria-hidden", "false");
   document.querySelector(".phone-shell").setAttribute("inert", "");
-  document.querySelector(".bottom-nav")?.setAttribute("inert", "");
   (modal.querySelector("[autofocus], .field input, .field textarea") || modal.querySelector("button"))?.focus();
 }
 
 function closeModals() {
+  if (document.getElementById("voiceMemoryModal")?.classList.contains("open")) stopVoiceResources({ discard: true });
+  if (document.getElementById("albumExportModal")?.classList.contains("open")) stopAlbumExportPolling();
   document.querySelectorAll(".modal.open").forEach(modal => { modal.classList.remove("open"); modal.setAttribute("aria-hidden", "true"); });
   document.querySelector(".phone-shell").removeAttribute("inert");
-  document.querySelector(".bottom-nav")?.removeAttribute("inert");
   state.modalTrigger?.focus?.();
   state.modalTrigger = null;
 }
@@ -2882,9 +4618,22 @@ function renderSharedDetail(detail) {
   document.getElementById("sharedCommentForm").hidden = false;
   document.getElementById("sharedDetailKind").textContent = detail.kind_label || "共同内容";
   const fields = (detail.fields || []).map(item => `<div><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join("");
-  const media = detail.media_url ? `<img class="shared-detail-media" src="${escapeHtml(detail.media_url)}" alt="${escapeHtml(detail.title)}">` : "";
+  const voice = detail.voice_memory || null;
+  const mediaUrl = voice?.media?.url || detail.media_url;
+  const media = !mediaUrl ? "" : detail.moment_type === "voice"
+    ? `<audio class="shared-detail-media" controls preload="metadata" src="${escapeHtml(mediaUrl)}"></audio>`
+    : detail.moment_type === "video"
+      ? `<video class="shared-detail-media" controls preload="metadata" src="${escapeHtml(mediaUrl)}"></video>`
+      : `<img class="shared-detail-media" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(detail.title)}">`;
+  const transcript = voice?.transcript
+    ? `<section class="voice-transcript-detail"><span>语音文字 · ${voice.transcript.method === "manual" ? "本人填写" : "浏览器本地识别（未经服务端验证）"}</span><p>${escapeHtml(voice.transcript.body || "暂无文字").replace(/\n/g, "<br>")}</p>${voice.media?.owner_id === state.data?.user?.id ? `<label class="field"><span>校正文字</span><textarea id="voiceTranscriptCorrection" maxlength="10000">${escapeHtml(voice.transcript.body || "")}</textarea></label><button data-action="save-voice-transcript-correction" data-id="${escapeHtml(voice.transcript.id)}" data-version="${voice.transcript.version}">保存本人校正</button>` : ""}</section>`
+    : detail.moment_type === "voice" ? `<p class="form-note">这段原声没有保存文字转写。</p>` : "";
   const actions = detail.recipe_id ? `<div class="shared-detail-actions"><button data-action="open-shared-recipe" data-id="${escapeHtml(detail.recipe_id)}">查看完整菜谱与做法</button></div>` : "";
-  document.getElementById("sharedDetailContent").innerHTML = `${media}<h2 id="sharedDetailTitle">${escapeHtml(detail.title)}</h2>${detail.summary ? `<p class="shared-detail-summary">${escapeHtml(detail.summary)}</p>` : `<p class="shared-detail-summary">双方可以在下方继续补充想法。</p>`}${fields ? `<div class="shared-detail-fields">${fields}</div>` : ""}${actions}`;
+  const checkedAt = detail.source_checked_at ? new Date(detail.source_checked_at) : null;
+  const checkedLabel = checkedAt && !Number.isNaN(checkedAt.getTime()) ? ` · 核对于 ${checkedAt.toLocaleString("zh-CN")}` : "";
+  const sourceLabel = detail.fact_sensitive ? `<span>信息来源：${escapeHtml(detail.source_label || "来源待确认")}${escapeHtml(checkedLabel)}</span>` : "";
+  const provenance = `<div class="shared-detail-provenance"><strong>${escapeHtml(detail.visibility_label || "双方可见")}</strong>${sourceLabel}</div>`;
+  document.getElementById("sharedDetailContent").innerHTML = `${media}<h2 id="sharedDetailTitle">${escapeHtml(detail.title)}</h2>${provenance}${detail.summary ? `<p class="shared-detail-summary">${escapeHtml(detail.summary)}</p>` : `<p class="shared-detail-summary">双方可以在下方继续补充想法。</p>`}${transcript}${fields ? `<div class="shared-detail-fields">${fields}</div>` : ""}${actions}`;
   document.getElementById("sharedCommentCount").textContent = `${Number(detail.comment_count || 0)} 条`;
   const comments = detail.comments || [];
   document.getElementById("sharedCommentList").innerHTML = comments.length ? comments.map(comment => `<article class="shared-comment"><span class="shared-comment-avatar">${escapeHtml(comment.avatar_label || comment.author_name?.slice(0, 1) || "♡")}</span><div><strong>${escapeHtml(comment.author_name)}</strong><small>${new Date(comment.created_at).toLocaleString("zh-CN")}</small><p>${escapeHtml(comment.body)}</p></div>${comment.mine ? `<button data-action="delete-shared-comment" data-id="${escapeHtml(comment.id)}" data-version="${comment.version}" aria-label="删除我的评论">删除</button>` : ""}</article>`).join("") : `<div class="shared-comment-empty">还没有评论。写下第一句话后，对方登录即可看到。</div>`;
@@ -2903,6 +4652,9 @@ async function openSharedDetail(resourceType, resourceId, { refresh = false } = 
   }
   try {
     const detail = await api(`/api/v1/shared-content/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}`);
+    if (resourceType === "moment" && detail.moment_type === "voice") {
+      detail.voice_memory = await api(`/api/v1/voice-memories/${encodeURIComponent(resourceId)}`);
+    }
     renderSharedDetail(detail);
   } catch (error) {
     if (refresh) return;
@@ -2914,6 +4666,15 @@ async function openSharedDetail(resourceType, resourceId, { refresh = false } = 
 async function openPushDeepLink() {
   if (state.pushDeepLinked) return;
   const params = new URLSearchParams(location.search);
+  const futureLetterId = params.get("future_letter") || "";
+  if (futureLetterId) {
+    state.pushDeepLinked = true; params.delete("future_letter");
+    const remaining = params.toString(); history.replaceState(history.state, "", `${location.pathname}${remaining ? `?${remaining}` : ""}${location.hash}`);
+    if (!/^[A-Za-z0-9_-]{3,160}$/.test(futureLetterId)) { toast("这条未来信链接无效"); return; }
+    navigate("timeline"); await loadFutureLetters({ quiet: true });
+    try { await openFutureLetterDetail(futureLetterId); } catch (error) { toast(error.message); }
+    return;
+  }
   const resourceType = params.get("shared_type") || "";
   const resourceId = params.get("shared_id") || "";
   if (!resourceType && !resourceId) return;
@@ -2945,10 +4706,46 @@ function clearAppNotificationBadge() {
 }
 
 async function sendMessage(text) {
-  const message = await api("/api/v1/messages", { method: "POST", body: JSON.stringify({ type: "text", content: text, idempotency_key: clientKey("message") }) });
+  const body = { type: "text", content: text, idempotency_key: clientKey("message") };
+  let message;
+  try { message = await api("/api/v1/messages", { method: "POST", body: JSON.stringify(body) }); }
+  catch (error) {
+    if (error.status) throw error;
+    await queueMealMutation("/api/v1/messages", "POST", body);
+    return { status: "queued" };
+  }
   state.data.messages.push(message);
   renderMessages();
   document.getElementById("messages").lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" });
+  return { status: "sent", message };
+}
+
+async function sendHeart(button) {
+  const original = {
+    text: button.textContent,
+    disabled: button.disabled,
+    ariaLabel: button.getAttribute("aria-label"),
+    ariaBusy: button.getAttribute("aria-busy"),
+  };
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    const result = await sendMessage("想你了 ♡");
+    button.textContent = "♥";
+    button.setAttribute("aria-label", result.status === "queued" ? "爱心已离线保存" : "爱心已发送");
+    toast(result.status === "queued" ? "爱心已离线保存，联网后自动发送" : "爱心已发送");
+    return result;
+  } catch (error) {
+    button.textContent = original.text;
+    if (original.ariaLabel === null) button.removeAttribute("aria-label");
+    else button.setAttribute("aria-label", original.ariaLabel);
+    toast(error.message);
+    return null;
+  } finally {
+    button.disabled = original.disabled;
+    if (original.ariaBusy === null) button.removeAttribute("aria-busy");
+    else button.setAttribute("aria-busy", original.ariaBusy);
+  }
 }
 
 async function sendMediaMessage(file) {
@@ -3409,6 +5206,185 @@ async function endCall() {
   }
 }
 
+function cookingRequest(path, method, payload) {
+  return api(path, {
+    method,
+    headers: { "Idempotency-Key": clientKey("cook") },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+function cookingRemainingText(timer) {
+  if (timer.status !== "running") return timer.status === "cancelled" ? "已取消" : "已完成";
+  const seconds = Math.max(0, Math.ceil((Date.parse(timer.ends_at) - (Date.now() + state.cooking.serverOffsetMs)) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function setCookingSession(session, receivedAt = Date.now()) {
+  state.cooking.session = session;
+  const serverNow = Date.parse(session?.server_now || "");
+  state.cooking.serverOffsetMs = Number.isFinite(serverNow) ? serverNow - receivedAt : 0;
+}
+
+function replaceCookingHistory(sessionId = null) {
+  const url = new URL(location.href);
+  url.searchParams.delete("cook_recipe");
+  url.searchParams.delete("cook_meal");
+  if (sessionId) url.searchParams.set("cook_session", sessionId);
+  else url.searchParams.delete("cook_session");
+  history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function renderCookingReceipts() {
+  const panel = document.getElementById("cookingPantryReceipts");
+  if (!panel) return;
+  panel.innerHTML = state.cooking.pantryReceipts.map(item => `<article class="cooking-pantry-receipt"><span>${escapeHtml(item.name)}已更新为“${item.state === "out" ? "无" : "少"}”</span><button data-action="undo-cook-pantry" data-receipt-id="${escapeHtml(item.undo.receipt_id)}">撤销这一项</button></article>`).join("");
+}
+
+function renderCookingSession() {
+  const session = state.cooking.session;
+  if (!session) return;
+  if (session.status !== "active" && state.cooking.tick) { clearInterval(state.cooking.tick); state.cooking.tick = null; }
+  const steps = session.recipe_snapshot?.steps || [];
+  const step = steps[Math.min(session.current_step, Math.max(0, steps.length - 1))] || {};
+  document.getElementById("cookingTitle").textContent = session.name || "烹饪模式";
+  const baseStatus = session.status === "active" ? `${session.visibility === "shared" ? "双方可见" : "仅自己可见"} · 已自动保存` : session.status === "completed" ? "烹饪已完成，请手工核对库存" : "本次烹饪已取消";
+  document.getElementById("cookingStatus").textContent = `${baseStatus}${state.cooking.capabilityNotice ? ` · ${state.cooking.capabilityNotice}` : ""}`;
+  document.getElementById("cookingStepNumber").textContent = `第 ${session.current_step + 1} / ${Math.max(steps.length, 1)} 步`;
+  document.getElementById("cookingStepTitle").textContent = step.title || `第 ${session.current_step + 1} 步`;
+  document.getElementById("cookingStepInstruction").textContent = step.instruction || "当前菜谱没有记录这一步的说明";
+  document.getElementById("cookingStepMeta").textContent = [step.heat_level ? `火力：${step.heat_level}` : "", step.timer_seconds ? `建议计时：${formatRecipeDuration(step.timer_seconds)}` : "", step.key_point ? `完成判断：${step.key_point}` : ""].filter(Boolean).join(" · ");
+  document.getElementById("cookTimerLive").innerHTML = (session.timers || []).map(timer => `<article class="cooking-timer-row"><span><b>${escapeHtml(timer.label || "计时器")}</b><small> · 第 ${timer.step_index + 1} 步</small></span><strong>${cookingRemainingText(timer)}</strong>${timer.status === "running" ? `<button data-action="cancel-cook-timer" data-id="${escapeHtml(timer.id)}" data-version="${timer.version}">取消</button>` : ""}</article>`).join("") || `<p class="form-note">可以同时添加多个计时器；切到后台后仍按服务器结束时间校准。</p>`;
+  const pantryPanel = document.getElementById("cookingPantryPanel");
+  pantryPanel.hidden = session.status !== "completed";
+  document.getElementById("cookingPantrySuggestions").innerHTML = (session.pantry_suggestions || []).map(item => `<label class="cooking-pantry-row"><span>${escapeHtml(item.name)}<small> · 当前：${item.pantry_state === "have" ? "有" : item.pantry_state === "low" ? "少" : item.pantry_state === "out" ? "无" : "未登记"}</small></span><select data-cook-pantry-ref="${escapeHtml(item.ingredient_ref)}" data-version="${item.pantry_version}"><option value="">不修改</option><option value="low">变少了</option><option value="out">用完了</option></select></label>`).join("");
+  renderCookingReceipts();
+  document.querySelectorAll('[data-action="previous-cook-step"],[data-action="next-cook-step"],[data-action="start-cook-timer"],[data-action="complete-cooking"]').forEach(button => { button.disabled = session.status !== "active"; });
+}
+
+async function refreshCookingSession() {
+  if (!state.cooking.session?.id || !navigator.onLine) return;
+  try {
+    const session = await api(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}`);
+    setCookingSession(session, Date.now());
+    renderCookingSession();
+  } catch (error) { toast(error.message); }
+}
+
+async function acquireCookingWakeLock() {
+  if (document.hidden || !state.cooking.session) return;
+  if (state.cooking.wakeLock) return;
+  if (!navigator.wakeLock?.request) {
+    state.cooking.capabilityNotice = "系统不支持屏幕常亮，屏幕可能熄灭";
+    renderCookingSession();
+    return;
+  }
+  try {
+    const sentinel = await navigator.wakeLock.request("screen");
+    state.cooking.wakeLock = sentinel;
+    state.cooking.capabilityNotice = "";
+    sentinel.addEventListener?.("release", () => {
+      if (!state.cooking.session || document.hidden) return;
+      state.cooking.wakeLock = null;
+      state.cooking.capabilityNotice = "屏幕常亮已释放，屏幕可能熄灭";
+      renderCookingSession();
+    });
+    renderCookingSession();
+  } catch (_) {
+    state.cooking.wakeLock = null;
+    state.cooking.capabilityNotice = "无法保持屏幕常亮，屏幕可能熄灭";
+    renderCookingSession();
+  }
+}
+
+function cleanupCookingRuntime({ preserveSession = false } = {}) {
+  clearInterval(state.cooking.tick); state.cooking.tick = null;
+  window.speechSynthesis?.cancel?.();
+  state.cooking.wakeLock?.release?.().catch(() => {}); state.cooking.wakeLock = null;
+  if (!preserveSession) {
+    state.cooking.session = null;
+    state.cooking.serverOffsetMs = 0;
+    state.cooking.capabilityNotice = "";
+    state.cooking.pantryReceipts = [];
+  }
+}
+
+async function openCookingSession(sessionOrId) {
+  closeModals();
+  const session = typeof sessionOrId === "string" ? await api(`/api/v1/cook-sessions/${encodeURIComponent(sessionOrId)}`) : sessionOrId;
+  const receivedAt = Date.now();
+  cleanupCookingRuntime();
+  setCookingSession(session, receivedAt);
+  replaceCookingHistory(session.id);
+  document.getElementById("cookingScreen").setAttribute("aria-hidden", "false");
+  document.querySelector(".phone-shell")?.setAttribute("inert", "");
+  renderCookingSession();
+  if (session.status === "active") state.cooking.tick = setInterval(() => renderCookingSession(), 1000);
+  await acquireCookingWakeLock();
+}
+
+function closeCookingScreen() {
+  document.getElementById("cookingScreen").setAttribute("aria-hidden", "true");
+  document.querySelector(".phone-shell")?.removeAttribute("inert");
+  cleanupCookingRuntime();
+  replaceCookingHistory();
+}
+
+function closeInvalidCookingDeepLink(error) {
+  if (!COOKING_RESTORE_TERMINAL_STATUSES.has(Number(error?.status))) return false;
+  closeCookingScreen();
+  state.cooking.deepLinked = false;
+  toast("这次烹饪记录已失效或无权查看，已返回共同空间");
+  return true;
+}
+
+async function startCookingFromElement(element) {
+  if (!requireOnlineMutation("cook_session", "开始烹饪")) return;
+  const payload = element.dataset.mealId
+    ? { meal_item_id: element.dataset.mealId, expected_meal_version: Number(element.dataset.version), visibility: "shared" }
+    : { recipe_id: element.dataset.recipeId, visibility: element.dataset.visibility === "private" ? "private" : "shared" };
+  const session = await cookingRequest("/api/v1/cook-sessions", "POST", payload);
+  await openCookingSession(session);
+}
+
+async function resumeCookingDeepLink() {
+  if (state.cooking.restoreChecked) return false;
+  state.cooking.restoreChecked = true;
+  try {
+    const params = new URLSearchParams(location.search);
+    const sessionId = params.get("cook_session");
+    const recipeId = params.get("cook_recipe");
+    const mealId = params.get("cook_meal");
+    if (!sessionId && !recipeId && !mealId) {
+      const active = await api("/api/v1/cook-sessions?status=active");
+      if (active.items?.[0]) await openCookingSession(active.items[0].id);
+      return false;
+    }
+    state.cooking.deepLinked = true;
+    navigate("life"); setLifeSection("meals");
+    if (sessionId) { await openCookingSession(sessionId); return false; }
+    if (recipeId) { await openRecipeDetail(recipeId); return false; }
+    setMealSection("calendar", { load: false });
+    const meal = mealItemById(mealId);
+    if (meal) toast("请点击“开始做饭”确认进入烹饪模式");
+    return false;
+  } catch (error) {
+    if (closeInvalidCookingDeepLink(error)) return true;
+    state.cooking.restoreChecked = false;
+    throw error;
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!state.cooking.session) return;
+  if (document.visibilityState === "visible") {
+    refreshCookingSession().then(() => { if (state.cooking.session?.status === "active" && !state.cooking.tick) state.cooking.tick = setInterval(renderCookingSession, 1000); return acquireCookingWakeLock(); }).catch(() => {});
+  } else cleanupCookingRuntime({ preserveSession: true });
+});
+window.addEventListener("pageshow", () => { if (state.cooking.session) refreshCookingSession().then(() => { if (!state.cooking.tick) state.cooking.tick = setInterval(renderCookingSession, 1000); return acquireCookingWakeLock(); }).catch(() => {}); });
+window.addEventListener("focus", () => { if (state.cooking.session) refreshCookingSession().catch(() => {}); });
+
 document.addEventListener("click", async event => {
   const authMode = event.target.closest("[data-auth-mode]");
   if (authMode) { showAccountAuth(authMode.dataset.authMode); return; }
@@ -3419,13 +5395,13 @@ document.addEventListener("click", async event => {
       if (!linked) { toast("这段旅行已经删除或没有权限查看"); return; }
       state.data.trip = linked; state.plan = linked.active_variant || "slow"; state.selectedItemIds.clear();
       resetTripLive(linked.id);
-      localStorage.setItem("love-trip-id", linked.id); renderIdentity(); renderPlan(); renderHotel();
+      privateStorage().setItem("love-trip-id", linked.id); renderIdentity(); renderPlan(); renderHotel();
     }
     navigate(nav.dataset.nav); return;
   }
   const plan = event.target.closest("[data-plan]");
   if (plan) {
-    state.plan = plan.dataset.plan; localStorage.setItem("love-plan", state.plan); renderPlan();
+    state.plan = plan.dataset.plan; privateStorage().setItem("love-plan", state.plan); renderPlan();
     return;
   }
   const privacy = event.target.closest("[data-privacy]");
@@ -3446,6 +5422,12 @@ document.addEventListener("click", async event => {
   }
   const tripSection = event.target.closest("[data-trip-section]");
   if (tripSection) { navigate("trip"); setTripSection(tripSection.dataset.tripSection); return; }
+  const tripToolSection = event.target.closest("[data-trip-tool-section]");
+  if (tripToolSection) {
+    setTripToolSection(tripToolSection.dataset.tripToolSection);
+    if (state.tripToolSection === "expenses") loadTripExpenses({ quiet: true }).catch(error => toast(error.message));
+    return;
+  }
   const assistantPrompt = event.target.closest("[data-assistant-prompt]");
   if (assistantPrompt) {
     const input = document.getElementById("tripAssistantInput");
@@ -3457,6 +5439,18 @@ document.addEventListener("click", async event => {
   if (lifeSection) { navigate("life"); setLifeSection(lifeSection.dataset.lifeSection); return; }
   const mealSection = event.target.closest("[data-meal-section]");
   if (mealSection) { setMealSection(mealSection.dataset.mealSection); return; }
+  const decisionOption = event.target.closest("[data-decision-option]");
+  if (decisionOption) {
+    const decision = (state.data?.decisions || []).find(item => item.id === decisionOption.dataset.decisionId);
+    if (!decision || decision.status !== "open") return;
+    const selected = new Set(decisionChosenIds(decision));
+    if (decision.selection_mode === "single") selected.clear();
+    if (selected.has(decisionOption.dataset.decisionOption)) selected.delete(decisionOption.dataset.decisionOption);
+    else selected.add(decisionOption.dataset.decisionOption);
+    state.decisionSelections.set(decision.id, selected);
+    renderDecisions();
+    return;
+  }
   const assistantExample = event.target.closest("[data-life-assistant-example]");
   if (assistantExample) {
     const input = document.getElementById("lifeAssistantInput");
@@ -3466,6 +5460,7 @@ document.addEventListener("click", async event => {
   }
   const smartAction = event.target.closest("[data-smart-action]");
   if (smartAction) {
+    if (!requireOnlineMutation("shared_confirm", "智能操作预览")) return;
     try { await previewSmartAction(smartAction.dataset.smartAction); } catch (error) { toast(error.message); }
     return;
   }
@@ -3477,7 +5472,10 @@ document.addEventListener("click", async event => {
     // show an apparently empty form.
     const embeddedAction = smartNode.querySelector("[data-smart-action]");
     try {
-      if (embeddedAction) await previewSmartAction(embeddedAction.dataset.smartAction);
+      if (embeddedAction) {
+        if (!requireOnlineMutation("shared_confirm", "智能操作预览")) return;
+        await previewSmartAction(embeddedAction.dataset.smartAction);
+      }
       else await openSmartNode(smartNode.dataset.smartNode);
     } catch (error) { toast(error.message); }
     return;
@@ -3487,6 +5485,261 @@ document.addEventListener("click", async event => {
   const actionEl = event.target.closest("[data-action]");
   if (!actionEl) return;
   const action = actionEl.dataset.action;
+  // This is deliberately the first operation after action dispatch. Complex
+  // writes must not open prompts, mutate UI state, store draft fingerprints or
+  // issue requests while offline.
+  if (!guardOnlineUiAction(action)) return;
+  if (action === "open-cooking") {
+    try { await startCookingFromElement(actionEl); }
+    catch (error) { toast(error.status === 409 ? "菜单已被对方更新，请刷新后再开始" : error.message); }
+    return;
+  }
+  if (action === "close-cooking") { closeCookingScreen(); return; }
+  if (action === "previous-cook-step" || action === "next-cook-step") {
+    if (!requireOnlineMutation("cook_step", "切换烹饪步骤") || !state.cooking.session) return;
+    const delta = action === "next-cook-step" ? 1 : -1;
+    const steps = state.cooking.session.recipe_snapshot?.steps || [];
+    const next = Math.max(0, Math.min(steps.length - 1, state.cooking.session.current_step + delta));
+    if (next === state.cooking.session.current_step) return;
+    try {
+      state.cooking.session = await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/step`, "PATCH", { step_index: next, expected_version: state.cooking.session.version });
+      renderCookingSession();
+    } catch (error) { if (error.status === 409) await refreshCookingSession(); toast(error.message); }
+    return;
+  }
+  if (action === "speak-cook-step") {
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) { toast("当前设备不支持系统朗读"); return; }
+    const step = state.cooking.session?.recipe_snapshot?.steps?.[state.cooking.session.current_step];
+    if (!step) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new window.SpeechSynthesisUtterance(`${step.title || "当前步骤"}。${step.instruction || ""}${step.key_point ? `。完成判断：${step.key_point}` : ""}`);
+      utterance.onerror = () => toast("系统朗读失败，请直接查看当前步骤文字");
+      window.speechSynthesis.speak(utterance);
+    } catch (_) { toast("系统朗读启动失败，请直接查看当前步骤文字"); }
+    return;
+  }
+  if (action === "start-cook-timer") {
+    if (!requireOnlineMutation("cook_timer", "添加计时器") || !state.cooking.session) return;
+    const step = state.cooking.session.recipe_snapshot?.steps?.[state.cooking.session.current_step] || {};
+    const secondsText = window.prompt("计时多少秒？", String(step.timer_seconds || 300));
+    if (!secondsText) return;
+    const duration = Number(secondsText);
+    if (!Number.isInteger(duration) || duration < 1 || duration > 604800) { toast("请输入 1 秒到 7 天之间的整数"); return; }
+    const label = window.prompt("给计时器起个名字", step.title || `第 ${state.cooking.session.current_step + 1} 步`) || "计时器";
+    try {
+      await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/timers`, "POST", { step_index: state.cooking.session.current_step, duration_seconds: duration, label });
+      await refreshCookingSession();
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "cancel-cook-timer") {
+    if (!requireOnlineMutation("cook_timer", "取消计时器") || !state.cooking.session) return;
+    try {
+      await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/timers/${encodeURIComponent(actionEl.dataset.id)}/cancel`, "POST", { expected_version: Number(actionEl.dataset.version) });
+      await refreshCookingSession();
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "complete-cooking") {
+    if (!requireOnlineMutation("cook_complete", "完成烹饪") || !state.cooking.session) return;
+    if (!window.confirm("确认已经完成这次烹饪？接下来只会展示库存变化建议，不会自动扣减。")) return;
+    try {
+      state.cooking.session = await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/complete`, "POST", { expected_version: state.cooking.session.version });
+      renderCookingSession(); await loadMeals({ quiet: true }); toast("已完成，请按实际情况手工核对库存");
+    } catch (error) { if (error.status === 409) await refreshCookingSession(); toast(error.message); }
+    return;
+  }
+  if (action === "cancel-cooking") {
+    if (!state.cooking.session) return;
+    if (state.cooking.session.status !== "active") { closeCookingScreen(); return; }
+    if (!requireOnlineMutation("cook_cancel", "取消本次烹饪") || !window.confirm("取消本次烹饪会话？菜单和历史内容不会被删除。")) return;
+    try {
+      await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/cancel`, "POST", { expected_version: state.cooking.session.version });
+      closeCookingScreen(); await loadMeals({ quiet: true }); toast("本次烹饪已取消，菜单仍保留");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "apply-cook-pantry") {
+    if (!requireOnlineMutation("pantry_update", "人工更新库存") || !state.cooking.session) return;
+    const updates = [...document.querySelectorAll("[data-cook-pantry-ref]")].flatMap(select => select.value ? [{ ingredient_ref: select.dataset.cookPantryRef, state: select.value, expected_pantry_version: Number(select.dataset.version) }] : []);
+    if (!updates.length) { toast("请至少选择一项确实变少或用完的食材"); return; }
+    if (!window.confirm(`确认只更新选中的 ${updates.length} 项库存？未选择的食材不会改变。`)) return;
+    try {
+      const result = await cookingRequest(`/api/v1/cook-sessions/${encodeURIComponent(state.cooking.session.id)}/pantry`, "POST", { expected_version: state.cooking.session.version, updates });
+      state.cooking.session.version = result.version;
+      state.cooking.pantryReceipts = (result.items || []).filter(item => item.undo?.receipt_id);
+      await refreshCookingSession(); await loadMeals({ quiet: true });
+      renderCookingReceipts();
+      toast("选中的库存状态已更新；每一项都可在下方单独撤销");
+    } catch (error) { if (error.status === 409) await refreshCookingSession(); toast(error.message); }
+    return;
+  }
+  if (action === "undo-cook-pantry") {
+    try {
+      actionEl.disabled = true;
+      await api(`/api/v1/mutations/${encodeURIComponent(actionEl.dataset.receiptId)}/undo`, { method: "POST", body: "{}" });
+      state.cooking.pantryReceipts = state.cooking.pantryReceipts.filter(item => item.undo?.receipt_id !== actionEl.dataset.receiptId);
+      await refreshCookingSession(); await loadMeals({ quiet: true }); toast("这一项库存状态已撤销");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "generate-packing") {
+    if (!requireOnlineMutation("trip_tools", "生成行李建议")) return;
+    actionEl.disabled = true;
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/packing/generate`, { method: "POST", headers: { "Idempotency-Key": clientKey("packing-generate") }, body: JSON.stringify({ expected_trip_version: state.tripTools.tripVersion || state.data.trip.version }) });
+      state.tripTools.packing = result.items || []; state.tripTools.evidence = result.evidence; renderTripTools();
+      state.tripTools.offlineSnapshot = await refreshTripOfflineSnapshot(state.data.trip.id).catch(() => null);
+      toast(result.evidence?.label || "行李建议已生成");
+    } catch (error) { toast(error.status === 409 ? "旅行已经变化，请刷新后重试" : error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "delete-packing") {
+    if (!requireOnlineMutation("trip_tools", "删除行李")) return;
+    try {
+      await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/packing/${encodeURIComponent(actionEl.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
+      await loadTripTools({ quiet: true }); toast("行李项目已删除");
+    } catch (error) { toast(error.status === 409 ? "行李已被另一方修改，请刷新" : error.message); }
+    return;
+  }
+  if (action === "delete-emergency") {
+    if (!requireOnlineMutation("trip_tools", "删除应急卡")) return;
+    if (!window.confirm("确定删除这张应急卡吗？")) return;
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/emergency/${encodeURIComponent(actionEl.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
+      if (result.permission_version !== state.data?.permission_version) await loadBootstrap({ quiet: true });
+      else await loadTripTools({ quiet: true });
+      toast("应急卡已删除");
+    } catch (error) { toast(error.status === 409 ? "应急卡已发生变化，请刷新" : error.message); }
+    return;
+  }
+  if (action === "edit-emergency") {
+    const item = state.tripTools.emergency.find(value => value.id === actionEl.dataset.id);
+    if (item) beginEmergencyEdit(item);
+    return;
+  }
+  if (action === "cancel-emergency-edit") {
+    resetEmergencyForm();
+    return;
+  }
+  if (action === "cancel-expense-edit") {
+    resetExpenseForm();
+    return;
+  }
+  if (action === "edit-expense") {
+    const item = state.tripExpenses.data?.items?.find(value => value.id === actionEl.dataset.id);
+    if (item) beginExpenseEdit(item);
+    return;
+  }
+  if (action === "delete-expense") {
+    if (!requireOnlineMutation("trip_expenses", "删除旅行花费")) return;
+    if (!window.confirm("确定删除这笔旅行花费吗？删除后仍可恢复。")) return;
+    actionEl.disabled = true;
+    try {
+      const deleted = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/expenses/${encodeURIComponent(actionEl.dataset.id)}`, { method: "DELETE", headers: { "Idempotency-Key": clientKey("expense-delete") }, body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
+      state.tripExpenses.selected.delete(actionEl.dataset.id); await loadTripExpenses({ quiet: true }); toast("旅行花费已移到最近删除", { label: "撤销", action: "restore-expense", data: { id: deleted.id, version: deleted.version } });
+    } catch (error) { toast(error.status === 409 ? "这笔花费已被另一方修改，列表已刷新" : error.message); await loadTripExpenses({ quiet: true }).catch(() => {}); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "restore-expense") {
+    if (!requireOnlineMutation("trip_expenses", "恢复旅行花费")) return;
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/expenses/${encodeURIComponent(actionEl.dataset.id)}/restore`, { method: "POST", headers: { "Idempotency-Key": clientKey("expense-restore") }, body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
+      await loadTripExpenses({ quiet: true }); toast("旅行花费已恢复");
+    } catch (error) { toast(error.status === 409 ? "删除状态已变化，列表已刷新" : error.message); await loadTripExpenses({ quiet: true }).catch(() => {}); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "settle-expenses") {
+    if (!requireOnlineMutation("trip_expenses", "线下结清")) return;
+    const selected = (state.tripExpenses.data?.items || []).filter(item => !item.settled_at && state.tripExpenses.selected.has(item.id));
+    if (!selected.length) { toast("请先勾选待结清花费"); return; }
+    if (!window.confirm(`确认将 ${selected.length} 笔记录标记为“线下结清”吗？恋屿不会发起付款。`)) return;
+    actionEl.disabled = true;
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/expenses/settle`, { method: "POST", headers: { "Idempotency-Key": clientKey("expense-settle") }, body: JSON.stringify({ expenses: selected.map(item => ({ id: item.id, expected_version: item.version })) }) });
+      state.tripExpenses.selected.clear(); await loadTripExpenses({ quiet: true }); toast(result.notice || "已记录为线下结清");
+    } catch (error) { toast(error.status === 409 ? "待结清清单已变化，列表已刷新" : error.message); await loadTripExpenses({ quiet: true }).catch(() => {}); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "search-hospitals") {
+    if (!requireOnlineMutation("trip_tools", "查询医院")) return;
+    actionEl.disabled = true;
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/hospitals/search`, { method: "POST", body: JSON.stringify({ query: "医院 急救" }) });
+      state.tripTools.hospitals = result.items || []; renderTripTools(); toast(result.items?.length ? "请选择一所经过地图核验的医院" : result.notice || "附近没有查到可核验医院");
+    } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "save-hospital") {
+    if (!requireOnlineMutation("trip_tools", "保存医院")) return;
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/emergency`, { method: "POST", headers: { "Idempotency-Key": clientKey("hospital") }, body: JSON.stringify({ entry_type: "hospital", candidate_id: actionEl.dataset.candidateId, visibility: "shared", expected_trip_version: state.tripTools.tripVersion || state.data.trip.version }) });
+      state.tripTools.hospitals = [];
+      if (result.permission_version !== state.data?.permission_version) await loadBootstrap({ quiet: true });
+      else await loadTripTools({ quiet: true });
+      toast("真实医院已保存为双方可见应急卡");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "clear-memory-search") { clearMemorySearch(); return; }
+  if (action === "clear-memory-filter") {
+    try { await clearMemoryFilter(actionEl.dataset.filter); } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "load-more-memories") {
+    try { await searchMemories({ append: true, cursor: actionEl.dataset.cursor || "" }); } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "open-memory-result") {
+    const resourceType = actionEl.dataset.resourceType;
+    const resourceId = actionEl.dataset.id;
+    if (actionEl.dataset.private === "1") {
+      try { await describeMemory(resourceType, resourceId); } catch (error) { toast(error.message); }
+    } else {
+      try { await openSharedDetail(resourceType, resourceId); } catch (error) { toast(error.message); }
+    }
+    return;
+  }
+  if (action === "describe-memory") {
+    try { await describeMemory(actionEl.dataset.resourceType, actionEl.dataset.id); } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "manage-memory-descriptions") {
+    try { await manageMemoryDescriptions(actionEl.dataset.resourceType, actionEl.dataset.id); }
+    catch (error) { toast(error.status === 409 ? "内容已经变化，请刷新后再合并" : error.message); }
+    return;
+  }
+  if (action === "refresh-memory-completion") {
+    actionEl.disabled = true;
+    try { await loadMemoryCompletion({ refresh: true }); toast("已按当前可见内容重新检查"); } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (["complete-memory-suggestion", "snooze-memory-suggestion", "dismiss-memory-suggestion"].includes(action)) {
+    const item = state.memoryCompletion.find(value => value.id === actionEl.dataset.id);
+    if (!item) { toast("提醒已经更新，请重新检查"); return; }
+    actionEl.disabled = true;
+    try {
+      if (action === "complete-memory-suggestion") await completeMemorySuggestion(item);
+      else {
+        const payload = action === "snooze-memory-suggestion"
+          ? { action: "snooze", expected_version: Number(item.version), remind_at: new Date(Date.now() + 7 * 86400000).toISOString(), idempotency_key: clientKey("memory-snooze") }
+          : { action: "dismiss", expected_version: Number(item.version), idempotency_key: clientKey("memory-dismiss") };
+        await api(`/api/v1/memories/completion/${encodeURIComponent(item.id)}/respond`, { method: "POST", body: JSON.stringify(payload) });
+        await loadMemoryCompletion();
+        toast(action === "snooze-memory-suggestion" ? "会在 7 天后再次提醒" : "已忽略这条提醒");
+      }
+    } catch (error) { toast(error.status === 409 ? "内容已经变化，请重新检查" : error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
   if (action === "copy-hotel-booking") {
     const copyText = String(actionEl.dataset.copyText || "").trim();
     if (copyText && navigator.clipboard?.writeText) {
@@ -3509,6 +5762,7 @@ document.addEventListener("click", async event => {
     return;
   }
   if (action === "assistant-replan-today") {
+    if (!requireOnlineMutation("trip_replan", "智能重排行程")) return;
     if (!liveContextIsFresh(state.tripLive.context)) { toast("当前位置已过期，请先点击“更新当前位置”"); return; }
     const input = document.getElementById("tripAssistantInput");
     input.value = "今天晚了 0 分钟，重新安排后面的内容";
@@ -3639,7 +5893,7 @@ document.addEventListener("click", async event => {
   }
   if (action === "assistant-open-plan") {
     state.plan = actionEl.dataset.style || "slow";
-    localStorage.setItem("love-plan", state.plan);
+    privateStorage().setItem("love-plan", state.plan);
     renderPlan(); setTripSection("plans");
     return;
   }
@@ -3667,6 +5921,7 @@ document.addEventListener("click", async event => {
     return;
   }
   if (action === "assistant-confirm-change") {
+    if (!requireOnlineMutation("shared_confirm", "确认行程修改")) return;
     actionEl.disabled = true;
     try {
       await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/assistant/actions/${encodeURIComponent(actionEl.dataset.draftId)}/confirm`, { method: "POST", body: JSON.stringify({ idempotency_key: `assistant-confirm-${crypto.randomUUID?.() || Date.now()}` }) });
@@ -3685,6 +5940,21 @@ document.addEventListener("click", async event => {
   }
   if (action === "open-shared-detail") {
     await openSharedDetail(actionEl.dataset.resourceType, actionEl.dataset.id);
+    return;
+  }
+  if (action === "save-voice-transcript-correction") {
+    if (!requireOnlineMutation("moment_save", "校正语音文字")) return;
+    const body = document.getElementById("voiceTranscriptCorrection")?.value ?? "";
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/voice-transcripts/${encodeURIComponent(actionEl.dataset.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body, language: "zh-CN", expected_version: Number(actionEl.dataset.version) }),
+      });
+      await openSharedDetail(state.sharedDetail.resource_type, state.sharedDetail.resource_id, { refresh: true });
+      toast("语音文字已按你的校正保存，并标记为本人填写");
+    } catch (error) { toast(error.status === 409 ? "文字已在另一端修改，请刷新后重试" : error.message); }
+    finally { actionEl.disabled = false; }
     return;
   }
   if (action === "open-trip-detail") {
@@ -3801,10 +6071,10 @@ document.addEventListener("click", async event => {
     return;
   }
   if (action === "wish-recipe") {
-    closeModals(); document.getElementById("mealWishForm").reset(); document.getElementById("mealWishRecipeId").value = actionEl.dataset.id; document.getElementById("mealWishName").value = actionEl.dataset.name; openModal("mealWishModal"); return;
+    closeModals(); document.getElementById("mealWishForm").reset(); document.getElementById("mealWishPrefillNotice").hidden = true; document.getElementById("mealWishRecipeId").value = actionEl.dataset.id; document.getElementById("mealWishName").value = actionEl.dataset.name; openModal("mealWishModal"); return;
   }
   if (action === "new-meal-wish") {
-    document.getElementById("mealWishForm").reset(); document.getElementById("mealWishRecipeId").value = ""; openModal("mealWishModal"); return;
+    document.getElementById("mealWishForm").reset(); document.getElementById("mealWishPrefillNotice").hidden = true; document.getElementById("mealWishRecipeId").value = ""; openModal("mealWishModal"); return;
   }
   if (action === "new-custom-recipe") {
     const form = document.getElementById("customRecipeForm"); form.reset(); delete form.dataset.recipeId; delete form.dataset.version;
@@ -3915,9 +6185,42 @@ document.addEventListener("click", async event => {
     else renderMealCalendar();
     return;
   }
+  if (action === "create-weekly-meal-plan") {
+    if (!requireOnlineMutation("weekly_meal_plan", "生成一周菜单")) return;
+    const start = new Date();
+    const end = new Date(start); end.setDate(end.getDate() + 6);
+    try {
+      const weeklyPlan = await api("/api/v1/weekly-meal-plans/drafts", { method: "POST", body: JSON.stringify({
+        schema_version: 1, starts_on: localDateValue(start), ends_on: localDateValue(end), servings: 2,
+        availability_mode: "either_partner",
+        meal_slots: [
+          { meal_slot: "breakfast", planned_time: "08:00", max_active_minutes: 30 },
+          { meal_slot: "dinner", planned_time: "19:00", max_active_minutes: 60 }
+        ],
+        idempotency_key: clientKey("weekly-plan")
+      }) });
+      // A background refresh may have started before this write and still be
+      // carrying the old "no active draft" response. Invalidate that response
+      // before publishing the authoritative mutation result.
+      state.mealLoadSequence += 1;
+      state.meals.weeklyPlan = weeklyPlan;
+      renderWeeklyMealPlan(); toast("已生成一周菜单，请两个人分别确认");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "confirm-weekly-meal-plan" || action === "cancel-weekly-meal-plan") {
+    if (!requireOnlineMutation("weekly_meal_plan", action === "confirm-weekly-meal-plan" ? "确认周菜单" : "取消周菜单")) return;
+    const verb = action === "confirm-weekly-meal-plan" ? "confirm" : "cancel";
+    try {
+      state.meals.weeklyPlan = await api(`/api/v1/weekly-meal-plans/drafts/${encodeURIComponent(actionEl.dataset.id)}/${verb}`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version), idempotency_key: clientKey(`weekly-${verb}`) }) });
+      await loadMeals({ quiet: true });
+      toast(verb === "confirm" ? (state.meals.weeklyPlan.status === "applied" ? "双方已确认，菜单和采购清单已生效" : "已确认，等待对方") : "周菜单已取消");
+    } catch (error) { toast(error.message); }
+    return;
+  }
   if (action === "meal-calendar-view") {
     state.mealCalendarView = actionEl.dataset.view === "month" ? "month" : "week";
-    localStorage.setItem("love-meal-calendar-view", state.mealCalendarView);
+    privateStorage().setItem("love-meal-calendar-view", state.mealCalendarView);
     state.mealMonth = new Date(`${state.mealSelectedDate}T00:00:00`);
     await loadMeals({ quiet: true }); return;
   }
@@ -3932,6 +6235,80 @@ document.addEventListener("click", async event => {
     else selected.setMonth(selected.getMonth() + direction, 1);
     state.mealSelectedDate = localDateValue(selected); state.mealMonth = new Date(selected);
     await loadMeals({ quiet: true }); return;
+  }
+  if (action === "open-ingredient-substitutions") {
+    const item = mealItemById(actionEl.dataset.id);
+    if (!item) { toast("这条用餐安排已经变化，请刷新后再试"); return; }
+    state.meals.substitutionMealId = item.id;
+    state.meals.substitutionPreview = null;
+    document.getElementById("ingredientSubstitutionTitle").textContent = `${item.name} · 食材替代`;
+    renderIngredientSubstitutionPicker(item);
+    openModal("ingredientSubstitutionModal");
+    return;
+  }
+  if (action === "preview-ingredient-substitutions") {
+    if (!requireOnlineMutation("ingredient_substitution", "核对食材替代")) return;
+    const meal = mealItemById(state.meals.substitutionMealId);
+    if (!meal) { toast("这条用餐安排已经变化，请刷新后再试"); return; }
+    const host = document.getElementById("ingredientSubstitutionContent");
+    host.innerHTML = `<div class="loading-state">正在按当前配料表和双方饮食资料核对…</div>`;
+    try {
+      const preview = await api(`/api/v1/meal-cart/items/${encodeURIComponent(meal.id)}/ingredient-substitutions/preview`, {
+        method: "POST",
+        body: JSON.stringify({
+          snapshot_ingredient_ref: actionEl.dataset.ref,
+          expected_meal_version: Number(meal.version),
+          expected_shopping_list_version: Number(state.meals.shopping?.version || 0),
+          idempotency_key: clientKey("ingredient-substitution-preview"),
+        }),
+      });
+      state.meals.substitutionPreview = preview;
+      renderIngredientSubstitutionPreview(preview);
+    } catch (error) {
+      renderIngredientSubstitutionPicker(meal);
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "apply-ingredient-substitution") {
+    if (!requireOnlineMutation("ingredient_substitution", "应用食材替代")) return;
+    const preview = state.meals.substitutionPreview;
+    const suggestion = preview?.items?.find(item => item.id === actionEl.dataset.id);
+    if (!preview || !suggestion || !suggestion.can_apply || !suggestion.shopping_preview) { toast("这条建议已过期或需要人工核对，请重新预览"); return; }
+    const candidateDiff = suggestion.shopping_preview.diff || {};
+    if (!window.confirm(`把“${suggestion.from_ingredient.name}”替换为“${suggestion.to_ingredient.name}”？\n\n这条建议专属的采购变化：新增 ${Number(candidateDiff.add || 0)}、更新 ${Number(candidateDiff.update || 0)}、移除 ${Number(candidateDiff.remove || 0)}。`)) return;
+    try {
+      await api(`/api/v1/meal-cart/items/${encodeURIComponent(preview.meal_item_id)}/ingredient-substitutions/${encodeURIComponent(suggestion.id)}/apply`, {
+        method: "POST",
+        body: JSON.stringify({
+          expected_meal_version: Number(preview.meal_version),
+          expected_shopping_list_version: Number(suggestion.shopping_preview.expected_list_version || 0),
+          expected_version: Number(suggestion.version),
+          idempotency_key: clientKey("ingredient-substitution-apply"),
+        }),
+      });
+      state.meals.substitutionPreview = null;
+      closeModals();
+      await loadMeals({ quiet: true });
+      toast("已替换这顿饭的具体食材，并更新采购差异");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "dismiss-ingredient-substitution") {
+    if (!requireOnlineMutation("ingredient_substitution", "忽略食材替代建议")) return;
+    const preview = state.meals.substitutionPreview;
+    const suggestion = preview?.items?.find(item => item.id === actionEl.dataset.id);
+    if (!preview || !suggestion) { toast("这条建议已经变化，请重新预览"); return; }
+    try {
+      await api(`/api/v1/meal-cart/items/${encodeURIComponent(preview.meal_item_id)}/ingredient-substitutions/${encodeURIComponent(suggestion.id)}/dismiss`, {
+        method: "POST",
+        body: JSON.stringify({ expected_version: Number(suggestion.version), idempotency_key: clientKey("ingredient-substitution-dismiss") }),
+      });
+      preview.items = preview.items.filter(item => item.id !== suggestion.id);
+      renderIngredientSubstitutionPreview(preview);
+      toast("已忽略这条建议，没有修改菜单或采购清单");
+    } catch (error) { toast(error.message); }
+    return;
   }
   if (action === "edit-meal") {
     const item = state.meals.cart?.items?.find(value => value.id === actionEl.dataset.id);
@@ -3964,6 +6341,7 @@ document.addEventListener("click", async event => {
     document.getElementById("shoppingRangeStart").value = start; document.getElementById("shoppingRangeEnd").value = localDateValue(end); document.getElementById("shoppingPreviewContent").innerHTML = ""; document.getElementById("applyShoppingPreview").hidden = true; openModal("shoppingPreviewModal"); return;
   }
   if (action === "build-shopping-preview") {
+    if (!requireOnlineMutation("shopping_preview", "生成采购预览")) return;
     try {
       const result = await api("/api/v1/shopping-lists/preview", { method: "POST", body: JSON.stringify({ range_start: document.getElementById("shoppingRangeStart").value, range_end: document.getElementById("shoppingRangeEnd").value, expected_version: state.meals.shopping?.version || 0 }) });
       state.meals.shoppingPreview = result; const preview = result.preview;
@@ -3972,6 +6350,7 @@ document.addEventListener("click", async event => {
     } catch (error) { toast(error.message); } return;
   }
   if (action === "apply-shopping-preview") {
+    if (!requireOnlineMutation("shared_confirm", "确认采购清单")) return;
     if (!state.meals.shoppingPreview) return;
     try { await api("/api/v1/shopping-lists/apply", { method: "POST", body: JSON.stringify({ preview_id: state.meals.shoppingPreview.preview_id, idempotency_key: clientKey("shopping") }) }); state.meals.shoppingPreview = null; closeModals(); setMealSection("shopping", { load: false }); await loadMeals({ quiet: true }); toast("采购清单已生成，双方可同步勾选"); } catch (error) { toast(error.message); } return;
   }
@@ -3989,7 +6368,7 @@ document.addEventListener("click", async event => {
     document.getElementById("shoppingItemName").value = item.display_name;
     document.getElementById("shoppingItemQuantity").value = String(values.quantity);
     document.getElementById("shoppingItemUnit").value = values.unit;
-    document.getElementById("shoppingItemCategory").value = item.category || "其他";
+    document.getElementById("shoppingItemCategory").value = item.category_key || "other";
     form.querySelector(".primary-button").textContent = "保存修改";
     openModal("shoppingItemModal"); return;
   }
@@ -3997,16 +6376,55 @@ document.addEventListener("click", async event => {
     if (!window.confirm("删除这项食材？")) return;
     try { await api(`/api/v1/shopping-lists/items/${encodeURIComponent(actionEl.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) }); await loadMeals({ quiet: true }); toast("食材已删除"); } catch (error) { toast(error.message); } return;
   }
+  if (action === "stock-shopping-item") {
+    if (!requireOnlineMutation("shopping_stock", "采购食材入库")) return;
+    const confirmFood = actionEl.dataset.category === "other";
+    if (confirmFood && !window.confirm("这项属于“其他”。请确认它确实是可以食用的食材，再放入库存。")) return;
+    try {
+      await api(`/api/v1/shopping-lists/items/${encodeURIComponent(actionEl.dataset.id)}/stock`, {
+        method: "POST",
+        body: JSON.stringify({ expected_version: Number(actionEl.dataset.version), confirm_food: confirmFood, idempotency_key: clientKey("shopping-stock") }),
+      });
+      await loadMeals({ quiet: true }); toast("已记为家里有，不会保存采购数量账本");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "set-pantry-state") {
+    if (!requireOnlineMutation("pantry_update", "更新库存状态")) return;
+    try {
+      await api(`/api/v1/pantry/items/${encodeURIComponent(actionEl.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ state: actionEl.dataset.state, expected_version: Number(actionEl.dataset.version), idempotency_key: clientKey("pantry-state") }) });
+      await loadMeals({ quiet: true }); toast("库存状态已同步给两个人");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "move-shopping-category") {
+    if (!requireOnlineMutation("shopping_category_order", "调整采购分类顺序")) return;
+    const categories = [...(state.meals.categoryOrder?.categories || [])];
+    const from = Number(actionEl.dataset.index); const to = from + Number(actionEl.dataset.direction);
+    if (!categories[from] || !categories[to]) return;
+    [categories[from], categories[to]] = [categories[to], categories[from]];
+    try {
+      await api("/api/v1/shopping-category-order", { method: "PUT", body: JSON.stringify({ categories: categories.map(item => item.key), expected_versions: Object.fromEntries(categories.map(item => [item.key, item.version])), idempotency_key: clientKey("shopping-category-order") }) });
+      await loadMeals({ quiet: true }); toast("采购分类顺序已同步");
+    } catch (error) { toast(error.message); }
+    return;
+  }
   if (action === "complete-shopping") {
+    if (!requireOnlineMutation("shopping_complete", "完成采购")) return;
     const pending = state.meals.shopping?.items?.filter(item => !item.checked).length || 0;
     if (pending && !window.confirm(`还有 ${pending} 项未勾选，仍要完成本次采购吗？`)) return;
-    try { await api("/api/v1/shopping-lists/complete", { method: "POST", body: JSON.stringify({ expected_version: state.meals.shopping.version, allow_incomplete: pending > 0 }) }); await loadMeals({ quiet: true }); toast("本次采购已经完成并归档"); } catch (error) { toast(error.message); } return;
+    const eligible = (state.meals.shopping?.items || []).filter(item => item.checked && !["household", "other"].includes(item.category_key));
+    const shouldStock = eligible.length > 0 && window.confirm(`要同时把 ${eligible.length} 项已购买食品记为“家里有”吗？日用品和未确认的“其他”不会入库。`);
+    const stock_checked_item_ids = shouldStock ? eligible.map(item => item.id) : [];
+    const stock_item_versions = shouldStock ? Object.fromEntries(eligible.map(item => [item.id, item.version])) : {};
+    try { await api("/api/v1/shopping-lists/complete", { method: "POST", body: JSON.stringify({ expected_version: state.meals.shopping.version, allow_incomplete: pending > 0, stock_checked_item_ids, stock_item_versions, confirm_food_item_ids: [], idempotency_key: clientKey("shopping-complete") }) }); await loadMeals({ quiet: true }); toast(shouldStock ? "采购已归档，已购买食品也已放入库存" : "本次采购已经完成并归档"); } catch (error) { toast(error.message); } return;
   }
   if (action === "open-on-this-day") { navigate("timeline"); document.querySelectorAll('[data-screen="timeline"] [data-view]').forEach(button => button.classList.remove("active")); renderOnThisDay(); scrollToContent("#timelineView"); }
   if (action === "open-anniversaries") { navigate("life"); setLifeSection("anniversary"); }
   if (action === "open-wishlist") { navigate("life"); setLifeSection("wishlist"); }
   if (action === "open-wishlist-editor") {
     const form = document.getElementById("wishlistForm"); form.reset(); delete form.dataset.itemId; delete form.dataset.version;
+    document.getElementById("wishlistKind").disabled = false;
     document.getElementById("wishlistModalTitle").textContent = "添加共同愿望"; openModal("wishlistModal");
   }
   if (action === "edit-wish") {
@@ -4014,8 +6432,48 @@ document.addEventListener("click", async event => {
     if (item) {
       const form = document.getElementById("wishlistForm"); form.dataset.itemId = item.id; form.dataset.version = item.version;
       document.getElementById("wishlistModalTitle").textContent = "编辑共同愿望";
-      document.getElementById("wishlistText").value = item.text; document.getElementById("wishlistNote").value = item.note || ""; openModal("wishlistModal");
+      document.getElementById("wishlistText").value = item.text; document.getElementById("wishlistNote").value = item.note || "";
+      document.getElementById("wishlistKind").value = item.item_kind || "general"; document.getElementById("wishlistKind").disabled = true; openModal("wishlistModal");
     }
+  }
+  if (action === "claim-wish") {
+    const privateNote = window.prompt("只对你可见的准备备注（可留空）", "");
+    if (privateNote === null) return;
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/lists/items/${encodeURIComponent(actionEl.dataset.id)}/claim`, {
+        method: "POST", headers: { "Idempotency-Key": clientKey("wishlist-claim") },
+        body: JSON.stringify({ expected_version: Number(actionEl.dataset.version), private_note: privateNote, reveal_claimant: false }),
+      });
+      await loadBootstrap({ quiet: true });
+      toast("已私密认领。对方的页面、通知和导出不会显示认领信息");
+    } catch (error) { toast(error.status === 409 ? "这份礼物已被认领或发生变化，请刷新" : error.message); }
+    finally { actionEl.disabled = false; }
+  }
+  if (action === "release-wish-claim") {
+    if (!window.confirm("取消这次私密认领？对方不会收到认领或取消提示。")) return;
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/lists/items/${encodeURIComponent(actionEl.dataset.id)}/claim/release`, {
+        method: "POST", headers: { "Idempotency-Key": clientKey("wishlist-release") },
+        body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }),
+      });
+      await loadBootstrap({ quiet: true }); toast("已取消私密认领");
+    } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+  }
+  if (action === "complete-wish-claim") {
+    const reveal = window.confirm("礼物准备好了。点击“确定”公开是你完成的；点击“取消”则匿名完成。");
+    const createMoment = reveal && window.confirm("要同时创建一条双方可见的共同瞬间吗？");
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/lists/items/${encodeURIComponent(actionEl.dataset.id)}/claim/complete`, {
+        method: "POST", headers: { "Idempotency-Key": clientKey("wishlist-complete") },
+        body: JSON.stringify({ expected_version: Number(actionEl.dataset.version), reveal_claimant: reveal, create_moment: createMoment }),
+      });
+      await loadBootstrap({ quiet: true }); toast(reveal ? "礼物心愿已完成并公开认领人" : "礼物心愿已匿名完成");
+    } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
   }
   if (action === "delete-wish" && window.confirm("删除这个共同愿望？")) {
     const returnToWishlist = state.screen === "life" && state.lifeSection === "wishlist";
@@ -4035,11 +6493,34 @@ document.addEventListener("click", async event => {
       toast(actionEl.dataset.reaction === "none" ? "已取消回应" : "回应已同步给对方");
     } catch (error) { toast(error.message); }
   }
-  if (action === "send-heart") { actionEl.textContent = "♥"; try { await sendMessage("想你了 ♡"); toast("一颗小心心已送达"); } catch (error) { toast(error.message); } }
+  if (action === "send-heart") {
+    await sendHeart(actionEl);
+  }
   if (action === "edit-status") openModal("statusModal");
   if (action === "edit-location") { closeModals(); openModal("locationModal"); }
   if (action === "clear-status") {
     try { await api("/api/v1/me/status/clear", { method: "POST", body: "{}" }); closeModals(); await loadBootstrap({ quiet: true }); toast("状态已清除"); } catch (error) { toast(error.message); }
+  }
+  if (action === "expression-help") {
+    const messageId = actionEl.dataset.messageId || "";
+    const selected = messageId ? state.data?.messages?.find(item => item.id === messageId && item.mine && item.type === "text") : null;
+    const source = selected?.content || document.getElementById("chatInput").value.trim();
+    if (!source) { toast("请先在输入框写一句话，或选择自己发出的一条文字消息"); return; }
+    const form = document.getElementById("expressionForm");
+    form.dataset.messageId = selected?.id || "";
+    form.dataset.ownerUserId = state.data?.user?.id || "";
+    document.getElementById("expressionSource").value = source;
+    document.getElementById("expressionSource").readOnly = Boolean(selected);
+    document.getElementById("expressionPreview").hidden = true;
+    document.getElementById("expressionResult").value = "";
+    openModal("expressionModal");
+  }
+  if (action === "apply-expression") {
+    const value = document.getElementById("expressionResult").value.trim();
+    if (!value) return;
+    document.getElementById("chatInput").value = value;
+    closeModals(); document.getElementById("chatInput").focus();
+    toast("建议已放回输入框，请确认后再发送");
   }
   if (action === "open-weekly") { renderWeeklyReview(); openModal("weeklyModal"); }
   if (action === "confirm-weekly") {
@@ -4047,7 +6528,106 @@ document.addEventListener("click", async event => {
   }
   if (action === "new-date") {
     navigate("life"); setLifeSection("dates", { scroll: false });
-    const tomorrow = new Date(Date.now() + 86400000); document.getElementById("dateDay").value = tomorrow.toISOString().slice(0, 10); openModal("dateModal");
+    const tomorrow = new Date(Date.now() + 86400000); document.getElementById("dateDay").value = tomorrow.toISOString().slice(0, 10); document.getElementById("datePrefillNotice").hidden = true; clearDatePlaceSelection(); openModal("dateModal");
+  }
+  if (action === "new-decision") {
+    const form = document.getElementById("decisionForm"); form.reset();
+    const deadline = new Date(Date.now() + 24 * 3600000);
+    deadline.setMinutes(deadline.getMinutes() - deadline.getTimezoneOffset());
+    document.getElementById("decisionDeadline").value = deadline.toISOString().slice(0, 16);
+    openModal("decisionModal");
+  }
+  if (action === "submit-decision-vote") {
+    const decision = (state.data?.decisions || []).find(item => item.id === actionEl.dataset.id);
+    const selected = decision && [...decisionChosenIds(decision)];
+    if (!decision || !selected?.length) { toast("请先选择至少一个选项"); return; }
+    actionEl.disabled = true;
+    try {
+      const updated = await api(`/api/v1/decisions/${encodeURIComponent(decision.id)}/vote`, { method: "PUT", body: JSON.stringify({ option_ids: selected, expected_version: decision.version, idempotency_key: `web:decision:${crypto.randomUUID?.() || Date.now()}` }) });
+      state.data.decisions = (state.data.decisions || []).map(item => item.id === updated.id ? updated : item);
+      state.decisionSelections.delete(updated.id); renderDecisions();
+      toast(updated.status === "revealed" ? "双方选择已经揭晓" : "已秘密提交，等待 TA 完成");
+    } catch (error) { toast(error.status === 409 ? "决策已经变化，请刷新后重新选择" : error.message); }
+    return;
+  }
+  if (action === "resolve-decision") {
+    actionEl.disabled = true;
+    try {
+      const updated = await api(`/api/v1/decisions/${encodeURIComponent(actionEl.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: "confirm", option_id: actionEl.dataset.optionId, expected_version: Number(actionEl.dataset.version) }) });
+      state.data.decisions = (state.data.decisions || []).map(item => item.id === updated.id ? updated : item); renderDecisions();
+      toast(updated.status === "confirmed" ? "双方已经确认这个结果" : "你已确认，等待 TA");
+    } catch (error) { toast(error.status === 409 ? "确认结果已经变化，请刷新后重试" : error.message); }
+    return;
+  }
+  if (action === "convert-decision") {
+    actionEl.disabled = true;
+    try {
+      const preview = await api(`/api/v1/decisions/${encodeURIComponent(actionEl.dataset.id)}/conversion-preview`, { method: "POST", body: JSON.stringify({ target: actionEl.dataset.target, option_id: actionEl.dataset.optionId || null }) });
+      if (preview.target === "meal_wish") {
+        const form = document.getElementById("mealWishForm"); form.reset();
+        document.getElementById("mealWishRecipeId").value = "";
+        document.getElementById("mealWishName").value = preview.values.title || "";
+        document.getElementById("mealWishNote").value = preview.values.note || "";
+        document.getElementById("mealWishPrefillNotice").hidden = false;
+        openModal("mealWishModal");
+      } else if (preview.target === "date_plan") {
+        document.getElementById("dateForm").reset(); clearDatePlaceSelection();
+        document.getElementById("dateTitle").value = preview.values.title || "我们的下一次约会";
+        const matching = [...document.getElementById("datePreference").options].find(option => option.value === preview.values.preference);
+        document.getElementById("datePreference").value = matching?.value || "不限";
+        document.getElementById("dateDay").value = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+        document.getElementById("datePrefillNotice").hidden = false;
+        openModal("dateModal");
+        toast(preview.notice);
+      } else if (preview.target === "trip") {
+        openTripComposer(preview.values.destination_query || "");
+        const notice = document.getElementById("tripPrefillNotice");
+        notice.hidden = false; notice.textContent = `${preview.notice}；请从地图候选中明确选择地点，补全日期和预算后再生成。`;
+      } else if (preview.target === "hotel_search") {
+        navigate("trip"); setTripSection("tools", { scroll: false });
+        document.getElementById("hotelDestination").value = preview.values.search_term || "";
+        const notice = document.getElementById("hotelSearchPrefillNotice");
+        notice.hidden = false; notice.textContent = `${preview.notice}；这里只填写查询词，不会把酒店或价格当成已确认信息。`;
+        scrollToContent('[data-trip-panel="tools"] .quote-search-card[aria-label="酒店查询"]');
+      } else if (preview.target === "restaurant_search") {
+        navigate("trip"); setTripSection("assistant", { scroll: false });
+        const input = document.getElementById("tripAssistantInput");
+        input.value = `查找附近的${preview.values.search_term || "餐厅"}`;
+        input.focus();
+        const scope = document.getElementById("tripAssistantScope");
+        scope.textContent = `${preview.notice}；尚未查询或保存，请确认当前旅行后发送。`;
+        scrollToContent('[data-trip-panel="assistant"]');
+      } else if (preview.target === "calendar_todo") {
+        openCalendarComposer("todo"); document.getElementById("calendarTitle").value = preview.values.title || "";
+        document.getElementById("calendarPrefillNotice").hidden = false;
+        toast(preview.notice);
+      }
+    } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "search-date-place") {
+    const query = document.getElementById("dateCity").value.trim();
+    if (query.length < 2) { toast("请至少输入两个字的地点关键词"); return; }
+    clearDatePlaceSelection();
+    const sequence = ++state.datePlaceSearchSequence;
+    actionEl.disabled = true;
+    try {
+      const result = await api("/api/v1/places/search", { method: "POST", body: JSON.stringify({ query, region_hint: document.getElementById("dateRegion").value.trim(), include_global: true }) });
+      if (sequence !== state.datePlaceSearchSequence) return;
+      renderDatePlaceCandidates(result.items || []);
+    } catch (error) { toast(error.message); }
+    finally { if (sequence === state.datePlaceSearchSequence) actionEl.disabled = false; }
+    return;
+  }
+  if (action === "select-date-place") {
+    const candidate = state.datePlaceCandidates.find(item => item.candidate_id === actionEl.dataset.candidateId);
+    if (!candidate) { toast("地点候选已过期，请重新搜索"); return; }
+    state.datePlaceCandidateId = candidate.candidate_id;
+    document.getElementById("datePlaceSelection").innerHTML = `<strong>✓ 已确认：${escapeHtml(candidate.name)}</strong><br>${escapeHtml([candidate.country, candidate.province, candidate.city, candidate.district, candidate.formatted_address].filter(Boolean).join(" · "))}`;
+    document.querySelectorAll("#datePlaceCandidates button").forEach(button => button.classList.toggle("selected", button === actionEl));
+    document.querySelector("#dateForm button[type=submit]").disabled = false;
+    return;
   }
   if (action === "install-app") {
     if (state.installPrompt) {
@@ -4079,6 +6659,118 @@ document.addEventListener("click", async event => {
   if (action === "new-moment") {
     openMomentComposer(actionEl.dataset.type || "回忆");
   }
+  if (action === "open-voice-memory") { openVoiceMemoryComposer(); return; }
+  if (action === "start-voice-recording") {
+    actionEl.disabled = true;
+    try { await startVoiceRecording(); } catch (error) { stopVoiceResources({ discard: true }); toast(error.name === "NotAllowedError" ? "请在系统设置中允许恋屿使用麦克风" : error.message); }
+    return;
+  }
+  if (action === "stop-voice-recording") { stopVoiceRecording(); return; }
+  if (action === "reset-voice-recording") { stopVoiceResources({ discard: true }); openVoiceMemoryComposer(); return; }
+  if (action === "save-voice-memory") {
+    actionEl.disabled = true;
+    try { await saveVoiceMemory(); } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "open-future-letter") { openFutureLetterComposer(); return; }
+  if (action === "open-year-album") { await openAlbumExport("year"); return; }
+  if (action === "open-trip-album") {
+    if (!state.data?.trip?.id) { toast("请先选择一段旅行"); return; }
+    await openAlbumExport("trip", state.data.trip.id); return;
+  }
+  if (action === "preview-album-export") {
+    actionEl.disabled = true;
+    try { await previewAlbumExport(); } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "create-album-export") {
+    if (!navigator.onLine) { toast("生成 PDF 需要联网，当前没有创建任务"); return; }
+    const payload = albumExportPayload(true);
+    if (!payload.selection.length) { toast("请至少选择一条回忆"); return; }
+    actionEl.disabled = true;
+    try {
+      const job = await api("/api/v1/album-exports", { method: "POST", headers: { "Idempotency-Key": clientKey("album") }, body: JSON.stringify(payload) });
+      state.albumExport.job = job; await pollAlbumExport(job.id);
+    } catch (error) { toast(error.status === 409 ? "内容已经变化，请重新预览" : error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "restore-album-export") {
+    try {
+      const job = state.albumExport.jobs.find(item => item.id === actionEl.dataset.id);
+      if (!job || !albumJobMatchesCurrentContext(job)) throw new Error("这条生成记录不属于当前纪念册范围");
+      document.getElementById("albumExportAudience").value = job.audience;
+      if (job.template === "year") document.getElementById("albumExportYear").value = String(job.year);
+      if (!albumJobMatchesCurrentScope(job)) throw new Error("生成记录范围校验失败，请重新打开纪念册");
+      await pollAlbumExport(job.id);
+      try { await previewAlbumExport(); }
+      catch (error) { document.getElementById("albumExportItems").innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`; }
+    }
+    catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "cancel-album-export") {
+    const job = state.albumExport.job; if (!job) return;
+    try {
+      const cancelled = await api(`/api/v1/album-exports/${encodeURIComponent(job.id)}/cancel`, { method: "POST", body: JSON.stringify({ expected_version: job.version }) });
+      state.albumExport.job = cancelled;
+      state.albumExport.jobs = state.albumExport.jobs.map(item => item.id === cancelled.id ? cancelled : item);
+      renderAlbumExportRecentJobs(); stopAlbumExportPolling(); document.getElementById("albumExportStatus").textContent = "生成已取消。"; actionEl.hidden = true;
+    } catch (error) { toast(error.status === 409 ? "任务状态已经变化，请刷新" : error.message); }
+    return;
+  }
+  if (action === "open-future-letter-detail") {
+    try { await openFutureLetterDetail(actionEl.dataset.id); } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "edit-future-letter") {
+    closeModals(); openFutureLetterComposer(state.activeFutureLetter); return;
+  }
+  if (action === "prepare-seal-future-letter") {
+    closeModals();
+    document.getElementById("futureLetterForm").hidden = true;
+    document.getElementById("futureLetterSealPanel").hidden = false;
+    document.getElementById("futureLetterTitle").textContent = "确认未来送达时间";
+    const tomorrow = new Date(Date.now() + 86400000); document.getElementById("futureLetterDeliverAt").value = datetimeLocalValue(tomorrow);
+    document.getElementById("futureLetterUtcPreview").textContent = `将按本地时间送达（UTC：${tomorrow.toISOString()}）`;
+    openModal("futureLetterModal"); return;
+  }
+  if (action === "seal-future-letter") {
+    if (!requireOnlineMutation("shared_confirm", "封存未来信")) return;
+    const value = document.getElementById("futureLetterDeliverAt").value;
+    if (!value) { toast("请选择送达时间"); return; }
+    actionEl.disabled = true;
+    try {
+      await api(`/api/v1/future-letters/${encodeURIComponent(state.activeFutureLetter.id)}/seal`, { method: "POST", body: JSON.stringify({ deliver_at: new Date(value).toISOString(), expected_version: state.activeFutureLetter.version }) });
+      closeModals(); await loadFutureLetters(); toast("未来信已封存，到期前不会提醒对方");
+    } catch (error) { toast(error.status === 409 ? "信件状态已变化，请刷新后重试" : error.message); }
+    finally { actionEl.disabled = false; }
+    return;
+  }
+  if (action === "cancel-future-letter") {
+    try {
+      await api(`/api/v1/future-letters/${encodeURIComponent(state.activeFutureLetter.id)}/cancel`, { method: "POST", body: JSON.stringify({ expected_version: state.activeFutureLetter.version }) });
+      closeModals(); await loadFutureLetters(); toast("已恢复为仅自己可见的草稿");
+    } catch (error) { toast(error.status === 409 ? "投递或取消已由另一请求完成" : error.message); }
+    return;
+  }
+  if (action === "delete-future-letter") {
+    if (!confirm("确认永久删除这份草稿？正文会立即清除且不能恢复。")) return;
+    try {
+      await api(`/api/v1/future-letters/${encodeURIComponent(state.activeFutureLetter.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: state.activeFutureLetter.version }) });
+      closeModals(); await loadFutureLetters(); toast("草稿已安全删除");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (action === "convert-future-letter") {
+    try {
+      await api(`/api/v1/future-letters/${encodeURIComponent(state.activeFutureLetter.id)}/convert-to-moment`, { method: "POST", headers: { "Idempotency-Key": clientKey("future-moment") }, body: JSON.stringify({ expected_version: state.activeFutureLetter.version }) });
+      closeModals(); await Promise.all([loadBootstrap({ quiet: true }), loadFutureLetters()]); await setTimelineView("list", { scroll: false }); toast("已保存为双方可见的共同瞬间");
+    } catch (error) { toast(error.message); }
+    return;
+  }
   if (action === "edit-moment") {
     const moment = (state.data?.moments || []).find(item => item.id === actionEl.dataset.id);
     if (moment) openMomentEditor(moment);
@@ -4086,6 +6778,7 @@ document.addEventListener("click", async event => {
   }
   if (action === "close-modal") closeModals();
   if (action === "save-moment") {
+    if (!requireOnlineMutation("moment_save", "保存瞬间")) return;
     const title = document.getElementById("momentTitle").value.trim();
     if (!title) { toast("请先写一个标题"); return; }
     const occurredValue = document.getElementById("momentOccurredAt").value;
@@ -4128,7 +6821,12 @@ document.addEventListener("click", async event => {
     } catch (error) { toast(error.status === 409 ? "内容已被更新，请刷新后重新修改" : error.message); }
   }
   if (action === "answer-question") { document.getElementById("dailyAnswer").value = ""; openModal("answerModal"); }
-  if (action === "quick-message") { try { await sendMessage(actionEl.textContent.trim()); } catch (error) { toast(error.message); } }
+  if (action === "quick-message") {
+    try {
+      const result = await sendMessage(actionEl.textContent.trim());
+      toast(result.status === "queued" ? "消息已离线保存，联网后自动发送" : "消息已发送");
+    } catch (error) { toast(error.message); }
+  }
   if (action === "attach") document.getElementById("chatMediaInput").click();
   if (action === "import-chat") {
     state.chatImport = null; document.getElementById("chatImportForm").hidden = false; document.getElementById("chatImportDraft").hidden = true; openModal("chatImportModal");
@@ -4164,6 +6862,7 @@ document.addEventListener("click", async event => {
     openModal("editModal");
   }
   if (action === "generate-trip") {
+    if (!requireOnlineMutation("ai_compose", "生成旅行方案")) return;
     actionEl.disabled = true; actionEl.textContent = "生成中…";
     try {
       state.data.trip = await api(`/api/v1/trips/${state.data.trip.id}/generate`, { method: "POST", body: "{}" });
@@ -4225,7 +6924,7 @@ document.addEventListener("click", async event => {
     const requestedDay = action === "refresh-food-day" ? Number(actionEl.dataset.dayNumber) : null;
     const areaInputs = [...document.querySelectorAll("[data-food-area-day]")];
     const dayAreas = Object.fromEntries(areaInputs.map(input => [input.dataset.foodAreaDay, input.value.trim()]));
-    areaInputs.forEach(input => localStorage.setItem(`love-food-area-${state.data.trip.id}-${input.dataset.foodAreaDay}`, input.value.trim()));
+    areaInputs.forEach(input => privateStorage().setItem(`love-food-area-${state.data.trip.id}-${input.dataset.foodAreaDay}`, input.value.trim()));
     const relevantDays = requestedDay ? [String(requestedDay)] : Object.keys(dayAreas);
     const missing = relevantDays.filter(day => !dayAreas[day]);
     if (missing.length && isBroadFoodDestination(state.data.trip.destination)) { toast(`请先填写第 ${missing.join("、")} 天的具体游览或住宿区域`); return; }
@@ -4309,7 +7008,8 @@ document.addEventListener("click", async event => {
     actionEl.disabled = true;
     try {
       const deleted = await api(`/api/v1/trips/${encodeURIComponent(trip.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: trip.version }) });
-      localStorage.removeItem("love-trip-id"); localStorage.removeItem(`love-ui-trip:${trip.id}`);
+      evictTripOfflineSnapshot(trip.id);
+      privateStorage().removeItem("love-trip-id"); privateStorage().removeItem(`love-ui-trip:${trip.id}`);
       state.manifests.trip = null; state.pinnedSmartSurfaces.delete("trip");
       await loadBootstrap({ quiet: true });
       navigate("trip"); setTripSection("overview", { scroll: false });
@@ -4321,7 +7021,7 @@ document.addEventListener("click", async event => {
     actionEl.disabled = true;
     try {
       const restored = await api(`/api/v1/trips/${encodeURIComponent(actionEl.dataset.tripId)}/restore`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
-      localStorage.setItem("love-trip-id", restored.id);
+      privateStorage().setItem("love-trip-id", restored.id);
       // The restore is authoritative once the POST succeeds. Confirm it to the
       // user before the broader page refresh, which can take longer on a slow
       // mobile connection and must not hide the successful recovery feedback.
@@ -4422,7 +7122,17 @@ document.addEventListener("click", async event => {
       const form = document.getElementById("calendarForm"); form.dataset.itemId = item.id; form.dataset.version = item.version;
       document.getElementById("calendarModalTitle").textContent = "编辑共同事项";
       document.getElementById("calendarType").value = item.entry_type; document.getElementById("calendarTitle").value = item.title;
-      document.getElementById("calendarStart").value = String(item.starts_at).slice(0, 10); document.getElementById("calendarRecurrence").value = item.recurrence;
+      const allDay = Boolean(item.all_day);
+      document.getElementById("calendarAllDay").checked = allDay;
+      setCalendarAllDay(allDay);
+      document.getElementById("calendarStart").value = allDay ? String(item.starts_at).slice(0, 10) : datetimeLocalValue(item.starts_at);
+      document.getElementById("calendarEnd").value = item.ends_at ? (allDay ? String(item.ends_at).slice(0, 10) : datetimeLocalValue(item.ends_at)) : "";
+      document.getElementById("calendarRecurrence").value = item.recurrence;
+      document.getElementById("calendarPrefillNotice").hidden = true;
+      const participants = document.getElementById("calendarParticipants");
+      participants.innerHTML = [state.data?.user, state.data?.partner].filter(Boolean).map(person => `<option value="${escapeHtml(person.id)}">${escapeHtml(person.nickname)}</option>`).join("");
+      [...participants.options].forEach(option => { option.selected = (item.participant_ids || []).includes(option.value); });
+      document.getElementById("calendarBlocksTime").checked = Boolean(item.blocks_time);
       document.getElementById("calendarLocation").value = item.location || ""; document.getElementById("calendarNote").value = item.note || ""; openModal("calendarModal");
     }
   }
@@ -4466,6 +7176,27 @@ document.addEventListener("click", async event => {
   if (action === "revoke-device") {
     try { await api(`/api/v1/account/devices/${actionEl.dataset.id}/revoke`, { method: "POST", body: "{}" }); await loadAccountCenter(); toast("该设备已撤销"); } catch (error) { toast(error.message); }
   }
+  if (action === "revoke-ai-grant") {
+    if (window.confirm("撤回后会阻止这项内容被后续 AI 调用；已经发送给模型的数据无法收回。确定撤回？")) try {
+      const result = await api(`/api/v1/account/privacy/grants/${encodeURIComponent(actionEl.dataset.id)}/revoke`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
+      await loadAccountCenter();
+      toast(result.idempotent ? "这项 AI 授权此前已撤回" : "AI 授权已撤回，后续调用已被阻止");
+    } catch (error) { toast(error.status === 409 ? "授权状态已变化，请刷新后再试" : error.message); }
+  }
+  if (action === "retry-offline-mutation") {
+    try {
+      const result = await retryOfflineMutation(actionEl.dataset.id);
+      await loadAccountCenter();
+      toast(result.synced ? "离线操作已由服务器确认同步" : navigator.onLine ? "重试尚未完成，原记录仍保留" : "已重新排队，联网后会自动同步");
+    } catch (error) { toast(error.message); }
+  }
+  if (action === "discard-offline-mutation") {
+    if (window.confirm("丢弃后这项离线操作不会发送到服务器，且无法恢复。确定丢弃？")) try {
+      await discardOfflineMutation(actionEl.dataset.id);
+      await loadAccountCenter();
+      toast("已从当前设备丢弃，这项操作不会发送到服务器");
+    } catch (error) { toast(error.message); }
+  }
   if (action === "trash-media") {
     if (window.confirm("把这个未引用的媒体移入回收站？")) try { await api(`/api/v1/media/${actionEl.dataset.id}/trash`, { method: "POST", body: "{}" }); await loadAccountCenter(); toast("媒体已移入回收站"); } catch (error) { toast(error.message); }
   }
@@ -4478,11 +7209,17 @@ document.addEventListener("click", async event => {
   if (action === "export-account") { window.location.assign("/api/v1/account/export.zip"); toast("正在准备完整数据导出"); }
   if (action === "unlink-couple") {
     const password = window.prompt("输入当前密码"); const confirmation = password && window.prompt("请输入：解除情侣");
-    if (password && confirmation) try { await api("/api/v1/couple/unlink", { method: "POST", body: JSON.stringify({ password, confirmation }) }); stopRealtime(); resetTripLive(); state.data = null; closeModals(); showPairing(); toast("情侣关系已解除"); } catch (error) { toast(error.message); }
+    if (password && confirmation) try {
+      await api("/api/v1/couple/unlink", { method: "POST", body: JSON.stringify({ password, confirmation }) });
+      closeCookingScreen();
+      state.cooking.restoreChecked = false;
+      state.cooking.deepLinked = false;
+      await clearMealOfflineData(); stopRealtime(); resetTripLive(); resetMemoryDiscovery(); state.data = null; closeModals(); showPairing(); toast("情侣关系已解除");
+    } catch (error) { toast(error.message); }
   }
   if (action === "delete-account") {
     const password = window.prompt("注销前建议先导出数据。请输入当前密码"); const confirmation = password && window.prompt("请输入：注销账号");
-    if (password && confirmation) try { await api("/api/v1/account/delete", { method: "POST", body: JSON.stringify({ password, confirmation }) }); stopRealtime(); resetTripLive(); state.data = null; closeModals(); showAccountAuth(); toast("账号已注销"); } catch (error) { toast(error.message); }
+    if (password && confirmation) try { await api("/api/v1/account/delete", { method: "POST", body: JSON.stringify({ password, confirmation }) }); await clearMealOfflineData(); stopRealtime(); resetTripLive(); resetMemoryDiscovery(); state.data = null; closeModals(); showAccountAuth(); toast("账号已注销"); } catch (error) { toast(error.message); }
   }
   if (action === "vote-date") {
     try {
@@ -4511,6 +7248,7 @@ document.addEventListener("click", async event => {
     } catch (error) { toast(error.message); }
   }
   if (action === "confirm-smart-action" && state.smartActionId) {
+    if (!requireOnlineMutation("shared_confirm", "确认智能建议")) return;
     actionEl.disabled = true;
     try {
       // Confirming an action refreshes several shared panels. On a slower
@@ -4551,17 +7289,68 @@ document.addEventListener("click", async event => {
   }
   if (action === "logout") {
     if (state.callId) await endCall();
+    closeCookingScreen();
+    state.cooking.restoreChecked = false;
     const userId = state.data?.user?.id;
     try { await api("/api/v1/auth/logout", { method: "POST", body: "{}" }); } catch (_) {}
     await clearMealOfflineData(userId);
-    stopRealtime(); resetTripLive(); state.data = null; state.selectedItemIds.clear(); state.pushSynced = false; state.pushSubscribed = false; localStorage.removeItem("love-offline-trip");
-    Object.keys(smartExamples).forEach(surface => localStorage.removeItem(`love-ui-${surface}`));
+    stopRealtime(); resetTripLive(); resetMemoryDiscovery(); state.data = null; state.selectedItemIds.clear(); state.pushSynced = false; state.pushSubscribed = false; privateStorage().removeItem("love-offline-trip");
+    Object.keys(smartExamples).forEach(surface => privateStorage().removeItem(`love-ui-${surface}`));
     broadcastAuthChange("logout");
     showAccountAuth(); toast("已安全退出");
   }
 });
 
 document.addEventListener("change", async event => {
+  const expenseSettle = event.target.closest?.("[data-expense-settle]");
+  if (expenseSettle) {
+    if (!requireOnlineMutation("trip_expenses", "选择待结清花费")) { expenseSettle.checked = !expenseSettle.checked; return; }
+    if (expenseSettle.checked) state.tripExpenses.selected.add(expenseSettle.dataset.expenseSettle);
+    else state.tripExpenses.selected.delete(expenseSettle.dataset.expenseSettle);
+    renderTripExpenses();
+    return;
+  }
+  if (event.target.id === "tripExpenseSplit") {
+    document.getElementById("tripExpenseBeneficiaryField").hidden = event.target.value !== "personal";
+    return;
+  }
+  const packingCheck = event.target.closest?.("[data-packing-check]");
+  if (packingCheck) {
+    if (!requireOnlineMutation("trip_tools", "更新行李")) { packingCheck.checked = !packingCheck.checked; return; }
+    try {
+      const updated = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/packing/${encodeURIComponent(packingCheck.dataset.packingCheck)}`, { method: "PATCH", body: JSON.stringify({ checked: packingCheck.checked, expected_version: Number(packingCheck.dataset.version) }) });
+      state.tripTools.packing = state.tripTools.packing.map(item => item.id === updated.id ? updated : item); renderTripTools();
+      state.tripTools.offlineSnapshot = await refreshTripOfflineSnapshot(state.data.trip.id).catch(() => null);
+    } catch (error) { packingCheck.checked = !packingCheck.checked; toast(error.status === 409 ? "行李已被另一方修改，请刷新" : error.message); }
+    return;
+  }
+  const packingAssignee = event.target.closest?.("[data-packing-assignee]");
+  if (packingAssignee) {
+    if (!requireOnlineMutation("trip_tools", "分配行李")) return;
+    try {
+      const updated = await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/packing/${encodeURIComponent(packingAssignee.dataset.packingAssignee)}`, { method: "PATCH", body: JSON.stringify({ assigned_to: packingAssignee.value, expected_version: Number(packingAssignee.dataset.version) }) });
+      state.tripTools.packing = state.tripTools.packing.map(item => item.id === updated.id ? updated : item); renderTripTools();
+      state.tripTools.offlineSnapshot = await refreshTripOfflineSnapshot(state.data.trip.id).catch(() => null);
+    } catch (error) { toast(error.status === 409 ? "行李已被另一方修改，请刷新" : error.message); await loadTripTools({ quiet: true }); }
+    return;
+  }
+  if (event.target.id === "tripEmergencyType") {
+    renderEmergencyFormFields({});
+    return;
+  }
+  if (event.target.id === "albumExportAudience" || event.target.id === "albumExportYear") {
+    try { await previewAlbumExport(); await loadAlbumExportJobs(); } catch (error) { toast(error.message); }
+    return;
+  }
+  if (event.target.id === "voiceVisibility") {
+    document.getElementById("voiceRevealField").hidden = event.target.value !== "delayed";
+    return;
+  }
+  if (event.target.id === "futureLetterDeliverAt") {
+    const date = new Date(event.target.value);
+    document.getElementById("futureLetterUtcPreview").textContent = Number.isNaN(date.getTime()) ? "请选择有效时间" : `将按本地时间送达（UTC：${date.toISOString()}）`;
+    return;
+  }
   if (event.target.id === "recipeDetailServings") {
     const recipe = state.meals.openRecipe;
     const servings = Math.min(20, Math.max(1, Number(event.target.value) || Number(recipe?.base_servings) || 1));
@@ -4573,12 +7362,15 @@ document.addEventListener("change", async event => {
   if (event.target.id === "tripSwitcher") {
     const selected = (state.data?.trips || []).find(item => item.id === event.target.value);
     if (selected) {
-      state.data.trip = selected; state.plan = selected.active_variant || "slow"; state.selectedItemIds.clear(); localStorage.setItem("love-trip-id", selected.id);
+      state.data.trip = selected; state.plan = selected.active_variant || "slow"; state.selectedItemIds.clear(); privateStorage().setItem("love-trip-id", selected.id);
+      state.tripTools = { tripId: selected.id, tripVersion: selected.version, packing: [], emergency: [], hospitals: [], evidence: null, offlineSnapshot: null, offlineReadOnly: false, loading: false, editingEmergency: null };
+      state.tripExpenses = { tripId: selected.id, data: null, loading: false, editing: null, selected: new Set(), requestSequence: Number(state.tripExpenses?.requestSequence || 0) + 1 };
       state.manifests.trip = null; state.pinnedSmartSurfaces.delete("trip"); state.smartIntentDrafts.trip = "";
       state.tripAssistant = { tripId: selected.id, items: [], loading: true };
       resetTripLive(selected.id);
       renderIdentity(); renderPlan(); renderHotel(); await loadSmartSurface("trip", { quiet: true });
       if (state.tripSection === "assistant") await loadTripAssistant({ quiet: true });
+      if (state.tripSection === "tools" && state.tripToolSection === "expenses") await loadTripExpenses({ quiet: true });
       toast(`已打开：${selected.title}`);
     }
     return;
@@ -4595,8 +7387,14 @@ document.addEventListener("change", async event => {
     try { await api(`/api/v1/shopping-lists/items/${encodeURIComponent(shoppingCheck.dataset.shoppingCheck)}`, { method: "PATCH", body: JSON.stringify({ checked: shoppingCheck.checked, expected_version: Number(shoppingCheck.dataset.version) }) }); await loadMeals({ quiet: true }); }
     catch (error) {
       if (!navigator.onLine || !error.status) {
-        const item = state.meals.shopping?.items?.find(value => value.id === shoppingCheck.dataset.shoppingCheck); if (item) item.checked = shoppingCheck.checked;
-        await queueMealMutation(`/api/v1/shopping-lists/items/${encodeURIComponent(shoppingCheck.dataset.shoppingCheck)}`, "PATCH", { checked: shoppingCheck.checked, expected_version: Number(shoppingCheck.dataset.version) }); renderShoppingList(); toast("已离线保存，恢复网络后自动同步");
+        try {
+          await queueMealMutation(`/api/v1/shopping-lists/items/${encodeURIComponent(shoppingCheck.dataset.shoppingCheck)}`, "PATCH", { checked: shoppingCheck.checked, expected_version: Number(shoppingCheck.dataset.version) });
+          const item = state.meals.shopping?.items?.find(value => value.id === shoppingCheck.dataset.shoppingCheck); if (item) item.checked = shoppingCheck.checked;
+          renderShoppingList(); toast("已离线保存，恢复网络后自动同步");
+        } catch (queueError) {
+          shoppingCheck.checked = !shoppingCheck.checked;
+          toast(queueError.message);
+        }
       } else { shoppingCheck.checked = !shoppingCheck.checked; toast(error.message); }
     }
     return;
@@ -4610,64 +7408,17 @@ document.addEventListener("change", async event => {
   } catch (error) { checkbox.checked = !checkbox.checked; toast(error.message); }
 });
 
-function clearMessageLongPress() {
-  clearTimeout(state.longPressTimer);
-  state.longPressTimer = null;
-  state.longPressStart = null;
-}
-
 document.addEventListener("pointerdown", event => {
   const bubble = event.target.closest(".message[data-message-id]");
   if (!bubble || event.target.closest("button,audio,video,a")) return;
-  clearMessageLongPress();
-  state.longPressStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-  state.longPressTimer = setTimeout(() => {
-    state.longPressTimer = null;
-    saveMessageMoment(bubble.dataset.messageId);
-  }, 650);
+  clearTimeout(state.longPressTimer);
+  state.longPressTimer = setTimeout(() => saveMessageMoment(bubble.dataset.messageId), 650);
 });
-document.addEventListener("pointermove", event => {
-  const start = state.longPressStart;
-  if (!start || start.pointerId !== event.pointerId) return;
-  if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) clearMessageLongPress();
-});
-["pointerup", "pointercancel"].forEach(name => document.addEventListener(name, clearMessageLongPress));
-document.addEventListener("contextmenu", event => {
-  if (event.target.closest(".message[data-message-id]") && !event.target.closest("button,audio,video,a")) event.preventDefault();
-});
-
-let softKeyboardBaseline = Math.max(window.innerHeight, window.visualViewport?.height || 0);
-
-function isTextEntry(element) {
-  return Boolean(element?.matches?.('input, textarea, select, [contenteditable="true"]'));
-}
-
-function syncSoftKeyboardLayout() {
-  const viewportHeight = window.visualViewport?.height || window.innerHeight;
-  const hasFocusedEntry = isTextEntry(document.activeElement);
-  if (!hasFocusedEntry) softKeyboardBaseline = Math.max(window.innerHeight, viewportHeight);
-  const keyboardOpen = hasFocusedEntry && softKeyboardBaseline - viewportHeight > 110;
-  document.documentElement.classList.toggle("soft-keyboard-open", keyboardOpen);
-}
-
-window.visualViewport?.addEventListener("resize", syncSoftKeyboardLayout);
-window.addEventListener("resize", syncSoftKeyboardLayout);
-document.addEventListener("focusin", () => {
-  requestAnimationFrame(syncSoftKeyboardLayout);
-  setTimeout(syncSoftKeyboardLayout, 250);
-});
-document.addEventListener("focusout", () => setTimeout(syncSoftKeyboardLayout, 0));
-window.addEventListener("orientationchange", () => {
-  document.documentElement.classList.remove("soft-keyboard-open");
-  setTimeout(() => {
-    softKeyboardBaseline = Math.max(window.innerHeight, window.visualViewport?.height || 0);
-    syncSoftKeyboardLayout();
-  }, 300);
-});
+["pointerup", "pointercancel", "pointermove"].forEach(name => document.addEventListener(name, () => clearTimeout(state.longPressTimer)));
 
 document.addEventListener("input", event => {
   if (event.target.matches?.("[data-food-area-day]")) {
-    localStorage.setItem(`love-food-area-${state.data?.trip?.id}-${event.target.dataset.foodAreaDay}`, event.target.value.trim());
+    privateStorage().setItem(`love-food-area-${state.data?.trip?.id}-${event.target.dataset.foodAreaDay}`, event.target.value.trim());
   }
   const form = event.target.closest?.("[data-smart-form]");
   if (form && event.target.matches("input")) state.smartIntentDrafts[form.dataset.smartForm] = event.target.value;
@@ -4680,7 +7431,36 @@ document.addEventListener("keydown", event => {
   event.preventDefault(); interactiveCard.click();
 });
 
+document.addEventListener("input", event => {
+  if (event.target.id === "voiceTranscript") {
+    state.voiceTranscriptMethod = "manual";
+    state.voiceTranscriptEdited = true;
+    document.getElementById("voiceTranscriptSource").textContent = "文字已由你手工填写或校正，将标记为本人填写。";
+  }
+});
+
 document.addEventListener("submit", async event => {
+  if (event.target.id === "futureLetterForm") {
+    event.preventDefault();
+    if (!requireOnlineMutation("moment_save", "保存未来信草稿")) return;
+    const button = event.submitter; button.disabled = true;
+    try {
+      const id = document.getElementById("futureLetterId").value;
+      const payload = { title: document.getElementById("futureLetterName").value.trim(), body: document.getElementById("futureLetterBody").value };
+      if (!payload.title || !payload.body.trim()) throw new Error("标题和正文都不能为空");
+      const saved = id
+        ? await api(`/api/v1/future-letters/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ ...payload, expected_version: Number(document.getElementById("futureLetterVersion").value) }) })
+        : await api("/api/v1/future-letters", { method: "POST", headers: { "Idempotency-Key": clientKey("future-letter") }, body: JSON.stringify(payload) });
+      closeModals(); await loadFutureLetters(); await openFutureLetterDetail(saved.id); toast("私密草稿已保存，尚未通知对方");
+    } catch (error) { toast(error.status === 409 ? "信件已经变化，请刷新后重新编辑" : error.message); }
+    finally { button.disabled = false; }
+    return;
+  }
+  if (event.target.id === "memorySearchForm") {
+    event.preventDefault();
+    try { await searchMemories(); } catch (error) { toast(error.message); }
+    return;
+  }
   const form = event.target.closest("[data-smart-form]");
   if (!form) return;
   event.preventDefault();
@@ -4689,8 +7469,85 @@ document.addEventListener("submit", async event => {
   await composeSmartSurface(form.dataset.smartForm, intent, form.querySelector("button"));
 });
 
+document.getElementById("tripPackingForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireOnlineMutation("trip_tools", "添加行李")) return;
+  const label = document.getElementById("tripPackingLabel").value.trim();
+  if (!label) return;
+  const button = event.submitter; button.disabled = true;
+  try {
+    await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/packing`, { method: "POST", headers: { "Idempotency-Key": clientKey("packing") }, body: JSON.stringify({ label, assigned_to: "shared", expected_trip_version: state.tripTools.tripVersion || state.data.trip.version }) });
+    event.target.reset(); await loadTripTools({ quiet: true }); toast("行李项目已添加");
+  } catch (error) { toast(error.status === 409 ? "旅行已经变化，请刷新后重试" : error.message); }
+  finally { button.disabled = false; }
+});
+
+document.getElementById("tripEmergencyForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireOnlineMutation("trip_tools", "保存应急卡")) return;
+  const entryType = document.getElementById("tripEmergencyType").value;
+  const visibility = document.getElementById("tripEmergencyVisibility").value;
+  const title = document.getElementById("tripEmergencyTitle").value.trim();
+  if (visibility === "shared" && !window.confirm("双方可见的应急卡会保存到两个人各自的 24 小时离线副本。确认共享吗？")) return;
+  const editing = state.tripTools.editingEmergency;
+  const details = entryType === "hospital" ? undefined : collectEmergencyDetails();
+  const button = event.submitter; button.disabled = true;
+  try {
+    const result = editing
+      ? await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/emergency/${encodeURIComponent(editing.id)}`, { method: "PATCH", body: JSON.stringify({ title, visibility, ...(details ? { details } : {}), expected_version: editing.version }) })
+      : await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/emergency`, { method: "POST", headers: { "Idempotency-Key": clientKey("emergency") }, body: JSON.stringify({ entry_type: entryType, title, visibility, details: details || {}, expected_trip_version: state.tripTools.tripVersion || state.data.trip.version }) });
+    resetEmergencyForm();
+    if (result.permission_version !== state.data?.permission_version) await loadBootstrap({ quiet: true });
+    else await loadTripTools({ quiet: true });
+    toast(editing ? "应急卡已更新" : (visibility === "shared" ? "应急卡已共享并刷新离线权限" : "私密应急卡已保存"));
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
+document.getElementById("tripExpenseForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireOnlineMutation("trip_expenses", "保存旅行花费")) return;
+  const amount = parseExpenseAmountInput(document.getElementById("tripExpenseAmount").value);
+  if (amount === null) { toast("金额需大于 0，且最多保留两位小数"); return; }
+  const splitMode = document.getElementById("tripExpenseSplit").value;
+  const payload = {
+    amount_cents: amount,
+    payer_id: document.getElementById("tripExpensePayer").value,
+    category: document.getElementById("tripExpenseCategory").value,
+    split_mode: splitMode,
+    ...(splitMode === "personal" ? { beneficiary_id: document.getElementById("tripExpenseBeneficiary").value } : {}),
+    occurred_on: document.getElementById("tripExpenseDate").value,
+    note: document.getElementById("tripExpenseNote").value.trim(),
+  };
+  const editing = state.tripExpenses.editing;
+  if (editing?.settled_at && !window.confirm("这笔花费已经线下结清。保存修改会明确把它重新计入未结清余额，是否继续？")) return;
+  const button = event.submitter || document.getElementById("tripExpenseSaveButton"); button.disabled = true;
+  try {
+    if (editing) {
+      await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/expenses/${encodeURIComponent(editing.id)}`, { method: "PATCH", headers: { "Idempotency-Key": clientKey("expense-update") }, body: JSON.stringify({ ...payload, expected_version: editing.version, ...(editing.settled_at ? { unset_settlement: true } : {}) }) });
+    } else {
+      await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/expenses`, { method: "POST", headers: { "Idempotency-Key": clientKey("expense-create") }, body: JSON.stringify(payload) });
+    }
+    resetExpenseForm(); await loadTripExpenses({ quiet: true }); toast(editing ? "旅行花费已更新" : "旅行花费已记录");
+  } catch (error) {
+    if (error.status === 409) {
+      // The form carries the version captured when editing started.  Once the
+      // server rejects it, keeping that object would make every retry stale.
+      // Close the old edit explicitly and require reopening the refreshed row.
+      resetExpenseForm();
+      await loadTripExpenses({ quiet: true }).catch(() => {});
+      toast("这笔花费已被另一方修改，旧编辑已关闭，请重新打开最新记录");
+    } else {
+      toast(error.message);
+    }
+  } finally { button.disabled = !navigator.onLine; }
+});
+
+renderEmergencyFormFields({});
+
 document.getElementById("lifeAssistantForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (!requireOnlineMutation("ai_compose", "生活助理")) return;
   const input = document.getElementById("lifeAssistantInput");
   const button = event.submitter || event.currentTarget.querySelector("button");
   const intent = input.value.trim();
@@ -4718,6 +7575,7 @@ document.getElementById("lifeAssistantForm").addEventListener("submit", async ev
 
 document.getElementById("tripAssistantForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (!requireOnlineMutation("ai_compose", "旅行对话")) return;
   const trip = state.data?.trip;
   const input = document.getElementById("tripAssistantInput");
   const button = document.getElementById("tripAssistantSend");
@@ -4764,7 +7622,10 @@ document.getElementById("chatForm").addEventListener("submit", async event => {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  try { await sendMessage(text); toast("消息已保存到数据库"); } catch (error) { input.value = text; toast(error.message); }
+  try {
+    const result = await sendMessage(text);
+    toast(result.status === "queued" ? "消息已离线保存，联网后自动发送" : "消息已发送");
+  } catch (error) { input.value = text; toast(error.message); }
 });
 
 document.getElementById("authForm").addEventListener("submit", async event => {
@@ -4777,6 +7638,7 @@ document.getElementById("authForm").addEventListener("submit", async event => {
   try {
     const endpoint = state.authMode === "register" ? "/api/v1/auth/register" : "/api/v1/auth/login";
     const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+    await clearMealOfflineData();
     resetTripLive();
     state.pushSynced = false;
     document.getElementById("authPassword").value = "";
@@ -4829,15 +7691,39 @@ document.getElementById("pairForm").addEventListener("submit", async event => {
 
 document.getElementById("statusForm").addEventListener("submit", async event => {
   event.preventDefault();
-  const presets = { miss_you: "想你了", busy: "忙碌中", moving: "在路上", home: "已到家", happy: "心情不错", quiet: "想安静一下", custom: "分享此刻" };
+  const presets = { busy: "忙碌中", want_chat: "想和你聊聊", need_company: "需要陪伴", feeling_low: "心情不太好", moving: "在路上", home: "已到家", custom: "" };
   const statusCode = document.getElementById("statusCode").value;
-  const hours = Number(document.getElementById("statusDuration").value);
-  const expiresAt = hours ? new Date(Date.now() + hours * 3600000).toISOString() : null;
+  const durationMinutes = Number(document.getElementById("statusDuration").value);
   const text = document.getElementById("statusText").value.trim() || presets[statusCode];
   try {
-    await api("/api/v1/me/status", { method: "PUT", body: JSON.stringify({ status_code: statusCode, text, expires_at: expiresAt }) });
+    await api("/api/v1/me/status", { method: "PUT", body: JSON.stringify({ status_code: statusCode, text, duration_minutes: durationMinutes }) });
     closeModals(); await loadBootstrap({ quiet: true }); toast("你的状态已经同步给 TA");
   } catch (error) { toast(error.message); }
+});
+
+document.getElementById("expressionForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const ownerUserId = form.dataset.ownerUserId;
+  const requestEpoch = ++state.expressionRequestEpoch;
+  const button = event.submitter;
+  const source = document.getElementById("expressionSource").value.trim();
+  const messageId = form.dataset.messageId || "";
+  if (!source) return;
+  button.disabled = true; button.textContent = "整理中…";
+  try {
+    const result = await api("/api/v1/expression/suggestions", {
+      method: "POST", headers: { "Idempotency-Key": clientKey("expression") },
+      body: JSON.stringify({ mode: document.getElementById("expressionMode").value, ...(messageId ? { message_id: messageId } : { draft: source }) }),
+    });
+    if (requestEpoch !== state.expressionRequestEpoch || ownerUserId !== state.data?.user?.id) return;
+    document.getElementById("expressionResult").value = result.text;
+    document.getElementById("expressionPreview").hidden = false;
+  } catch (error) {
+    if (requestEpoch === state.expressionRequestEpoch && ownerUserId === state.data?.user?.id) toast(error.message);
+  } finally {
+    if (requestEpoch === state.expressionRequestEpoch) { button.disabled = false; button.textContent = "生成建议"; }
+  }
 });
 
 document.getElementById("locationForm").addEventListener("submit", async event => {
@@ -4858,19 +7744,37 @@ document.getElementById("weeklyForm").addEventListener("submit", async event => 
   } catch (error) { toast(error.message); }
 });
 
+document.getElementById("decisionForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const options = document.getElementById("decisionOptions").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  if (options.length < 2 || options.length > 6) { toast("请填写 2–6 个选项，每行一个"); return; }
+  const button = event.submitter; button.disabled = true;
+  try {
+    const created = await api("/api/v1/decisions", { method: "POST", body: JSON.stringify({ title: document.getElementById("decisionTitle").value.trim(), options, selection_mode: document.getElementById("decisionMode").value, closes_at: new Date(document.getElementById("decisionDeadline").value).toISOString() }) });
+    state.data.decisions = [created, ...(state.data.decisions || [])];
+    event.target.reset(); closeModals(); navigate("life"); setLifeSection("decisions"); renderDecisions(); toast("决策已创建，等待两个人各自选择");
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
 document.getElementById("dateForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (!requireOnlineMutation("ai_compose", "约会方案")) return;
+  if (!state.datePlaceCandidateId) { toast("请先查找并明确选择具体地点"); return; }
   const button = event.submitter;
   button.disabled = true; button.textContent = "生成中…";
   try {
-    const plan = await api("/api/v1/date-plans", { method: "POST", body: JSON.stringify({ title: document.getElementById("dateTitle").value, plan_date: document.getElementById("dateDay").value, city: document.getElementById("dateCity").value, start_time: document.getElementById("dateStart").value, end_time: document.getElementById("dateEnd").value, budget: document.getElementById("dateBudget").value, preferences: { interest: document.getElementById("datePreference").value } }) });
+    const plan = await api("/api/v1/date-plans", { method: "POST", body: JSON.stringify({ title: document.getElementById("dateTitle").value, plan_date: document.getElementById("dateDay").value, city: document.getElementById("dateCity").value, place_candidate_id: state.datePlaceCandidateId, start_time: document.getElementById("dateStart").value, end_time: document.getElementById("dateEnd").value, budget: document.getElementById("dateBudget").value, preferences: { interest: document.getElementById("datePreference").value } }) });
     state.data.datePlans.unshift(plan); closeModals(); renderDatePlans(); navigate("life"); setLifeSection("dates"); toast("五套约会方案已生成，可以各自投票了");
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.textContent = "生成五套约会方案"; }
 });
 
+for (const id of ["dateCity", "dateRegion"]) document.getElementById(id).addEventListener("input", clearDatePlaceSelection);
+
 document.getElementById("tripForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (!requireOnlineMutation("trip_replan", "旅行方案")) return;
   const form = event.currentTarget;
   const button = event.submitter;
   button.disabled = true; button.textContent = "生成中…";
@@ -4905,7 +7809,7 @@ document.getElementById("tripForm").addEventListener("submit", async event => {
       button.textContent = "已提交 · 后台规划中…";
       trip = await createTripInBackground(payload);
     }
-    state.data.trip = trip; state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)]; state.plan = "slow"; state.selectedItemIds.clear(); localStorage.setItem("love-trip-id", trip.id); closeModals(); renderIdentity(); renderPlan(); renderHotel(); navigate("trip"); setTripSection("plans");
+    state.data.trip = trip; state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)]; state.plan = "slow"; state.selectedItemIds.clear(); privateStorage().setItem("love-trip-id", trip.id); closeModals(); renderIdentity(); renderPlan(); renderHotel(); navigate("trip"); setTripSection("plans");
     toast(editingTrip ? "具体地点已确认，旧地理范围已清除并重新生成五套方案" : (trip.date_conflicts?.length ? `已创建，但与“${trip.date_conflicts.map(item => item.title).join("、")}”日期重叠，请检查` : "新旅行与五套方案已创建"));
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.textContent = form.dataset.tripId ? "保存地点并重新生成五套方案" : "生成五套旅行方案"; }
@@ -4920,6 +7824,7 @@ for (const id of ["tripDestination", "tripDestinationRegion", "tripArrivalCity"]
 
 document.getElementById("tripItemEditForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (!requireOnlineMutation("trip_replan", "行程影响分析")) return;
   const item = currentEditingTripItem();
   if (!item) { toast("这条行程已变化，请刷新后重试"); return; }
   const changes = {
@@ -4953,12 +7858,24 @@ document.getElementById("chatImportForm").addEventListener("submit", async event
   finally { button.disabled = false; button.textContent = "生成可编辑草稿"; }
 });
 
+document.getElementById("calendarAllDay").addEventListener("change", event => setCalendarAllDay(event.target.checked));
+document.getElementById("calendarBlocksTime").addEventListener("change", () => {
+  document.getElementById("calendarEnd").required = !document.getElementById("calendarAllDay").checked && document.getElementById("calendarBlocksTime").checked;
+});
+
 document.getElementById("calendarForm").addEventListener("submit", async event => {
   event.preventDefault();
   const originalScreen = state.screen; const originalSection = state.lifeSection;
   try {
     const form = event.target; const editing = form.dataset.itemId;
-    const payload = { entry_type: document.getElementById("calendarType").value, title: document.getElementById("calendarTitle").value, starts_at: document.getElementById("calendarStart").value, all_day: true, recurrence: document.getElementById("calendarRecurrence").value, location: document.getElementById("calendarLocation").value, note: document.getElementById("calendarNote").value };
+    const participantIds = [...document.getElementById("calendarParticipants").selectedOptions].map(option => option.value);
+    const blocksTime = document.getElementById("calendarBlocksTime").checked;
+    const allDay = document.getElementById("calendarAllDay").checked;
+    const startsAt = document.getElementById("calendarStart").value;
+    const endsAt = document.getElementById("calendarEnd").value;
+    if (blocksTime && !participantIds.length) { toast("占用约会时间时，请至少选择一位参与人"); return; }
+    if (blocksTime && !allDay && !endsAt) { toast("定时占用必须填写结束时间"); return; }
+    const payload = { entry_type: document.getElementById("calendarType").value, title: document.getElementById("calendarTitle").value, starts_at: calendarApiTime(startsAt, allDay), ends_at: allDay ? (endsAt || null) : calendarApiTime(endsAt, false), all_day: allDay, participant_ids: participantIds, blocks_time: blocksTime, recurrence: document.getElementById("calendarRecurrence").value, location: document.getElementById("calendarLocation").value, note: document.getElementById("calendarNote").value };
     if (editing) payload.expected_version = Number(form.dataset.version);
     const saved = await api(editing ? `/api/v1/calendar/${editing}` : "/api/v1/calendar", { method: editing ? "PATCH" : "POST", body: JSON.stringify(payload) });
     event.target.reset(); closeModals(); await loadBootstrap({ quiet: true });
@@ -4975,10 +7892,11 @@ document.getElementById("wishlistForm").addEventListener("submit", async event =
   const form = event.target; const editing = form.dataset.itemId;
   const originalScreen = state.screen; const originalSection = state.lifeSection;
   const payload = { text: document.getElementById("wishlistText").value.trim(), note: document.getElementById("wishlistNote").value.trim() };
+  if (!editing) payload.item_kind = document.getElementById("wishlistKind").value;
   if (editing) payload.expected_version = Number(form.dataset.version);
   try {
     await api(editing ? `/api/v1/lists/items/${editing}` : "/api/v1/lists/wishlist/items", { method: editing ? "PATCH" : "POST", body: JSON.stringify(payload) });
-    form.reset(); closeModals(); await loadBootstrap({ quiet: true });
+    form.reset(); document.getElementById("wishlistKind").disabled = false; closeModals(); await loadBootstrap({ quiet: true });
     if (state.screen === originalScreen && state.lifeSection === originalSection) { navigate("life"); setLifeSection("wishlist"); }
     toast(editing ? "共同愿望已更新" : "共同愿望已保存，双方都能看到");
   } catch (error) { toast(error.status === 409 ? "愿望已被另一方更新，请刷新后重试" : error.message); }
@@ -5120,11 +8038,40 @@ document.getElementById("shoppingItemForm").addEventListener("submit", async eve
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
 
+document.getElementById("foodProfileForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireOnlineMutation("food_profile_update", "保存饮食资料")) return;
+  const button = event.submitter; button.disabled = true;
+  try {
+    const avoid = [...document.getElementById("foodAllergenAvoid").selectedOptions].map(option => option.value);
+    const severe = [...document.getElementById("foodAllergenSevere").selectedOptions].map(option => option.value);
+    if (avoid.some(value => severe.includes(value))) throw new Error("同一个过敏原不能同时选为“避免”和“严重”");
+    const allergies = [...avoid.map(allergen_key => ({ allergen_key, severity: "avoid" })), ...severe.map(allergen_key => ({ allergen_key, severity: "severe" }))];
+    const avoidances = [...document.getElementById("foodAvoidanceIngredients").selectedOptions].map(option => ({ ingredient_id: option.value }));
+    const tags = id => document.getElementById(id).value.split(/[，,]/).map(value => value.trim()).filter(Boolean);
+    await api("/api/v1/food-profiles/me", { method: "PUT", body: JSON.stringify({ allergies, avoidances, preferences: { liked_tags: tags("foodLikedTags"), disliked_tags: tags("foodDislikedTags") }, expected_version: Number(event.target.dataset.version || 0), idempotency_key: clientKey("food-profile") }) });
+    await loadMeals({ quiet: true }); toast("我的饮食资料已保存，伴侣可以查看");
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+
+document.getElementById("pantryForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireOnlineMutation("pantry_update", "添加库存食材")) return;
+  const button = event.submitter; button.disabled = true;
+  try {
+    const name = document.getElementById("pantryName").value.trim();
+    const current = (state.meals.pantry?.items || []).find(item => item.canonical_name === name || (item.aliases || []).includes(name));
+    await api("/api/v1/pantry/items", { method: "POST", body: JSON.stringify({ ...(current ? { ingredient_id: current.ingredient_id } : { name }), state: document.getElementById("pantryState").value, storage_location: document.getElementById("pantryStorage").value || null, expires_on: document.getElementById("pantryExpiry").value || null, quantity_note: document.getElementById("pantryNote").value.trim(), expected_version: current?.version || 0, idempotency_key: clientKey("pantry-upsert") }) });
+    event.target.reset(); await loadMeals({ quiet: true }); toast("家中食材状态已同步");
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+
 document.querySelectorAll(".modal").forEach(modal => modal.addEventListener("click", event => { if (event.target === modal) closeModals(); }));
 document.addEventListener("error", event => {
   if (event.target?.matches?.("img[data-recipe-cover]")) event.target.closest(".recipe-cover")?.classList.add("load-failed");
 }, true);
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeModals(); });
+window.addEventListener("pagehide", () => stopVoiceResources({ discard: true }));
 
 renderPlan();
 navigate(state.screen);

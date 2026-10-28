@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .schema import SCHEMA_VERSION, account_export_policy_status, schema_inventory
+
 
 def _checksum(path: Path) -> str:
     digest = hashlib.sha256()
@@ -32,20 +34,34 @@ def _read_manifest(folder: Path) -> dict[str, Any]:
     return value
 
 
+def _safe_relative_path(value: object, label: str) -> Path:
+    text = str(value or "").replace("\\", "/").strip()
+    path = Path(text)
+    if not text or path.is_absolute() or ".." in path.parts or "." in path.parts:
+        raise ValueError(f"{label}路径无效")
+    return path
+
+
 def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[str, Any]:
     """Exercise a backup in a temporary restore directory without touching live data."""
     backup = Path(folder).resolve()
     manifest = _read_manifest(backup)
-    database = backup / str(manifest.get("database_file", "love_moments.db"))
+    database_relative = _safe_relative_path(manifest.get("database_file", "love_moments.db"), "数据库")
+    database = backup / database_relative
     if not database.is_file():
         raise ValueError("备份数据库不存在")
     expected_hash = str(manifest.get("database_sha256", ""))
     checksum_ok = bool(expected_hash) and _checksum(database) == expected_hash
     missing_media = 0
     invalid_media = 0
+    orphan_media = 0
+    media_count_matches = False
+    media_bytes_matches = False
     integrity = "unavailable"
     foreign_key_violations = -1
     schema_version = 0
+    inventory: dict[str, Any] = {"ok": False, "missing_tables": ["database"]}
+    export_policy = account_export_policy_status()
     with tempfile.TemporaryDirectory(prefix="love-moments-restore-") as temporary:
         restored = Path(temporary) / "love_moments.db"
         shutil.copy2(database, restored)
@@ -53,6 +69,7 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
             integrity = str(db.execute("PRAGMA integrity_check").fetchone()[0])
             foreign_key_violations = len(db.execute("PRAGMA foreign_key_check").fetchall())
             schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+            inventory = schema_inventory(db, expected_version=schema_version)
             table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_assets'").fetchone()
             if table:
                 rows = db.execute(
@@ -64,27 +81,75 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
                     for relative in (key, thumbnail):
                         if relative and not (backup / "media" / str(relative)).is_file():
                             missing_media += 1
+    declared_paths: set[str] = set()
+    declared_bytes = 0
     for item in manifest.get("media_objects", []):
         if not isinstance(item, dict):
             invalid_media += 1
             continue
-        relative = str(item.get("path", ""))
-        target = (backup / "media" / relative).resolve()
+        try:
+            relative_path = _safe_relative_path(item.get("path"), "媒体")
+        except ValueError:
+            invalid_media += 1
+            continue
+        relative = relative_path.as_posix()
+        if relative in declared_paths:
+            invalid_media += 1
+            continue
+        declared_paths.add(relative)
+        target = (backup / "media" / relative_path).resolve()
         media_root = (backup / "media").resolve()
-        if not relative or (target != media_root and media_root not in target.parents) or not target.is_file():
+        if (target != media_root and media_root not in target.parents) or not target.is_file():
             invalid_media += 1
-        elif item.get("sha256") and _checksum(target) != item["sha256"]:
+            continue
+        size = target.stat().st_size
+        declared_bytes += size
+        if int(item.get("size", -1)) != size:
             invalid_media += 1
+        if item.get("sha256") and _checksum(target) != item["sha256"]:
+            invalid_media += 1
+    actual_paths: set[str] = set()
+    actual_bytes = 0
+    media_root = backup / "media"
+    if media_root.is_dir():
+        for path in media_root.rglob("*"):
+            if path.is_file():
+                actual_paths.add(path.relative_to(media_root).as_posix())
+                actual_bytes += path.stat().st_size
+    orphan_media = len(actual_paths - declared_paths)
+    media_count_matches = (
+        int(manifest.get("media_files", -1)) == len(declared_paths) == len(actual_paths)
+    )
+    media_bytes_matches = (
+        int(manifest.get("media_bytes", -1)) == declared_bytes == actual_bytes
+    )
+    restore_ok = (
+        integrity == "ok" and foreign_key_violations == 0 and checksum_ok
+        and missing_media == 0 and invalid_media == 0 and orphan_media == 0
+        and media_count_matches and media_bytes_matches
+        and bool(inventory["ok"]) and bool(export_policy["ok"])
+    )
     result = {
-        "ok": integrity == "ok" and foreign_key_violations == 0 and checksum_ok and missing_media == 0 and invalid_media == 0,
+        "ok": restore_ok,
         "verified_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "database_integrity": integrity,
         "database_checksum_ok": checksum_ok,
         "foreign_key_violations": foreign_key_violations,
         "schema_version": schema_version,
+        "expected_schema_version": SCHEMA_VERSION,
+        "schema_inventory": inventory,
+        "account_export_policy": export_policy,
+        "upgrade_required": schema_version < SCHEMA_VERSION,
         "missing_media": missing_media,
         "invalid_media": invalid_media,
-        "restore_drill": "passed" if integrity == "ok" and foreign_key_violations == 0 else "failed",
+        "orphan_media": orphan_media,
+        "media_count_matches": media_count_matches,
+        "media_bytes_matches": media_bytes_matches,
+        "manifest_media_count": int(manifest.get("media_files", -1)),
+        "actual_media_count": len(actual_paths),
+        "manifest_media_bytes": int(manifest.get("media_bytes", -1)),
+        "actual_media_bytes": actual_bytes,
+        "restore_drill": "passed" if restore_ok else "failed",
     }
     if update_manifest:
         manifest["verification"] = result

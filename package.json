@@ -8,6 +8,8 @@
     "test": "pnpm -r --if-present test",
     "test:backend": "python3 -m unittest discover -s tests -v",
     "test:browser": "node scripts/run_release_browser.cjs",
+    "test:album-browser": "node scripts/test_album_export_browser.cjs",
+    "test:practical-browser": "node scripts/test_practical_features_browser.cjs",
     "test:assistant-browser": "node scripts/test_life_assistant_browser.cjs",
     "test:romantic-ui-browser": "node scripts/test_romantic_compact_ui_browser.cjs",
     "test:rtc": "node scripts/run_rtc_audit.cjs",

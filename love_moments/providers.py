@@ -7,8 +7,10 @@ replace these classes without changing API or persistence code.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import date
 from urllib import error, request
@@ -50,6 +52,38 @@ class DatePlannerProvider:
         raise NotImplementedError
 
 
+def physical_place_identity(item: dict) -> tuple[str, ...]:
+    """Return a stable identity for one physical place without merging namesakes.
+
+    Provider identifiers are authoritative when available.  Providers that do
+    not expose one fall back to a normalized name plus metre-level coordinates,
+    or the complete address.  A bare name is deliberately insufficient because
+    the same business or attraction name may exist in another city.
+    """
+
+    def text(value: object) -> str:
+        return " ".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
+
+    provider = text(item.get("provider"))
+    provider_place_id = str(item.get("provider_place_id") or item.get("providerPlaceId") or "").strip()
+    if provider and provider_place_id:
+        return ("provider", provider, provider_place_id)
+
+    name = text(item.get("name") or item.get("title"))
+    latitude = item.get("latitude")
+    longitude = item.get("longitude")
+    try:
+        if name and latitude is not None and longitude is not None:
+            return ("coordinates", name, f"{float(latitude):.5f}", f"{float(longitude):.5f}")
+    except (TypeError, ValueError):
+        pass
+
+    address = text(item.get("formatted_address") or item.get("formattedAddress"))
+    if name and address:
+        return ("address", name, address)
+    return ("candidate", str(item.get("candidate_id") or item.get("placeCandidateId") or id(item)))
+
+
 class LocalDatePlanner(DatePlannerProvider):
     """Deterministic date ideas that keep the complete flow usable offline."""
 
@@ -61,24 +95,160 @@ class LocalDatePlanner(DatePlannerProvider):
         "adventure": ("新鲜体验", "安排一个第一次共同尝试的活动，留下新的共同记忆", 0.96, "活力"),
     }
 
+    @staticmethod
+    def _minutes(value: str) -> int:
+        hour, minute = (int(item) for item in value.split(":"))
+        return hour * 60 + minute
+
+    @staticmethod
+    def _clock(value: int) -> str:
+        return f"{value // 60:02d}:{value % 60:02d}"
+
+    @staticmethod
+    def _commute(previous: dict | None, current: dict | None) -> dict:
+        if not previous:
+            return {"commuteMinutes": 0, "commuteMode": "起点", "distanceMeters": 0, "commuteSource": "rules"}
+        if not current:
+            return {"commuteMinutes": 0, "commuteMode": "待核对", "distanceMeters": 0, "commuteSource": "rules"}
+        try:
+            lat1, lon1 = float(previous["latitude"]), float(previous["longitude"])
+            lat2, lon2 = float(current["latitude"]), float(current["longitude"])
+        except (KeyError, TypeError, ValueError):
+            return {"commuteMinutes": 0, "commuteMode": "待核对", "distanceMeters": 0, "commuteSource": "rules"}
+        radius = 6_371_000
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+        value = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        distance = radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1 - value)))
+        if distance <= 1500:
+            mode, minutes = "步行", max(1, round(distance / 75))
+        elif distance <= 8000:
+            mode, minutes = "公交/打车", max(10, round(distance / 330) + 8)
+        else:
+            mode, minutes = "公共交通/驾车", max(20, round(distance / 500) + 12)
+        return {"commuteMinutes": minutes, "commuteMode": mode, "distanceMeters": round(distance), "commuteSource": "rules"}
+
+    @staticmethod
+    def _weather_risk(weather: dict) -> str:
+        if str(weather.get("source_type") or "unavailable") == "unavailable":
+            return "天气数据不可用，出发前请再次确认"
+        probability = weather.get("precipitation_probability")
+        summary = str(weather.get("summary") or "天气变化中")
+        if probability is not None:
+            return f"{summary}，降雨概率 {int(probability)}%" + ("，优先安排室内项目" if int(probability) >= 50 else "")
+        return f"{summary}；暂无可靠降雨概率"
+
+    @classmethod
+    def _free_starts(cls, request_data: dict, count: int = 2, duration: int = 60) -> list[int]:
+        start = cls._minutes(str(request_data.get("start_time", "14:00")))
+        end = cls._minutes(str(request_data.get("end_time", "21:00")))
+        busy = []
+        for interval in request_data.get("busy_intervals", []):
+            if interval.get("all_day"):
+                return []
+            try:
+                busy.append((cls._minutes(str(interval["start"])), cls._minutes(str(interval["end"]))))
+            except (KeyError, TypeError, ValueError):
+                continue
+        starts: list[int] = []
+        cursor = start
+        while cursor + duration <= end and len(starts) < count:
+            collision = next(((left, right) for left, right in busy if cursor < right and cursor + duration > left), None)
+            if collision:
+                cursor = max(cursor + 15, collision[1])
+                continue
+            starts.append(cursor)
+            cursor += duration + 30
+        return starts
+
     def generate_variants(self, request_data: dict) -> list[dict]:
         city = str(request_data.get("city", "约会城市"))
         budget = int(request_data.get("budget_cents", 0))
-        start = str(request_data.get("start_time", "14:00"))
+        starts = self._free_starts(request_data)
+        if len(starts) < 2:
+            raise ValueError("双方空闲时间不足以安排约会")
+        candidates = request_data.get("place_candidates") if isinstance(request_data.get("place_candidates"), list) else []
+        verified_pool = []
+        pool_identities: set[tuple[str, ...]] = set()
+        for item in candidates[:8]:
+            if not (
+                isinstance(item, dict) and item.get("candidate_id")
+                and item.get("latitude") is not None and item.get("longitude") is not None
+                and str(item.get("source_type") or "") in {"real_api", "cache"}
+            ):
+                continue
+            identity = physical_place_identity(item)
+            if identity in pool_identities:
+                continue
+            pool_identities.add(identity)
+            verified_pool.append(item)
+        weather = request_data.get("weather") if isinstance(request_data.get("weather"), dict) else {}
+        weather_source = str(weather.get("source_type") or "unavailable")
         templates = {
-            "romantic": [(start, f"{city}慢节奏下午茶", "提前选一个靠窗位置", .22, True, False), ("17:30", "一起散步看日落", "下雨时改为书店或展览", .05, False, False), ("19:00", "安静的双人晚餐", "把手机放下，好好聊天", .55, True, False)],
-            "classic": [(start, f"{city}热门展览或体验", "出发前确认预约", .30, True, True), ("17:00", "城市街区散步", "预留拍照时间", .08, False, False), ("19:00", "本地特色晚餐", "选择双方都能吃的口味", .52, True, False)],
-            "value": [(start, "免费公园或博物馆", "优先公共交通", .05, True, False), ("17:00", "一起完成一组主题照片", "互相为对方拍三张照片", .03, False, False), ("19:00", "高评分日常小馆", "到店前查看排队情况", .40, True, False)],
-            "food": [(start, f"{city}本地甜品或咖啡", "先选双方都想尝的招牌", .18, True, False), ("17:00", "一起逛市集选晚餐", "每人负责挑一道菜", .12, False, False), ("19:00", "预约一家特色餐厅", "提前确认口味与忌口", .48, True, True)],
-            "adventure": [(start, f"{city}双人体验课", "选择双方都是第一次尝试的项目", .38, True, True), ("17:30", "城市探索任务", "随机走进一条没去过的街", .08, False, False), ("19:30", "交换今天最喜欢的瞬间", "各自选一张照片收藏", .35, True, False)],
+            "romantic": [("慢节奏相处", "留出认真聊天和拍照的时间", .28), ("安静的双人晚餐（地点待选择）", "根据双方忌口选择真实餐厅", .55)],
+            "classic": [("代表性体验", "优先选择需要预约的经典项目", .34), ("邻近街区散步（地点待选择）", "路线短一些，避免把时间花在赶路上", .22)],
+            "value": [("免费或低价体验", "预算留给两个人最在意的环节", .12), ("高性价比晚餐（地点待选择）", "价格是预算预估，到店前再次确认", .42)],
+            "food": [("特色餐饮体验", "选择双方都能吃的本地味道", .30), ("甜品或夜间散步（地点待选择）", "把节奏放慢，留一点自由时间", .26)],
+            "adventure": [("双人新鲜体验", "一起尝试没有做过的活动", .40), ("城市探索任务（地点待选择）", "保留安全、可随时结束的路线", .18)],
         }
         result = []
-        for style, (name, summary, ratio, intensity) in self.STYLES.items():
-            items = [
-                {"id": f"{style}-{index}", "startTime": item[0], "title": item[1], "note": item[2], "costCents": int(budget * item[3]), "indoor": item[4], "needsReservation": item[5]}
-                for index, item in enumerate(templates[style], 1)
-            ]
-            result.append({"style": style, "name": name, "summary": summary, "expected_cost_cents": int(budget * ratio), "intensity": intensity, "weather_fit": "雨天有备用安排", "items": items})
+        for style_index, (style, (name, summary, ratio, intensity)) in enumerate(self.STYLES.items()):
+            items = []
+            previous_place = None
+            used_place_identities: set[tuple[str, ...]] = set()
+            ordered_pool = (
+                verified_pool[style_index % len(verified_pool):]
+                + verified_pool[:style_index % len(verified_pool)]
+            ) if verified_pool else []
+            for index, (activity, note, cost_ratio) in enumerate(templates[style], 1):
+                confirmed = next((
+                    value for value in ordered_pool
+                    if physical_place_identity(value) not in used_place_identities
+                ), None)
+                use_place = confirmed is not None
+                title = (
+                    str(confirmed.get("name")) if use_place
+                    else activity if "待选择" in activity
+                    else f"{city}{activity}（地点待选择）"
+                )
+                source = str(confirmed.get("source_type") or "real_api") if use_place else "rules"
+                item = {
+                    "id": f"{style}-{index}", "startTime": self._clock(starts[index - 1]),
+                    "durationMinutes": 60, "title": title, "note": note,
+                    "costCents": min(budget, max(0, int(budget * cost_ratio))),
+                    "indoor": style in {"romantic", "classic", "food"},
+                    "needsReservation": style in {"classic", "adventure"},
+                    "recommendationSource": "rules", "placeSource": source,
+                    "priceSource": "rules", "weatherSource": weather_source,
+                    "weatherProvider": str(weather.get("provider") or "")[:80],
+                    "weatherEvidenceAt": str(weather.get("evidence_at") or "")[:80],
+                    "weatherRisk": self._weather_risk(weather),
+                    "needsPlaceSelection": not use_place,
+                }
+                item.update(self._commute(previous_place, confirmed))
+                item["note"] = (
+                    f"{item['note']} · 预计通勤：{item['commuteMode']} {item['commuteMinutes']} 分钟"
+                    f" · {item['weatherRisk']}"
+                )[:300]
+                if use_place:
+                    used_place_identities.add(physical_place_identity(confirmed))
+                    item.update({
+                        "placeCandidateId": confirmed.get("candidate_id"),
+                        "provider": confirmed.get("provider"),
+                        "providerPlaceId": confirmed.get("provider_place_id"),
+                        "formattedAddress": confirmed.get("formatted_address"),
+                        "latitude": confirmed.get("latitude"), "longitude": confirmed.get("longitude"),
+                        "evidenceAt": confirmed.get("evidence_at"),
+                    })
+                    previous_place = confirmed
+                items.append(item)
+            result.append({
+                "style": style, "name": name, "summary": summary,
+                "expected_cost_cents": min(budget, int(budget * ratio)), "intensity": intensity,
+                "weather_fit": weather.get("summary") or "天气信息不可用，请出发前确认",
+                "generation_source": "rules", "generation_message": "使用本地安全规则生成",
+                "items": items,
+            })
         return result
 
 
@@ -91,12 +261,19 @@ class OpenAICompatibleDatePlanner(DatePlannerProvider):
         self.fallback = LocalDatePlanner()
         self.before_request = before_request
 
+    def _fallback(self, request_data: dict, message: str) -> list[dict]:
+        plans = self.fallback.generate_variants(request_data)
+        for plan in plans:
+            plan["generation_source"] = "rules"
+            plan["generation_message"] = message[:120]
+        return plans
+
     def generate_variants(self, request_data: dict) -> list[dict]:
         prompt = {
             "task": "为情侣约会生成五套有明显差异、时间不冲突且预算合理的方案",
             "input": request_data,
             "required_styles": ["romantic", "classic", "value", "food", "adventure"],
-            "output": {"plans": [{"style": "romantic|classic|value|food|adventure", "name": "名称", "summary": "摘要", "expected_cost_cny": 300, "intensity": "松弛|适中|轻快|活力", "weather_fit": "天气说明", "items": [{"start_time": "14:00", "title": "活动", "note": "执行提示", "cost_cny": 50, "indoor": True, "needs_reservation": False}]}]},
+            "output": {"plans": [{"style": "romantic|classic|value|food|adventure", "name": "名称", "summary": "摘要", "expected_cost_cny": 300, "intensity": "松弛|适中|轻快|活力", "weather_fit": "天气说明", "items": [{"start_time": "14:00", "duration_minutes": 60, "title": "活动（地点待选择）", "place_candidate_id": "仅可填写 input.place_candidates 中的 candidate_id，否则留空且标题必须含地点待选择", "note": "执行提示", "cost_cny": 50, "indoor": True, "needs_reservation": False}]}]},
         }
         payload = {
             "model": self.model,
@@ -104,7 +281,7 @@ class OpenAICompatibleDatePlanner(DatePlannerProvider):
             "max_tokens": 4096,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": "你是情侣约会规划器。只返回严格 JSON。不得提供危险、成人或违法活动。每套方案 2–6 个项目。"},
+                {"role": "system", "content": "你是情侣约会规划器。只返回严格 JSON。不得提供危险、成人或违法活动。每套方案 2–6 个项目。具体地点只能引用输入中的 candidate_id；没有候选依据时标题必须明确写“地点待选择”，不得虚构店名或景点。"},
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ],
         }
@@ -121,14 +298,19 @@ class OpenAICompatibleDatePlanner(DatePlannerProvider):
             )
             with request.urlopen(req, timeout=self.timeout, context=TRUSTED_SSL_CONTEXT) as response:
                 content = json.loads(response.read().decode("utf-8"))["choices"][0]["message"]["content"]
-            return self._validate(json.loads(content), int(request_data.get("budget_cents", 0)))
+            plans = self._validate(json.loads(content), int(request_data.get("budget_cents", 0)), request_data)
+            for plan in plans:
+                plan["generation_source"] = "ai"
+                plan["generation_message"] = "由模型根据已确认的结构化信息生成"
+            return plans
         except QuotaExceededError:
-            return self.fallback.generate_variants(request_data)
+            return self._fallback(request_data, "模型额度暂不可用，已使用本地安全规则生成")
         except (error.URLError, TimeoutError, KeyError, ValueError, TypeError, OverflowError, UnicodeError, json.JSONDecodeError):
-            return self.fallback.generate_variants(request_data)
+            return self._fallback(request_data, "模型不可用或结果未通过校验，已使用本地安全规则生成")
 
     @staticmethod
-    def _validate(value: dict, budget_cents: int) -> list[dict]:
+    def _validate(value: dict, budget_cents: int, context: dict | None = None) -> list[dict]:
+        context = context or {}
         rows = value.get("plans")
         expected_styles = ["romantic", "classic", "value", "food", "adventure"]
         if not isinstance(rows, list) or len(rows) != len(expected_styles):
@@ -140,17 +322,83 @@ class OpenAICompatibleDatePlanner(DatePlannerProvider):
             if style not in set(expected_styles) or not isinstance(raw_items, list) or not 2 <= len(raw_items) <= 6:
                 raise ValueError("模型约会方案结构无效")
             items = []
-            previous_time = "00:00"
+            previous_end = -1
+            window_start = LocalDatePlanner._minutes(str(context.get("start_time", "00:00")))
+            window_end = LocalDatePlanner._minutes(str(context.get("end_time", "23:59")))
+            allowed_places = {
+                str(item.get("candidate_id")): item
+                for item in context.get("place_candidates", [])
+                if isinstance(item, dict) and item.get("candidate_id")
+            }
+            busy = []
+            for interval in context.get("busy_intervals", []):
+                if not isinstance(interval, dict) or interval.get("all_day"):
+                    continue
+                try:
+                    busy.append((LocalDatePlanner._minutes(str(interval["start"])), LocalDatePlanner._minutes(str(interval["end"]))))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            previous_place = None
+            used_place_identities: set[tuple[str, ...]] = set()
             for index, item in enumerate(raw_items, 1):
                 start_time = str(item.get("start_time", ""))[:5]
                 title = str(item.get("title", "")).strip()[:100]
-                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start_time) or not title or start_time < previous_time:
+                try:
+                    duration = int(item.get("duration_minutes", 60))
+                    start_minutes = LocalDatePlanner._minutes(start_time)
+                except (TypeError, ValueError):
+                    raise ValueError("模型约会时间线无效") from None
+                end_minutes = start_minutes + duration
+                if (not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start_time) or not title
+                        or duration < 15 or duration > 360 or start_minutes < window_start
+                        or end_minutes > window_end or start_minutes < previous_end):
                     raise ValueError("模型约会时间线无效")
-                previous_time = start_time
-                items.append({"id": f"{style}-{index}", "startTime": start_time, "title": title, "note": str(item.get("note", ""))[:300], "costCents": max(0, int(float(item.get("cost_cny", 0)) * 100)), "indoor": bool(item.get("indoor", False)), "needsReservation": bool(item.get("needs_reservation", False))})
+                if any(start_minutes < right and end_minutes > left for left, right in busy):
+                    raise ValueError("模型约会与已占用时间冲突")
+                previous_end = end_minutes
+                candidate_id = str(item.get("place_candidate_id") or "")
+                candidate = allowed_places.get(candidate_id) if candidate_id else None
+                if candidate_id and not candidate:
+                    raise ValueError("模型使用了未验证的地点候选")
+                candidate_identity = physical_place_identity(candidate) if candidate else None
+                if candidate_identity and candidate_identity in used_place_identities:
+                    raise ValueError("同一套方案不能重复安排同一个地点")
+                if not candidate and "待选择" not in title:
+                    raise ValueError("模型给出的具体地点没有服务器候选依据")
+                cost = max(0, int(float(item.get("cost_cny", 0)) * 100))
+                weather = context.get("weather") if isinstance(context.get("weather"), dict) else {}
+                rendered = {
+                    "id": f"{style}-{index}", "startTime": start_time,
+                    "durationMinutes": duration, "title": str(candidate.get("name")) if candidate else title,
+                    "note": str(item.get("note", ""))[:300], "costCents": cost,
+                    "indoor": bool(item.get("indoor", False)),
+                    "needsReservation": bool(item.get("needs_reservation", False)),
+                    "recommendationSource": "ai", "placeSource": str(candidate.get("source_type") or "real_api") if candidate else "rules",
+                    "priceSource": "rules", "weatherSource": str(weather.get("source_type") or "unavailable"),
+                    "weatherProvider": str(weather.get("provider") or "")[:80],
+                    "weatherEvidenceAt": str(weather.get("evidence_at") or "")[:80],
+                    "weatherRisk": LocalDatePlanner._weather_risk(weather),
+                    "needsPlaceSelection": candidate is None,
+                }
+                rendered.update(LocalDatePlanner._commute(previous_place, candidate))
+                rendered["note"] = (
+                    f"{rendered['note']} · 预计通勤：{rendered['commuteMode']} {rendered['commuteMinutes']} 分钟"
+                    f" · {rendered['weatherRisk']}"
+                )[:300]
+                if candidate:
+                    used_place_identities.add(candidate_identity)
+                    rendered.update({
+                        "placeCandidateId": candidate_id, "provider": candidate.get("provider"),
+                        "providerPlaceId": candidate.get("provider_place_id"),
+                        "formattedAddress": candidate.get("formatted_address"),
+                        "latitude": candidate.get("latitude"), "longitude": candidate.get("longitude"),
+                        "evidenceAt": candidate.get("evidence_at"),
+                    })
+                    previous_place = candidate
+                items.append(rendered)
             expected = max(0, int(float(row.get("expected_cost_cny", 0)) * 100))
-            if budget_cents and expected > budget_cents * 2:
-                raise ValueError("模型方案严重超出预算")
+            if budget_cents and (expected > budget_cents or sum(item["costCents"] for item in items) > budget_cents):
+                raise ValueError("模型方案超出预算")
             plans.append({"style": style, "name": str(row.get("name", style))[:50], "summary": str(row.get("summary", ""))[:300], "expected_cost_cents": expected, "intensity": str(row.get("intensity", "适中"))[:20], "weather_fit": str(row.get("weather_fit", "请出发前确认天气"))[:200], "items": items})
         if {plan["style"] for plan in plans} != set(expected_styles):
             raise ValueError("模型约会方案类型不完整")

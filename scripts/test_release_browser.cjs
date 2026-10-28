@@ -78,8 +78,6 @@ async function checkSurface(page, surface, viewport) {
 
 function shouldIgnoreConsoleError(message) {
   const text = message.text();
-  // Chromium's generic 404 console line omits the requested URL. The response
-  // listeners record that failure with the exact URL instead.
   return text.includes("favicon.ico")
     || text.includes("Failed to load resource: the server responded with a status of 404");
 }
@@ -101,11 +99,12 @@ function shouldIgnoreConsoleError(message) {
     const pageB = await contextB.newPage();
     for (const [label, page] of [["test", pageA], ["test1", pageB]]) {
       page.on("pageerror", error => errors.push(`${label} pageerror: ${error.message}`));
-      page.on("response", response => {
-        if (response.status() === 404) errors.push(`${label} response 404: ${response.url()}`);
-      });
+      page.on("response", response => { if (response.status() === 404) errors.push(`${label} response 404: ${response.url()}`); });
       page.on("console", message => {
-        if (message.type() === "error" && !shouldIgnoreConsoleError(message)) errors.push(`${label} console: ${message.text()}`);
+        if (message.type() === "error" && !shouldIgnoreConsoleError(message)) {
+          const location = message.location()?.url;
+          errors.push(`${label} console${location ? ` (${location})` : ""}: ${message.text()}`);
+        }
       });
     }
 
@@ -156,15 +155,12 @@ function shouldIgnoreConsoleError(message) {
     checks.push("文字消息 SSE 双端实时同步");
 
     const markerMessage = pageA.locator("#messages .message", { hasText: marker });
-    await markerMessage.hover();
-    await pageA.mouse.down();
-    await pageA.waitForTimeout(720);
-    await pageA.mouse.up();
+    await markerMessage.locator('[data-action="save-message"]').click();
     await pageA.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("已收藏"));
     const afterCollection = await api(pageA, "/api/v1/bootstrap");
     const collected = afterCollection.moments.find(item => item.body === marker);
     assert(collected, "消息收藏为瞬间失败");
-    checks.push("消息长按收藏为瞬间流程");
+    checks.push("消息按钮/长按共用的收藏为瞬间流程");
 
     const ocrMarker = `OCR-${Date.now()}`;
     await pageA.locator('[data-action="import-chat"]').click();
@@ -256,6 +252,7 @@ function shouldIgnoreConsoleError(message) {
     );
     assert((await api(pageB, "/api/v1/trips")).items.some(item => item.destination === destination), "任意目的地旅行未共享");
     await pageA.locator('.section-tabs [data-trip-section="tools"]').click();
+    await pageA.locator('[data-trip-tool-section="route"]').click();
     await pageA.locator('[data-action="trip-route"]').click();
     await pageA.locator("#tripToolResults .route-leg-card").first().waitFor();
     const routeText = await pageA.locator("#tripToolResults").textContent();
@@ -450,7 +447,9 @@ function shouldIgnoreConsoleError(message) {
     checks.push("智能添加纪念日的预览、确认、落库、自动定位与双账号查看");
 
     const cachedWrites = await pageA.evaluate(() => {
-      const manifest = JSON.parse(localStorage.getItem("love-ui-life") || "null");
+      const scope = localStorage.getItem("love-active-scope");
+      const manifest = JSON.parse(localStorage.getItem(`love-private:${scope}:ui:life:`) || "null");
+      if (!manifest) throw new Error("当前用户隔离的智能布局缓存缺失");
       return [...(manifest?.sections || []), ...(manifest?.personalOverlay || [])].flatMap(node => node.actions || []).filter(action => action.requiresConfirmation).length;
     });
     assert(cachedWrites === 0, "临时智能写操作被错误写入长期缓存");
@@ -829,9 +828,7 @@ function shouldIgnoreConsoleError(message) {
 
     const adminPage = await contextA.newPage();
     adminPage.on("pageerror", error => errors.push(`admin pageerror: ${error.message}`));
-    adminPage.on("response", response => {
-      if (response.status() === 404) errors.push(`admin response 404: ${response.url()}`);
-    });
+    adminPage.on("response", response => { if (response.status() === 404) errors.push(`admin response 404: ${response.url()}`); });
     adminPage.on("console", message => {
       if (message.type() === "error" && !shouldIgnoreConsoleError(message)) errors.push(`admin console: ${message.text()}`);
     });
@@ -858,9 +855,7 @@ function shouldIgnoreConsoleError(message) {
     const offlineContext = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "allow" });
     const offlinePage = await offlineContext.newPage();
     offlinePage.on("pageerror", error => errors.push(`offline pageerror: ${error.message}`));
-    offlinePage.on("response", response => {
-      if (response.status() === 404) errors.push(`offline response 404: ${response.url()}`);
-    });
+    offlinePage.on("response", response => { if (response.status() === 404) errors.push(`offline response 404: ${response.url()}`); });
     await login(offlinePage, originA, "test", "test123");
     await offlinePage.waitForFunction(() => navigator.serviceWorker?.controller, null, { timeout: 10_000 }).catch(async () => {
       await offlinePage.reload({ waitUntil: "domcontentloaded" });
@@ -874,6 +869,7 @@ function shouldIgnoreConsoleError(message) {
     await offlineContext.close();
     checks.push("PWA 静态缓存与离线已确认行程快照");
 
+    const accountSwitchErrorsStart = errors.length;
     const accountSwitchPage = await contextA.newPage();
     await accountSwitchPage.goto(`${originA}/`, { waitUntil: "domcontentloaded" });
     await logout(accountSwitchPage);
@@ -886,6 +882,29 @@ function shouldIgnoreConsoleError(message) {
     await login(accountSwitchPage, originA, "test", "test123");
     await pageA.waitForFunction(() => document.querySelector("#partnerMomentLabel")?.textContent.includes("当前账号：演示甲"));
     await accountSwitchPage.close();
+    // The shared-cookie account-switch test deliberately invalidates the old
+    // tab while its bootstrap fan-out may still have protected reads in
+    // flight. Chrome reports those cancelled-session responses as generic
+    // resource errors before the storage event reloads the tab. Accept only
+    // the known read-only endpoints inside this exact switch window; every
+    // other 401 and every error outside the window remains release-fatal.
+    const expectedSwitchReads = new Set([
+      "/api/v1/media/usage",
+      "/api/v1/couple/context",
+      "/api/v1/calls/active",
+      "/api/v1/push/config",
+      "/api/v1/ui/life",
+    ]);
+    const switchErrors = errors.slice(accountSwitchErrorsStart).filter(value => {
+      if (!value.includes("status of 401 (Unauthorized)")) return true;
+      try {
+        const match = value.match(/console \((https?:\/\/[^)]+)\)/);
+        return !match || !expectedSwitchReads.has(new URL(match[1]).pathname);
+      } catch (_) {
+        return true;
+      }
+    });
+    errors.splice(accountSwitchErrorsStart, errors.length - accountSwitchErrorsStart, ...switchErrors);
     checks.push("同源多标签页切换账号时自动刷新身份");
 
     await pageA.locator('[data-nav="life"]').last().click();

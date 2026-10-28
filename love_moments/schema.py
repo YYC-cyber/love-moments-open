@@ -1,4 +1,9 @@
-SCHEMA_VERSION = 33
+import re
+import sqlite3
+
+
+SCHEMA_VERSION = 34
+V34_SCHEMA_MARKER = "-- V34 FOUNDATION TABLES --"
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -431,7 +436,12 @@ CREATE TABLE IF NOT EXISTS shared_list_items (
     note TEXT NOT NULL DEFAULT '',
     completed_at TEXT,
     position INTEGER NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1
+    version INTEGER NOT NULL DEFAULT 1,
+    item_kind TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK(item_kind IN ('legacy_unknown','general','gift','meal','travel')),
+    deleted_at TEXT,
+    created_at TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS daily_answers (
@@ -529,7 +539,14 @@ CREATE TABLE IF NOT EXISTS ai_context_grants (
     resource_id TEXT NOT NULL,
     purpose TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    revoked_at TEXT,
+    last_used_at TEXT,
+    resource_version INTEGER CHECK(resource_version IS NULL OR resource_version >= 1),
+    usage_scope TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK(usage_scope IN ('legacy_unknown','selected_content')),
+    request_id TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_context_grants_owner
 ON ai_context_grants(couple_id, user_id, expires_at);
@@ -569,7 +586,13 @@ CREATE TABLE IF NOT EXISTS media_assets (
     deleted_at TEXT,
     purged_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    captured_at TEXT,
+    date_source TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK(date_source IN ('legacy_unknown','user_confirmed','media_capture','trip_date','system_provisional')),
+    source_type TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+    duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0)
 );
 CREATE INDEX IF NOT EXISTS idx_media_assets_couple_time
 ON media_assets(couple_id, created_at DESC);
@@ -775,7 +798,13 @@ CREATE TABLE IF NOT EXISTS calendar_entries (
     deleted_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    participant_a_id TEXT REFERENCES users(id),
+    participant_b_id TEXT REFERENCES users(id)
+        CHECK(participant_b_id IS NULL OR (participant_a_id IS NOT NULL AND participant_b_id <> participant_a_id)),
+    blocks_time INTEGER NOT NULL DEFAULT 0 CHECK(blocks_time IN (0,1)),
+    source_type TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown'))
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_entries_couple_date
 ON calendar_entries(couple_id, starts_at, deleted_at);
@@ -1324,4 +1353,806 @@ CREATE TABLE IF NOT EXISTS couple_assistant_settings (
     updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     updated_at TEXT NOT NULL
 );
+
+-- V34 FOUNDATION TABLES --
+CREATE TABLE IF NOT EXISTS decisions (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id),
+ creator_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+ selection_mode TEXT NOT NULL CHECK(selection_mode IN ('single','multiple')),
+ status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','awaiting_extension','revealed','pending_confirmation','confirmed','cancelled','converted')),
+ voting_round INTEGER NOT NULL DEFAULT 1 CHECK(voting_round >= 1),
+ closes_at TEXT NOT NULL, revealed_at TEXT, options_locked_at TEXT,
+ resolution_json TEXT CHECK(resolution_json IS NULL OR (json_valid(resolution_json) AND json_type(resolution_json)='object')),
+ conversion_json TEXT CHECK(conversion_json IS NULL OR (json_valid(conversion_json) AND json_type(conversion_json)='object')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(couple_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_queue ON decisions(couple_id,status,updated_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_decisions_due ON decisions(status,closes_at) WHERE deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS decision_options (
+ id TEXT PRIMARY KEY NOT NULL, decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+ label TEXT NOT NULL CHECK(length(trim(label)) BETWEEN 1 AND 300),
+ position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 5),
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ UNIQUE(decision_id,position), UNIQUE(decision_id,id)
+);
+CREATE TABLE IF NOT EXISTS decision_votes (
+ decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+ voting_round INTEGER NOT NULL CHECK(voting_round >= 1), user_id TEXT NOT NULL REFERENCES users(id),
+ option_id TEXT NOT NULL, submitted_at TEXT NOT NULL,
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ PRIMARY KEY(decision_id,voting_round,user_id,option_id),
+ FOREIGN KEY(decision_id,option_id) REFERENCES decision_options(decision_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_decision_votes_owner ON decision_votes(user_id,decision_id,voting_round);
+CREATE TABLE IF NOT EXISTS decision_confirmations (
+ decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+ decision_version INTEGER NOT NULL CHECK(decision_version >= 1), user_id TEXT NOT NULL REFERENCES users(id),
+ confirmed_at TEXT NOT NULL, PRIMARY KEY(decision_id,decision_version,user_id)
+);
+CREATE TABLE IF NOT EXISTS wishlist_claims (
+ id TEXT PRIMARY KEY NOT NULL, item_id TEXT NOT NULL REFERENCES shared_list_items(id) ON DELETE CASCADE,
+ claimant_id TEXT NOT NULL REFERENCES users(id),
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','released','cancelled','completed')),
+ private_note TEXT NOT NULL DEFAULT '', reveal_claimant INTEGER NOT NULL DEFAULT 0 CHECK(reveal_claimant IN (0,1)),
+ item_version_at_claim INTEGER NOT NULL CHECK(item_version_at_claim >= 1),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ended_at TEXT,
+ UNIQUE(claimant_id,client_request_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wishlist_claim_one_active ON wishlist_claims(item_id) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_wishlist_claim_owner ON wishlist_claims(claimant_id,status,updated_at DESC);
+CREATE TABLE IF NOT EXISTS ingredient_catalog (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT REFERENCES couples(id),
+ canonical_name TEXT NOT NULL CHECK(length(trim(canonical_name)) BETWEEN 1 AND 100),
+ normalized_name TEXT NOT NULL CHECK(length(normalized_name)>0),
+ aliases_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(aliases_json) AND json_type(aliases_json)='array'),
+ allergens_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(allergens_json) AND json_type(allergens_json)='array'),
+ category TEXT NOT NULL DEFAULT 'other' CHECK(category IN ('produce','meat_eggs','seafood','dairy','staples_oils','seasonings','frozen','household','other')),
+ source_type TEXT NOT NULL DEFAULT 'human' CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ingredient_system_name ON ingredient_catalog(normalized_name) WHERE couple_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ingredient_couple_name ON ingredient_catalog(couple_id,normalized_name) WHERE couple_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS food_profiles (
+ couple_id TEXT NOT NULL REFERENCES couples(id), user_id TEXT NOT NULL REFERENCES users(id),
+ allergies_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(allergies_json) AND json_type(allergies_json)='array'),
+ avoidances_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(avoidances_json) AND json_type(avoidances_json)='array'),
+ preferences_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(preferences_json) AND json_type(preferences_json)='object'),
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), updated_at TEXT NOT NULL,
+ PRIMARY KEY(couple_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS pantry_items (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id),
+ ingredient_id TEXT NOT NULL REFERENCES ingredient_catalog(id), updated_by TEXT NOT NULL REFERENCES users(id),
+ state TEXT NOT NULL CHECK(state IN ('have','low','out')),
+ storage_location TEXT CHECK(storage_location IS NULL OR storage_location IN ('ambient','chilled','frozen')),
+ expires_on TEXT, quantity_note TEXT NOT NULL DEFAULT '',
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(couple_id,ingredient_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pantry_expiry ON pantry_items(couple_id,expires_on) WHERE state <> 'out' AND expires_on IS NOT NULL;
+CREATE TABLE IF NOT EXISTS shopping_category_preferences (
+ couple_id TEXT NOT NULL REFERENCES couples(id),
+ category TEXT NOT NULL CHECK(category IN ('produce','meat_eggs','seafood','dairy','staples_oils','seasonings','frozen','household','other')),
+ position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 8),
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), updated_at TEXT NOT NULL,
+ PRIMARY KEY(couple_id,category)
+);
+CREATE INDEX IF NOT EXISTS idx_shopping_category_order ON shopping_category_preferences(couple_id,position,category);
+CREATE TABLE IF NOT EXISTS weekly_meal_plan_drafts (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), creator_id TEXT NOT NULL REFERENCES users(id),
+ starts_on TEXT NOT NULL, ends_on TEXT NOT NULL CHECK(ends_on >= starts_on),
+ status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','pending_confirmation','applied','cancelled','expired','failed')),
+ payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
+ preview_json TEXT NOT NULL CHECK(json_valid(preview_json) AND json_type(preview_json)='object'),
+ expected_versions_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(expected_versions_json) AND json_type(expected_versions_json)='object'),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ confirmed_a_id TEXT REFERENCES users(id), confirmed_a_version INTEGER CHECK(confirmed_a_version IS NULL OR confirmed_a_version >= 1), confirmed_a_at TEXT,
+ confirmed_b_id TEXT REFERENCES users(id), confirmed_b_version INTEGER CHECK(confirmed_b_version IS NULL OR confirmed_b_version >= 1), confirmed_b_at TEXT,
+ result_json TEXT CHECK(result_json IS NULL OR (json_valid(result_json) AND json_type(result_json)='object')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ expires_at TEXT NOT NULL, applied_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(couple_id,creator_id,client_request_id),
+ CHECK((confirmed_a_id IS NULL AND confirmed_a_version IS NULL AND confirmed_a_at IS NULL) OR (confirmed_a_id IS NOT NULL AND confirmed_a_version IS NOT NULL AND confirmed_a_at IS NOT NULL)),
+ CHECK((confirmed_b_id IS NULL AND confirmed_b_version IS NULL AND confirmed_b_at IS NULL) OR (confirmed_b_id IS NOT NULL AND confirmed_b_version IS NOT NULL AND confirmed_b_at IS NOT NULL)),
+ CHECK(confirmed_a_id IS NULL OR confirmed_b_id IS NULL OR confirmed_a_id <> confirmed_b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_weekly_meal_drafts_owner ON weekly_meal_plan_drafts(couple_id,creator_id,status,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_weekly_meal_drafts_expiry ON weekly_meal_plan_drafts(status,expires_at);
+CREATE TABLE IF NOT EXISTS cook_sessions (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), creator_id TEXT NOT NULL REFERENCES users(id),
+ recipe_id TEXT REFERENCES recipes(id) ON DELETE SET NULL, meal_item_id TEXT REFERENCES meal_cart_items(id) ON DELETE SET NULL,
+ recipe_snapshot_json TEXT NOT NULL CHECK(json_valid(recipe_snapshot_json) AND json_type(recipe_snapshot_json)='object'),
+ visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('private','shared')),
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','cancelled')),
+ current_step INTEGER NOT NULL DEFAULT 0 CHECK(current_step >= 0),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ started_at TEXT NOT NULL, updated_at TEXT NOT NULL, ended_at TEXT,
+ UNIQUE(couple_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cook_sessions_owner ON cook_sessions(couple_id,creator_id,status,updated_at DESC);
+CREATE TABLE IF NOT EXISTS cook_timers (
+ id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL REFERENCES cook_sessions(id) ON DELETE CASCADE,
+ step_index INTEGER NOT NULL CHECK(step_index >= 0), label TEXT NOT NULL DEFAULT '',
+ duration_seconds INTEGER NOT NULL CHECK(duration_seconds BETWEEN 1 AND 604800),
+ started_at TEXT NOT NULL, ends_at TEXT NOT NULL CHECK(ends_at > started_at),
+ status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','cancelled')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), updated_at TEXT NOT NULL,
+ UNIQUE(session_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cook_timers_due ON cook_timers(session_id,status,ends_at);
+CREATE TABLE IF NOT EXISTS ingredient_substitutions (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), creator_id TEXT NOT NULL REFERENCES users(id),
+ from_ingredient_id TEXT NOT NULL REFERENCES ingredient_catalog(id), to_ingredient_id TEXT NOT NULL REFERENCES ingredient_catalog(id),
+ recipe_id TEXT REFERENCES recipes(id) ON DELETE SET NULL,
+ meal_item_id TEXT REFERENCES meal_cart_items(id) ON DELETE CASCADE,
+ snapshot_ingredient_ref TEXT,
+ meal_version INTEGER CHECK(meal_version IS NULL OR meal_version >= 1),
+ expected_versions_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(expected_versions_json) AND json_type(expected_versions_json)='object'),
+ rule_key TEXT,
+ rule_version INTEGER CHECK(rule_version IS NULL OR rule_version >= 1),
+ ratio_note TEXT NOT NULL DEFAULT '', suitable_methods_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(suitable_methods_json) AND json_type(suitable_methods_json)='array'),
+ effect_note TEXT NOT NULL DEFAULT '', added_allergens_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(added_allergens_json) AND json_type(added_allergens_json)='array'),
+ safety_status TEXT NOT NULL DEFAULT 'needs_review' CHECK(safety_status IN ('needs_review','allowed','blocked')),
+ profile_versions_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(profile_versions_json) AND json_type(profile_versions_json)='object'),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ status TEXT NOT NULL DEFAULT 'suggested' CHECK(status IN ('suggested','applied','dismissed','expired')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK(from_ingredient_id <> to_ingredient_id), CHECK(status <> 'applied' OR safety_status='allowed'),
+ UNIQUE(couple_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ingredient_substitutions_owner ON ingredient_substitutions(couple_id,creator_id,status,created_at DESC);
+CREATE TABLE IF NOT EXISTS trip_item_preferences (
+ id TEXT PRIMARY KEY NOT NULL, trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+ itinerary_item_id TEXT NOT NULL REFERENCES itinerary_items(id) ON DELETE CASCADE,
+ user_id TEXT NOT NULL REFERENCES users(id), negotiation_round INTEGER NOT NULL DEFAULT 1 CHECK(negotiation_round >= 1),
+ preference TEXT NOT NULL CHECK(preference IN ('must','okay','avoid')),
+ expected_item_version INTEGER NOT NULL CHECK(expected_item_version >= 1), submitted_at TEXT,
+ override_confirmed_at TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), updated_at TEXT NOT NULL,
+ UNIQUE(trip_id,itinerary_item_id,negotiation_round,user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trip_preferences_owner ON trip_item_preferences(trip_id,user_id,negotiation_round,submitted_at);
+CREATE TABLE IF NOT EXISTS trip_realism_checks (
+ id TEXT PRIMARY KEY NOT NULL, trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+ creator_id TEXT NOT NULL REFERENCES users(id), trip_version INTEGER NOT NULL CHECK(trip_version >= 1),
+ expected_item_versions_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(expected_item_versions_json) AND json_type(expected_item_versions_json)='object'),
+ findings_json TEXT NOT NULL CHECK(json_valid(findings_json) AND json_type(findings_json)='array'),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ status TEXT NOT NULL DEFAULT 'current' CHECK(status IN ('current','stale','dismissed')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ checked_at TEXT NOT NULL, expires_at TEXT, UNIQUE(trip_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trip_realism_checks_current ON trip_realism_checks(trip_id,status,checked_at DESC);
+CREATE TABLE IF NOT EXISTS trip_packing_items (
+ id TEXT PRIMARY KEY NOT NULL, trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+ creator_id TEXT NOT NULL REFERENCES users(id), label TEXT NOT NULL CHECK(length(trim(label)) BETWEEN 1 AND 200),
+ assigned_user_id TEXT REFERENCES users(id), assignment TEXT NOT NULL DEFAULT 'shared' CHECK(assignment IN ('shared','person','not_needed')),
+ checked INTEGER NOT NULL DEFAULT 0 CHECK(checked IN (0,1)), position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK((assignment='person' AND assigned_user_id IS NOT NULL) OR (assignment<>'person' AND assigned_user_id IS NULL)),
+ UNIQUE(trip_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trip_packing_active ON trip_packing_items(trip_id,deleted_at,position);
+CREATE TABLE IF NOT EXISTS trip_emergency_entries (
+ id TEXT PRIMARY KEY NOT NULL, trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+ creator_id TEXT NOT NULL REFERENCES users(id),
+ entry_type TEXT NOT NULL CHECK(entry_type IN ('hotel','booking','contact','insurance','hospital','return','other')),
+ title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+ details_json TEXT NOT NULL CHECK(json_valid(details_json) AND json_type(details_json)='object'),
+ visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('private','shared')),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0), client_request_id TEXT,
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(trip_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trip_emergency_visible ON trip_emergency_entries(trip_id,creator_id,visibility,deleted_at,position);
+CREATE TABLE IF NOT EXISTS trip_expenses (
+ id TEXT PRIMARY KEY NOT NULL, trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+ creator_id TEXT NOT NULL REFERENCES users(id), payer_id TEXT NOT NULL REFERENCES users(id),
+ amount_minor INTEGER NOT NULL CHECK(typeof(amount_minor)='integer' AND amount_minor BETWEEN 1 AND 9007199254740991),
+ currency TEXT NOT NULL CHECK(length(currency)=3 AND currency GLOB '[A-Z][A-Z][A-Z]'),
+ category TEXT NOT NULL CHECK(category IN ('transport','lodging','food','tickets','shopping','other')),
+ split_mode TEXT NOT NULL DEFAULT 'equal' CHECK(split_mode IN ('equal','personal')),
+ beneficiary_id TEXT REFERENCES users(id), note TEXT NOT NULL DEFAULT '', occurred_on TEXT NOT NULL,
+ settled_at TEXT, settled_by TEXT REFERENCES users(id),
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK((split_mode='equal' AND beneficiary_id IS NULL) OR (split_mode='personal' AND beneficiary_id IS NOT NULL)),
+ CHECK((settled_at IS NULL AND settled_by IS NULL) OR (settled_at IS NOT NULL AND settled_by IS NOT NULL)),
+ UNIQUE(trip_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trip_expenses_balance ON trip_expenses(trip_id,currency,settled_at,occurred_on) WHERE deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS memory_provenance (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), owner_id TEXT REFERENCES users(id),
+ moment_id TEXT REFERENCES moments(id) ON DELETE CASCADE,
+ media_id TEXT REFERENCES media_assets(id) ON DELETE CASCADE,
+ trip_id TEXT REFERENCES trips(id) ON DELETE CASCADE,
+ recipe_id TEXT REFERENCES recipes(id) ON DELETE CASCADE,
+ calendar_entry_id TEXT REFERENCES calendar_entries(id) ON DELETE CASCADE,
+ shared_list_item_id TEXT REFERENCES shared_list_items(id) ON DELETE CASCADE,
+ source_type TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ date_source TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(date_source IN ('legacy_unknown','user_confirmed','media_capture','trip_date','system_provisional')),
+ evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(evidence_json) AND json_type(evidence_json)='object'),
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK((moment_id IS NOT NULL)+(media_id IS NOT NULL)+(trip_id IS NOT NULL)+(recipe_id IS NOT NULL)+(calendar_entry_id IS NOT NULL)+(shared_list_item_id IS NOT NULL)=1),
+ UNIQUE(moment_id), UNIQUE(media_id), UNIQUE(trip_id), UNIQUE(recipe_id), UNIQUE(calendar_entry_id), UNIQUE(shared_list_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_provenance_owner ON memory_provenance(couple_id,owner_id,source_type);
+CREATE TABLE IF NOT EXISTS memory_descriptions (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), author_id TEXT NOT NULL REFERENCES users(id),
+ moment_id TEXT REFERENCES moments(id) ON DELETE CASCADE, trip_id TEXT REFERENCES trips(id) ON DELETE CASCADE,
+ body TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('private','shared')),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ merge_proposal_json TEXT CHECK(merge_proposal_json IS NULL OR (json_valid(merge_proposal_json) AND json_type(merge_proposal_json)='object')),
+ merge_confirmed_by TEXT REFERENCES users(id), merge_confirmed_version INTEGER CHECK(merge_confirmed_version IS NULL OR merge_confirmed_version >= 1), merge_confirmed_at TEXT,
+ version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1), deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK((moment_id IS NOT NULL)+(trip_id IS NOT NULL)=1), UNIQUE(moment_id,author_id), UNIQUE(trip_id,author_id),
+ CHECK((merge_confirmed_by IS NULL AND merge_confirmed_version IS NULL AND merge_confirmed_at IS NULL) OR
+       (merge_confirmed_by IS NOT NULL AND merge_confirmed_version IS NOT NULL AND merge_confirmed_at IS NOT NULL AND merge_proposal_json IS NOT NULL)),
+ CHECK(merge_confirmed_by IS NULL OR merge_confirmed_by <> author_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_descriptions_owner ON memory_descriptions(couple_id,author_id,visibility,deleted_at,updated_at DESC);
+CREATE TABLE IF NOT EXISTS memory_completion_suggestions (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), user_id TEXT NOT NULL REFERENCES users(id),
+ moment_id TEXT REFERENCES moments(id) ON DELETE CASCADE, trip_id TEXT REFERENCES trips(id) ON DELETE CASCADE,
+ suggestion_kind TEXT NOT NULL CHECK(suggestion_kind IN ('missing_text','missing_location','missing_partner_description','provisional_date')),
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','snoozed','dismissed','completed')),
+ remind_at TEXT, notified_at TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK((moment_id IS NOT NULL)+(trip_id IS NOT NULL)=1),
+ UNIQUE(moment_id,user_id,suggestion_kind), UNIQUE(trip_id,user_id,suggestion_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_completion_owner ON memory_completion_suggestions(couple_id,user_id,status,remind_at);
+CREATE TABLE IF NOT EXISTS voice_transcripts (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), owner_id TEXT NOT NULL REFERENCES users(id),
+ media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+ moment_id TEXT REFERENCES moments(id) ON DELETE SET NULL,
+ body TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT 'zh-CN',
+ method TEXT NOT NULL CHECK(method IN ('manual','browser','provider','legacy_unknown')),
+ source_type TEXT NOT NULL CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown')),
+ status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','ready','failed')),
+ visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('private','shared','delayed')),
+ reveal_at TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(media_id,owner_id)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_transcripts_owner ON voice_transcripts(couple_id,owner_id,visibility,status,updated_at DESC);
+CREATE TABLE IF NOT EXISTS future_letters (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), author_id TEXT NOT NULL REFERENCES users(id),
+ recipient_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','sealed','delivered','deleted')),
+ deliver_at TEXT, sealed_at TEXT, delivered_at TEXT, deleted_at TEXT,
+ delivered_moment_id TEXT REFERENCES moments(id) ON DELETE SET NULL,
+ client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ CHECK(author_id <> recipient_id),
+ CHECK(status <> 'sealed' OR (deliver_at IS NOT NULL AND sealed_at IS NOT NULL)),
+ CHECK(status <> 'delivered' OR delivered_at IS NOT NULL),
+ UNIQUE(couple_id,author_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_future_letters_author ON future_letters(author_id,status,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_future_letters_due ON future_letters(deliver_at,id) WHERE status='sealed';
+CREATE INDEX IF NOT EXISTS idx_future_letters_shared ON future_letters(couple_id,delivered_at DESC) WHERE status='delivered';
+CREATE TABLE IF NOT EXISTS album_export_jobs (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), creator_id TEXT NOT NULL REFERENCES users(id),
+ template TEXT NOT NULL CHECK(template IN ('year','trip')), year INTEGER CHECK(year IS NULL OR year BETWEEN 1 AND 9999),
+ trip_id TEXT REFERENCES trips(id) ON DELETE CASCADE,
+ audience TEXT NOT NULL DEFAULT 'personal' CHECK(audience IN ('personal','shared')),
+ selection_json TEXT NOT NULL CHECK(json_valid(selection_json) AND json_type(selection_json)='array'),
+ expected_versions_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(expected_versions_json) AND json_type(expected_versions_json)='object'),
+ status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed','cancelled','expired')),
+ artifact_relative_path TEXT, artifact_sha256 TEXT, size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+ failure_code TEXT, client_request_id TEXT, version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+ expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT,
+ CHECK((template='year' AND year IS NOT NULL AND trip_id IS NULL) OR (template='trip' AND trip_id IS NOT NULL AND year IS NULL)),
+ CHECK(status<>'completed' OR (artifact_relative_path IS NOT NULL AND artifact_sha256 IS NOT NULL AND size_bytes IS NOT NULL AND completed_at IS NOT NULL)),
+ UNIQUE(couple_id,creator_id,client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_album_jobs_owner ON album_export_jobs(couple_id,creator_id,status,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_album_jobs_expiry ON album_export_jobs(status,expires_at);
+CREATE TABLE IF NOT EXISTS ai_usage_events (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT REFERENCES couples(id), user_id TEXT REFERENCES users(id),
+ actor_kind TEXT NOT NULL CHECK(actor_kind IN ('user','system')),
+ feature TEXT NOT NULL CHECK(length(feature) BETWEEN 1 AND 100), provider TEXT NOT NULL, model TEXT NOT NULL,
+ request_id TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),
+ status TEXT NOT NULL CHECK(status IN ('started','succeeded','failed','timeout','rejected','unknown')),
+ request_sent INTEGER NOT NULL DEFAULT 0 CHECK(request_sent IN (0,1)),
+ started_at TEXT NOT NULL, finished_at TEXT,
+ latency_ms INTEGER CHECK(latency_ms IS NULL OR latency_ms >= 0),
+ input_tokens INTEGER CHECK(input_tokens IS NULL OR (typeof(input_tokens)='integer' AND input_tokens >= 0)),
+ output_tokens INTEGER CHECK(output_tokens IS NULL OR (typeof(output_tokens)='integer' AND output_tokens >= 0)),
+ total_tokens INTEGER CHECK(total_tokens IS NULL OR (typeof(total_tokens)='integer' AND total_tokens >= 0)),
+ estimated_cost REAL CHECK(estimated_cost IS NULL OR estimated_cost >= 0),
+ cost_currency TEXT CHECK(cost_currency IS NULL OR (length(cost_currency)=3 AND cost_currency GLOB '[A-Z][A-Z][A-Z]')),
+ pricing_version TEXT, failure_code TEXT,
+ CHECK(actor_kind<>'user' OR (user_id IS NOT NULL AND couple_id IS NOT NULL)),
+ CHECK(actor_kind<>'system' OR user_id IS NULL),
+ CHECK(status<>'started' OR finished_at IS NULL),
+ CHECK(status='started' OR finished_at IS NOT NULL),
+ CHECK(status<>'rejected' OR request_sent=0),
+ CHECK(status NOT IN ('succeeded','timeout') OR request_sent=1),
+ CHECK(estimated_cost IS NULL OR (cost_currency IS NOT NULL AND pricing_version IS NOT NULL)),
+ UNIQUE(request_id,attempt,provider,model)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_owner ON ai_usage_events(couple_id,user_id,started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_feature ON ai_usage_events(feature,status,started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_unfinished ON ai_usage_events(started_at) WHERE status='started';
+CREATE TABLE IF NOT EXISTS mutation_receipts (
+ id TEXT PRIMARY KEY NOT NULL, couple_id TEXT NOT NULL REFERENCES couples(id), actor_id TEXT NOT NULL REFERENCES users(id),
+ resource_type TEXT NOT NULL CHECK(resource_type IN ('calendar_entry','trip','media','shared_list_item','pantry_item')),
+ resource_id TEXT NOT NULL,
+ operation TEXT NOT NULL CHECK(operation IN ('calendar.complete','calendar.soft_delete','trip.soft_delete','media.trash','wishlist.complete','wishlist.soft_delete','pantry.set_state')),
+ inverse_schema_version INTEGER NOT NULL DEFAULT 1 CHECK(inverse_schema_version=1),
+ inverse_json TEXT NOT NULL CHECK(json_valid(inverse_json) AND json_type(inverse_json)='object'),
+ expected_post_version INTEGER NOT NULL CHECK(expected_post_version >= 1),
+ status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available','undone','expired','invalidated')),
+ resulting_version INTEGER CHECK(resulting_version IS NULL OR resulting_version >= 1),
+ client_request_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL CHECK(expires_at > created_at), consumed_at TEXT,
+ UNIQUE(couple_id,actor_id,operation,client_request_id),
+ CHECK((resource_type='calendar_entry' AND operation IN ('calendar.complete','calendar.soft_delete')) OR
+       (resource_type='trip' AND operation='trip.soft_delete') OR
+       (resource_type='media' AND operation='media.trash') OR
+       (resource_type='shared_list_item' AND operation IN ('wishlist.complete','wishlist.soft_delete')) OR
+       (resource_type='pantry_item' AND operation='pantry.set_state')),
+ CHECK(status<>'undone' OR (resulting_version IS NOT NULL AND consumed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_mutation_receipts_owner ON mutation_receipts(couple_id,actor_id,status,expires_at);
+CREATE INDEX IF NOT EXISTS idx_mutation_receipts_resource ON mutation_receipts(couple_id,resource_type,resource_id,expected_post_version);
 """
+
+
+REQUIRED_TABLES_V33 = frozenset(
+    """
+    schema_migrations users sessions auth_failures push_subscriptions push_outbox
+    couples invites messages call_records call_signals moments moment_reactions shared_comments
+    trips trip_generation_jobs place_search_candidates trip_destination_places trip_preferences
+    plan_variants trip_days itinerary_items itinerary_item_places route_cache hotel_options
+    booking_links plan_revisions approvals shared_lists shared_list_items daily_answers audit_events
+    system_events ui_manifests ui_generation_jobs ui_action_drafts ai_context_grants realtime_events
+    media_assets system_metrics upload_sessions couple_statuses user_locations weekly_reviews
+    weekly_review_answers date_plans date_plan_variants date_plan_votes date_plan_confirmations
+    widget_snapshots mutation_idempotency chat_imports chat_import_items calendar_entries
+    partner_preferences place_snapshots quote_snapshots trip_food_recommendations
+    trip_food_review_evidence external_api_usage recipe_dishes recipes recipe_ingredients
+    recipe_steps recipe_media recipe_media_checks meal_wishes meal_carts meal_cart_items
+    shopping_lists shopping_list_items shopping_item_sources recipe_provider_cache recipe_drafts
+    recipe_generation_jobs trip_assistant_messages trip_assistant_action_drafts trip_memory_drafts
+    life_assistant_plans life_assistant_plan_items life_assistant_confirmations life_assistant_jobs
+    in_app_notifications daily_couple_summaries couple_assistant_settings
+    """.split()
+)
+
+V34_NEW_TABLES = frozenset(
+    """
+    decisions decision_options decision_votes decision_confirmations wishlist_claims
+    ingredient_catalog food_profiles pantry_items shopping_category_preferences
+    weekly_meal_plan_drafts cook_sessions cook_timers ingredient_substitutions
+    trip_item_preferences trip_realism_checks trip_packing_items trip_emergency_entries trip_expenses
+    memory_provenance memory_descriptions memory_completion_suggestions voice_transcripts
+    future_letters album_export_jobs ai_usage_events mutation_receipts
+    """.split()
+)
+
+REQUIRED_TABLES_V34 = REQUIRED_TABLES_V33 | V34_NEW_TABLES
+
+FOUNDATION_LIFECYCLE_REGISTRY = {
+    "trip_emergency_entries": {
+        "export": "_export_trip_emergency_rows", "unlink": "_downgrade_trip_packing_rows",
+        "account_delete": "_delete_trip_emergency_rows",
+    },
+    "voice_transcripts": {
+        "export": "_export_voice_transcript_rows", "unlink": None,
+        "account_delete": "_delete_voice_transcript_rows",
+    },
+    "future_letters": {
+        "export": "_export_future_letter_rows", "unlink": "_unlink_future_letter_rows",
+        "account_delete": "_delete_future_letter_rows",
+    },
+    "memory_descriptions": {
+        "export": "_export_memory_description_rows", "unlink": None,
+        "account_delete": "_delete_memory_description_rows",
+    },
+    "album_export_jobs": {
+        "export": "_export_album_export_rows", "unlink": "_revoke_album_export_rows",
+        "account_delete": "_revoke_album_export_rows",
+    },
+}
+
+
+def _coverage_entry(table: str) -> dict[str, object]:
+    """Return a conservative lifecycle classification, never row data."""
+    operational = {
+        "schema_migrations", "auth_failures", "system_events", "system_metrics",
+        "audit_events", "realtime_events", "push_outbox", "mutation_idempotency",
+        "ai_usage_events", "mutation_receipts",
+    }
+    secret = {
+        "sessions", "push_subscriptions", "ai_context_grants", "decision_votes",
+        "wishlist_claims", "trip_emergency_entries", "future_letters",
+    }
+    introduced = 34 if table in V34_NEW_TABLES else 33
+    if table in operational:
+        export_policy = "operational_excluded"
+    elif table in secret:
+        export_policy = "owner_filtered_redacted"
+    else:
+        export_policy = "scope_filtered"
+    return {
+        "introduced_in": introduced,
+        "export_policy": export_policy,
+        "unlink_policy": "revalidate_or_invalidate",
+        "delete_policy": "scrub_private_retain_safe_history",
+        "backup_policy": "full_database",
+        "lifecycle_handlers": FOUNDATION_LIFECYCLE_REGISTRY.get(table),
+    }
+
+
+TABLE_LIFECYCLE_COVERAGE = {
+    table: _coverage_entry(table) for table in sorted(REQUIRED_TABLES_V34)
+}
+
+
+ACCOUNT_EXPORT_POLICY_VERSION = 1
+ACCOUNT_EXPORT_STRATEGIES = frozenset(
+    {"user_filtered", "couple_filtered", "parent_filtered", "aggregate_only", "operational_excluded"}
+)
+_ACCOUNT_EXPORT_OPERATIONAL_EXCLUDED = frozenset(
+    {
+        "auth_failures", "push_subscriptions", "push_outbox", "call_signals",
+        "system_events", "audit_events", "realtime_events", "system_metrics",
+        "upload_sessions", "mutation_idempotency", "mutation_receipts",
+    }
+)
+_ACCOUNT_EXPORT_AGGREGATE_ONLY = frozenset({"ai_usage_events", "external_api_usage"})
+_ACCOUNT_EXPORT_USER_FILTERED = frozenset(
+    {
+        "users", "sessions", "invites", "user_locations", "chat_imports",
+        "widget_snapshots", "ui_generation_jobs", "ui_action_drafts",
+        "ai_context_grants", "in_app_notifications", "memory_completion_suggestions",
+        "voice_transcripts", "future_letters", "album_export_jobs", "wishlist_claims",
+        "ingredient_substitutions",
+    }
+)
+_ACCOUNT_EXPORT_PARENT_FILTERED = frozenset(
+    {
+        "decision_options", "decision_votes", "decision_confirmations", "moment_reactions",
+        "shared_comments", "trip_generation_jobs", "trip_destination_places", "trip_preferences",
+        "plan_variants", "trip_days", "itinerary_items", "itinerary_item_places", "route_cache",
+        "hotel_options", "booking_links", "plan_revisions", "approvals", "shared_list_items",
+        "weekly_review_answers", "date_plan_variants", "date_plan_votes", "date_plan_confirmations",
+        "chat_import_items", "trip_food_recommendations", "trip_food_review_evidence",
+        "recipe_ingredients", "recipe_steps", "recipe_media", "recipe_media_checks",
+        "meal_cart_items", "shopping_list_items", "shopping_item_sources", "cook_timers",
+        "trip_item_preferences", "trip_realism_checks", "trip_packing_items",
+        "trip_emergency_entries", "trip_expenses", "memory_provenance", "memory_descriptions",
+        "life_assistant_plan_items", "life_assistant_confirmations",
+    }
+)
+
+
+def _account_export_policy(table: str) -> dict[str, str]:
+    if table in _ACCOUNT_EXPORT_OPERATIONAL_EXCLUDED:
+        return {
+            "strategy": "operational_excluded",
+            "handler": "exclude_operational_data",
+            "reason": "包含凭据、内部队列、审计或撤销实现数据，不属于用户可携带内容。",
+        }
+    if table in _ACCOUNT_EXPORT_AGGREGATE_ONLY:
+        return {
+            "strategy": "aggregate_only",
+            "handler": "export_account_aggregates",
+            "reason": "只导出本人可理解的聚合，不导出逐次运营记录。",
+        }
+    if table in _ACCOUNT_EXPORT_USER_FILTERED:
+        return {
+            "strategy": "user_filtered",
+            "handler": "export_account_data",
+            "reason": "按当前账号身份、资源权限和公开状态过滤。",
+        }
+    if table in _ACCOUNT_EXPORT_PARENT_FILTERED:
+        return {
+            "strategy": "parent_filtered",
+            "handler": "export_account_data",
+            "reason": "仅随已经通过权限检查的父资源导出。",
+        }
+    return {
+        "strategy": "couple_filtered",
+        "handler": "export_account_data",
+        "reason": "仅导出当前有效情侣空间内双方可见或本人拥有的内容。",
+    }
+
+
+ACCOUNT_EXPORT_POLICIES = {
+    table: _account_export_policy(table) for table in sorted(REQUIRED_TABLES_V34)
+}
+
+
+def account_export_policy_status() -> dict[str, object]:
+    missing = sorted(REQUIRED_TABLES_V34 - set(ACCOUNT_EXPORT_POLICIES))
+    unexpected = sorted(set(ACCOUNT_EXPORT_POLICIES) - REQUIRED_TABLES_V34)
+    invalid = sorted(
+        table for table, policy in ACCOUNT_EXPORT_POLICIES.items()
+        if policy.get("strategy") not in ACCOUNT_EXPORT_STRATEGIES
+        or not policy.get("handler") or not policy.get("reason")
+    )
+    by_strategy = {
+        strategy: sum(1 for policy in ACCOUNT_EXPORT_POLICIES.values() if policy["strategy"] == strategy)
+        for strategy in sorted(ACCOUNT_EXPORT_STRATEGIES)
+    }
+    return {
+        "ok": not missing and not unexpected and not invalid,
+        "version": ACCOUNT_EXPORT_POLICY_VERSION,
+        "covered": len(ACCOUNT_EXPORT_POLICIES) - len(invalid),
+        "required": len(REQUIRED_TABLES_V34),
+        "missing": missing,
+        "unexpected": unexpected,
+        "invalid": invalid,
+        "by_strategy": by_strategy,
+    }
+
+
+V34_REQUIRED_COLUMNS = {
+    "ai_context_grants": frozenset(
+        {"revoked_at", "last_used_at", "resource_version", "usage_scope", "request_id", "version"}
+    ),
+    "calendar_entries": frozenset(
+        {"participant_a_id", "participant_b_id", "blocks_time", "source_type"}
+    ),
+    "shared_list_items": frozenset({"item_kind", "deleted_at", "created_at", "updated_at"}),
+    "media_assets": frozenset({"captured_at", "date_source", "source_type", "duration_ms"}),
+}
+
+def _normalize_schema_sql(value: str | None) -> str:
+    normalized = re.sub(r"\bIF\s+NOT\s+EXISTS\b", "", str(value or ""), flags=re.IGNORECASE)
+    normalized = re.sub(r"[\s\"`\[\]]+", "", normalized).rstrip(";").lower()
+    return normalized
+
+
+_V34_SQL = SCHEMA_SQL.split(V34_SCHEMA_MARKER, 1)[1]
+V34_TABLE_SQL_CONTRACT = {
+    match.group(1): match.group(0).rstrip().rstrip(";")
+    for match in re.finditer(
+        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_]+)\s*\(.*?\)\s*;",
+        _V34_SQL,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+}
+V34_INDEX_SQL_CONTRACT = {
+    match.group(2): match.group(0).rstrip().rstrip(";")
+    for match in re.finditer(
+        r"CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_]+)\s+.*?;",
+        _V34_SQL,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+}
+V34_INDEX_SQL_CONTRACT.update(
+    {
+        "idx_ai_grants_active": "CREATE INDEX idx_ai_grants_active ON ai_context_grants(couple_id,user_id,purpose,expires_at) WHERE revoked_at IS NULL",
+        "idx_ai_grants_resource": "CREATE INDEX idx_ai_grants_resource ON ai_context_grants(couple_id,user_id,resource_type,resource_id)",
+        "idx_calendar_busy": "CREATE INDEX idx_calendar_busy ON calendar_entries(couple_id,starts_at,ends_at) WHERE deleted_at IS NULL AND blocks_time=1",
+        "idx_shared_list_items_active": "CREATE INDEX idx_shared_list_items_active ON shared_list_items(list_id,deleted_at,position)",
+        "idx_media_owner_visibility": "CREATE INDEX idx_media_owner_visibility ON media_assets(couple_id,owner_id,visibility,status,created_at DESC)",
+        "idx_ingredient_substitutions_meal": "CREATE INDEX idx_ingredient_substitutions_meal ON ingredient_substitutions(meal_item_id,status,created_at DESC) WHERE meal_item_id IS NOT NULL",
+    }
+)
+V34_REQUIRED_INDEXES = frozenset(V34_INDEX_SQL_CONTRACT)
+
+
+def _extract_check_contracts(value: str | None) -> tuple[str, ...]:
+    sql = str(value or "")
+    contracts: list[str] = []
+    for match in re.finditer(r"\bCHECK\s*\(", sql, flags=re.IGNORECASE):
+        start = match.end()
+        depth = 1
+        position = start
+        while position < len(sql) and depth:
+            if sql[position] == "(":
+                depth += 1
+            elif sql[position] == ")":
+                depth -= 1
+            position += 1
+        if depth == 0:
+            contracts.append(_normalize_schema_sql(sql[start:position - 1]))
+    # Constraint declaration order is not semantically relevant and guarded
+    # ALTERs append checks at the end. Sorting gives a deterministic multiset:
+    # duplicate checks remain visible while the approved same-v34 additive
+    # substitution migration converges to the same contract.
+    return tuple(sorted(contracts))
+
+
+def _extract_unique_contracts(value: str | None) -> tuple[tuple[str, str], ...]:
+    """Read UNIQUE columns and conflict semantics without losing duplicates."""
+    sql = str(value or "")
+    contracts: list[tuple[str, str]] = []
+    for match in re.finditer(r"\bUNIQUE\s*\(", sql, flags=re.IGNORECASE):
+        start = match.end()
+        depth = 1
+        position = start
+        while position < len(sql) and depth:
+            if sql[position] == "(":
+                depth += 1
+            elif sql[position] == ")":
+                depth -= 1
+            position += 1
+        if depth == 0:
+            conflict = re.match(
+                r"\s*ON\s+CONFLICT\s+(ROLLBACK|ABORT|FAIL|IGNORE|REPLACE)\b",
+                sql[position:],
+                flags=re.IGNORECASE,
+            )
+            # SQLite's omitted table-UNIQUE policy is ABORT. Explicit ABORT is
+            # therefore accepted as the same contract, while every other
+            # strategy changes write behavior and must remain observable.
+            policy = str(conflict.group(1) if conflict else "ABORT").lower()
+            contracts.append((_normalize_schema_sql(sql[start:position - 1]), policy))
+    return tuple(sorted(contracts))
+
+
+def _foreign_key_contract(rows) -> tuple[tuple[object, ...], ...]:
+    """Keep SQLite FK group ids, composite sequence and duplicate rows exact."""
+    return tuple(
+        (
+            int(row[0]), int(row[1]), str(row[3]), str(row[2]), str(row[4]),
+            str(row[5]), str(row[6]), str(row[7]),
+        )
+        for row in sorted(rows, key=lambda value: (int(value[0]), int(value[1])))
+    )
+
+
+def _build_v34_pragma_contracts() -> tuple[
+    dict[str, frozenset[str]],
+    dict[str, tuple[tuple[object, ...], ...]],
+    dict[str, dict[str, tuple[str, int, str, int, int]]],
+    dict[str, tuple[tuple[str, str], ...]],
+    dict[str, tuple[str, ...]],
+]:
+    columns: dict[str, frozenset[str]] = {}
+    foreign_keys: dict[str, tuple[tuple[object, ...], ...]] = {}
+    column_specs: dict[str, dict[str, tuple[str, int, str, int, int]]] = {}
+    unique_constraints: dict[str, tuple[tuple[str, str], ...]] = {}
+    checks: dict[str, tuple[str, ...]] = {}
+    canonical = sqlite3.connect(":memory:")
+    canonical.row_factory = sqlite3.Row
+    try:
+        for table, statement in V34_TABLE_SQL_CONTRACT.items():
+            canonical.execute(statement)
+            table_info = canonical.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            columns[table] = frozenset(str(row["name"]) for row in table_info)
+            column_specs[table] = {
+                str(row["name"]): (
+                    str(row["type"] or "").upper(), int(row["notnull"]),
+                    _normalize_schema_sql(row["dflt_value"]), int(row["pk"]), int(row["hidden"]),
+                )
+                for row in table_info
+            }
+            foreign_keys[table] = _foreign_key_contract(
+                canonical.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            )
+            unique_constraints[table] = _extract_unique_contracts(statement)
+            checks[table] = _extract_check_contracts(statement)
+    finally:
+        canonical.close()
+    return columns, foreign_keys, column_specs, unique_constraints, checks
+
+
+(
+    V34_TABLE_COLUMNS,
+    V34_TABLE_FOREIGN_KEYS,
+    V34_TABLE_COLUMN_SPECS,
+    V34_TABLE_UNIQUE_CONSTRAINTS,
+    V34_TABLE_CHECKS,
+) = _build_v34_pragma_contracts()
+
+
+def schema_inventory(db, *, expected_version: int | None = None) -> dict[str, object]:
+    """Inspect the database without changing it or trusting the module version."""
+    actual_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+    target_version = actual_version if expected_version is None else int(expected_version)
+    required = REQUIRED_TABLES_V34 if target_version >= 34 else REQUIRED_TABLES_V33
+    actual = {
+        str(row[0])
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    missing_tables = sorted(required - actual)
+    uncovered_tables = sorted(actual - set(TABLE_LIFECYCLE_COVERAGE))
+    missing_columns: dict[str, list[str]] = {}
+    missing_foreign_keys: dict[str, list[list[str]]] = {}
+    malformed_constraints: list[str] = []
+    missing_indexes: list[str] = []
+    malformed_indexes: list[str] = []
+    unexpected_indexes: list[str] = []
+    if target_version >= 34:
+        column_contracts = {**V34_TABLE_COLUMNS, **V34_REQUIRED_COLUMNS}
+        for table, expected in column_contracts.items():
+            actual_columns = {
+                str(row[1]) for row in db.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            }
+            if expected - actual_columns:
+                missing_columns[table] = sorted(expected - actual_columns)
+        for table, expected in V34_TABLE_FOREIGN_KEYS.items():
+            actual_foreign_keys = _foreign_key_contract(
+                db.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            )
+            unmatched = list(actual_foreign_keys)
+            missing = []
+            for value in expected:
+                if value in unmatched:
+                    unmatched.remove(value)
+                else:
+                    missing.append(value)
+            if missing:
+                missing_foreign_keys[table] = [list(value) for value in missing]
+        actual_table_sql = {
+            str(row[0]): str(row[1] or "")
+            for row in db.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        for table in sorted(V34_TABLE_SQL_CONTRACT):
+            if table not in actual_table_sql:
+                continue
+            actual_info = db.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            actual_specs = {
+                str(row[1]): (
+                    str(row[2] or "").upper(), int(row[3]),
+                    _normalize_schema_sql(row[4]), int(row[5]), int(row[6]),
+                )
+                for row in actual_info
+            }
+            actual_foreign_keys = _foreign_key_contract(
+                db.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            )
+            actual_uniques = _extract_unique_contracts(actual_table_sql[table])
+            actual_checks = _extract_check_contracts(actual_table_sql[table])
+            if (
+                actual_specs != V34_TABLE_COLUMN_SPECS[table]
+                or actual_foreign_keys != V34_TABLE_FOREIGN_KEYS[table]
+                or actual_uniques != V34_TABLE_UNIQUE_CONSTRAINTS[table]
+                or actual_checks != V34_TABLE_CHECKS[table]
+            ):
+                malformed_constraints.append(table)
+        actual_index_sql = {
+            str(row[0]): str(row[1] or "")
+            for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        missing_indexes = sorted(V34_REQUIRED_INDEXES - set(actual_index_sql))
+        malformed_indexes = sorted(
+            name for name, expected_sql in V34_INDEX_SQL_CONTRACT.items()
+            if name in actual_index_sql
+            and _normalize_schema_sql(actual_index_sql[name]) != _normalize_schema_sql(expected_sql)
+        )
+        unexpected_indexes = sorted(
+            str(row[0])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL "
+                f"AND tbl_name IN ({','.join('?' for _ in V34_TABLE_SQL_CONTRACT)})",
+                tuple(V34_TABLE_SQL_CONTRACT),
+            ).fetchall()
+            if str(row[0]) not in V34_INDEX_SQL_CONTRACT
+        )
+    structural_ok = not (
+        missing_tables or uncovered_tables or missing_columns or missing_foreign_keys
+        or malformed_constraints or missing_indexes or malformed_indexes or unexpected_indexes
+    )
+    return {
+        "actual_version": actual_version,
+        "expected_version": SCHEMA_VERSION,
+        "upgrade_required": actual_version < SCHEMA_VERSION,
+        "unsupported_newer": actual_version > SCHEMA_VERSION,
+        "missing_tables": missing_tables,
+        "uncovered_tables": uncovered_tables,
+        "missing_columns": missing_columns,
+        "missing_foreign_keys": missing_foreign_keys,
+        "malformed_constraints": malformed_constraints,
+        "missing_indexes": missing_indexes,
+        "malformed_indexes": malformed_indexes,
+        "unexpected_indexes": unexpected_indexes,
+        "structural_ok": structural_ok,
+        "ok": structural_ok and actual_version == target_version and actual_version <= SCHEMA_VERSION,
+    }

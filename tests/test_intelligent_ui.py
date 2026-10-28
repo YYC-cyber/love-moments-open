@@ -90,6 +90,101 @@ class IntelligentUiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.confirm_ui_action(life_action["id"], "idem-life-0001")
 
+    def test_action_idempotency_is_scoped_to_creator_couple_and_action(self) -> None:
+        alice = self.store.register("alice_private", "safe-password-100", "甲")
+        bob = self.store.register("bob_private", "safe-password-200", "乙")
+        invite = self.store.create_user_invite(alice["id"])
+        self.store.accept_user_invite(bob["id"], invite["code"], "2024-02-14")
+        foreign = self.store.compose_ui("home", "记录瞬间：另一对的私密测试", user_id=alice["id"])["manifest"]
+        foreign_action = next(action for node in foreign["sections"] for action in node["actions"] if action["requiresConfirmation"])
+        foreign_result = self.store.confirm_ui_action(foreign_action["id"], "idem-isolation-0001", user_id=alice["id"])
+        self.assertIn("另一对的私密测试", foreign_result["result"]["title"])
+
+        own = self.store.compose_ui("home", "记录瞬间：当前情侣自己的内容")["manifest"]
+        own_action = next(action for node in own["sections"] for action in node["actions"] if action["requiresConfirmation"])
+        with self.assertRaises(ConflictError):
+            self.store.confirm_ui_action(own_action["id"], "idem-isolation-0001")
+        with self.assertRaises(KeyError):
+            self.store.confirm_ui_action(foreign_action["id"], "idem-isolation-0001")
+
+    def test_committed_domain_write_recovers_an_executing_action_without_duplicate(self) -> None:
+        manifest = self.store.compose_ui("home", "记录瞬间：崩溃恢复只创建一次")["manifest"]
+        action = next(action for node in manifest["sections"] for action in node["actions"] if action["requiresConfirmation"])
+        with self.store.connection() as db:
+            db.execute("CREATE TRIGGER fail_ui_confirmation BEFORE INSERT ON audit_events WHEN NEW.action='ui.action_confirmed' BEGIN SELECT RAISE(ABORT, 'forced finalization failure'); END")
+        with self.assertRaises(Exception):
+            self.store.confirm_ui_action(action["id"], "idem-recovery-0001")
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM ui_action_drafts WHERE id=?", (action["id"],)).fetchone()[0], "executing")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM moments WHERE title='崩溃恢复只创建一次'").fetchone()[0], 1)
+            db.execute("DROP TRIGGER fail_ui_confirmation")
+        recovered = self.store.confirm_ui_action(action["id"], "idem-recovery-0001")
+        self.assertFalse(recovered["idempotent"])
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM ui_action_drafts WHERE id=?", (action["id"],)).fetchone()[0], "confirmed")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM moments WHERE title='崩溃恢复只创建一次'").fetchone()[0], 1)
+
+    def test_committed_trip_selection_recovers_without_a_second_revision(self) -> None:
+        manifest = self.store.compose_ui("trip", "采用经典充实方案")["manifest"]
+        action = next(
+            action
+            for node in manifest["sections"]
+            if node["type"] == "trip_variant_compare"
+            for action in node["actions"]
+            if action["type"] == "select_trip_variant"
+        )
+        before = self.store.get_trip(DEMO_TRIP)
+        with self.store.connection() as db:
+            db.execute("CREATE TRIGGER fail_trip_ui_confirmation BEFORE INSERT ON audit_events WHEN NEW.action='ui.action_confirmed' BEGIN SELECT RAISE(ABORT, 'forced trip finalization failure'); END")
+        with self.assertRaises(Exception):
+            self.store.confirm_ui_action(action["id"], "idem-trip-recovery-0001")
+        changed = self.store.get_trip(DEMO_TRIP)
+        self.assertEqual(changed["active_variant"], "classic")
+        self.assertEqual(changed["current_revision"], before["current_revision"] + 1)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM ui_action_drafts WHERE id=?", (action["id"],)).fetchone()[0], "executing")
+            db.execute("DROP TRIGGER fail_trip_ui_confirmation")
+        recovered = self.store.confirm_ui_action(action["id"], "idem-trip-recovery-0001")
+        self.assertFalse(recovered["idempotent"])
+        final = self.store.get_trip(DEMO_TRIP)
+        self.assertEqual(final["current_revision"], changed["current_revision"])
+        self.assertEqual(final["version"], changed["version"])
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM ui_action_drafts WHERE id=?", (action["id"],)).fetchone()[0], "confirmed")
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM plan_revisions WHERE trip_id=? AND reason='采用整套方案'", (DEMO_TRIP,)).fetchone()[0],
+                1,
+            )
+
+    def test_orphaned_ui_jobs_are_closed_after_server_restart(self) -> None:
+        with self.store.connection() as db:
+            couple = db.execute("SELECT id FROM couples LIMIT 1").fetchone()[0]
+            user = db.execute("SELECT member_a FROM couples WHERE id=?", (couple,)).fetchone()[0]
+            db.execute(
+                "INSERT INTO ui_generation_jobs(id,couple_id,user_id,surface,intent_hash,status,created_at) VALUES (?,?,?,?,?,'queued',?)",
+                ("ui_job_restart_queued", couple, user, "home", "queued-hash", "2026-10-28T00:00:00+00:00"),
+            )
+            db.execute(
+                "INSERT INTO ui_generation_jobs(id,couple_id,user_id,surface,intent_hash,status,created_at) VALUES (?,?,?,?,?,'running',?)",
+                ("ui_job_restart_running", couple, user, "trip", "running-hash", "2026-10-28T00:00:00+00:00"),
+            )
+            db.execute(
+                "INSERT INTO ui_generation_jobs(id,couple_id,user_id,surface,intent_hash,status,error_code,created_at,completed_at) VALUES (?,?,?,?,?,'completed',NULL,?,?)",
+                ("ui_job_restart_completed", couple, user, "life", "completed-hash", "2026-10-28T00:00:00+00:00", "2026-10-28T00:01:00+00:00"),
+            )
+
+        LoveMomentsStore(self.store.db_path)
+        with self.store.connection() as db:
+            queued = db.execute("SELECT status,error_code,completed_at FROM ui_generation_jobs WHERE id='ui_job_restart_queued'").fetchone()
+            running = db.execute("SELECT status,error_code,completed_at FROM ui_generation_jobs WHERE id='ui_job_restart_running'").fetchone()
+            completed = db.execute("SELECT status,error_code,completed_at FROM ui_generation_jobs WHERE id='ui_job_restart_completed'").fetchone()
+        self.assertEqual((queued["status"], queued["error_code"]), ("failed", "SERVER_RESTARTED"))
+        self.assertEqual((running["status"], running["error_code"]), ("failed", "SERVER_RESTARTED"))
+        self.assertTrue(queued["completed_at"])
+        self.assertTrue(running["completed_at"])
+        self.assertEqual((completed["status"], completed["error_code"]), ("completed", None))
+        self.assertEqual(completed["completed_at"], "2026-10-28T00:01:00+00:00")
+
     def test_stale_trip_action_is_rejected(self) -> None:
         manifest = self.store.compose_ui("trip", "采用经典充实方案")["manifest"]
         action = next(action for node in manifest["sections"] if node["type"] == "trip_variant_compare" for action in node["actions"] if action["type"] == "select_trip_variant")

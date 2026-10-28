@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import plistlib
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -61,6 +63,57 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(verify_backup(destination)["ok"])
         self.assertTrue((mirror / result["backup"] / "manifest.json").is_file())
         self.assertTrue((state / "daily-summary.json").is_file())
+
+    def test_backup_excludes_ephemeral_album_exports(self) -> None:
+        export_root = self.media / "temp" / "album_exports"
+        export_root.mkdir(parents=True, exist_ok=True)
+        (export_root / "job.pdf").write_bytes(b"%PDF-private-temporary")
+        (export_root / "job.tmp").write_bytes(b"working")
+
+        destination = create_backup(self.root / "backups-album", self.database, self.media)
+        manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(manifest["ephemeral_album_exports_included"])
+        self.assertFalse((destination / "media" / "temp" / "album_exports").exists())
+        self.assertFalse(any("album_exports" in item["path"] for item in manifest["media_objects"]))
+        self.assertTrue(verify_backup(destination)["ok"])
+
+    def test_backup_excludes_service_secrets_and_records_policy_coverage(self) -> None:
+        (self.media / ".media-access-key").write_text("do-not-copy", encoding="utf-8")
+        (self.media / ".web-push-vapid-private.pem").write_text("do-not-copy", encoding="utf-8")
+        destination = create_backup(self.root / "backups-secret", self.database, self.media)
+        manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        self.assertFalse(manifest["service_secrets_included"])
+        self.assertFalse((destination / "media" / ".media-access-key").exists())
+        self.assertFalse((destination / "media" / ".web-push-vapid-private.pem").exists())
+        verified = verify_backup(destination, update_manifest=False)
+        self.assertTrue(verified["account_export_policy"]["ok"])
+        self.assertEqual(
+            verified["account_export_policy"]["covered"],
+            verified["account_export_policy"]["required"],
+        )
+
+    def test_backup_verification_rejects_path_traversal_or_unlisted_media(self) -> None:
+        image = self.media / "images" / "visible.jpg"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"visible")
+        destination = create_backup(self.root / "backups-tamper", self.database, self.media)
+        manifest_path = destination / "manifest.json"
+        original = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        traversal = dict(original)
+        traversal["database_file"] = "../love_moments.db"
+        manifest_path.write_text(json.dumps(traversal), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "路径无效"):
+            verify_backup(destination, update_manifest=False)
+
+        manifest_path.write_text(json.dumps(original), encoding="utf-8")
+        (destination / "media" / "images" / "unlisted.jpg").write_bytes(b"orphan")
+        result = verify_backup(destination, update_manifest=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["orphan_media"], 1)
+        self.assertFalse(result["media_count_matches"])
+        self.assertFalse(result["media_bytes_matches"])
 
     def test_retention_keeps_manual_seven_days_and_four_weeks(self) -> None:
         root = self.root / "backups"
@@ -149,6 +202,25 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(verify_backup(destination)["ok"])
         (destination / "media" / "images" / "mirrored.jpg").unlink()
         self.assertFalse(verify_backup(destination)["ok"])
+
+    def test_backup_verification_rejects_structurally_incomplete_v34_database(self) -> None:
+        destination = create_backup(self.root / "backups-contract", self.database, self.media)
+        copied_database = destination / "love_moments.db"
+        db = sqlite3.connect(copied_database)
+        try:
+            db.execute("DROP INDEX idx_decisions_queue")
+            db.commit()
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            db.close()
+        manifest_path = destination / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["database_sha256"] = hashlib.sha256(copied_database.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        result = verify_backup(destination, update_manifest=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["restore_drill"], "failed")
+        self.assertIn("idx_decisions_queue", result["schema_inventory"]["missing_indexes"])
 
 
 if __name__ == "__main__":

@@ -4,9 +4,11 @@ import base64
 import hashlib
 import hmac
 import struct
-import time
 import unittest
 import zlib
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from love_moments.shengwang import (
     ShengwangRtcProvider,
@@ -77,13 +79,23 @@ class ShengwangRtcTests(unittest.TestCase):
 
     def test_provider_issues_safe_short_lived_credentials(self) -> None:
         provider = ShengwangRtcProvider("shengwang", self.app_id, self.certificate, 600)
-        result = provider.issue("call-private-id", "user-one")
+        issued_at = datetime(2026, 10, 27, 16, 5, tzinfo=timezone.utc)
+        with patch("love_moments.shengwang.time.time", return_value=issued_at.timestamp()):
+            result = provider.issue("call-private-id", "user-one")
         self.assertEqual(result["provider"], "shengwang")
         self.assertEqual(result["channel"], channel_for_call("call-private-id"))
         self.assertEqual(result["uid"], uid_for_user("user-one"))
         self.assertEqual(result["ttlSeconds"], 600)
         self.assertNotIn("certificate", {key.lower() for key in result})
-        self.assertGreaterEqual(result["expiresAt"], time.strftime("%Y-%m-%d"))
+
+        expires_at = datetime.fromisoformat(result["expiresAt"])
+        self.assertEqual(expires_at.tzinfo, timezone.utc)
+        self.assertEqual(expires_at, issued_at + timedelta(seconds=600))
+        self.assertEqual(int((expires_at - issued_at).total_seconds()), result["ttlSeconds"])
+
+        # The same instant is already the next calendar day in Shanghai.
+        # This guards against comparing a UTC ISO timestamp with a local date string.
+        self.assertNotEqual(expires_at.date(), expires_at.astimezone(ZoneInfo("Asia/Shanghai")).date())
 
     def test_invalid_credentials_disable_provider_without_exposing_secret(self) -> None:
         provider = ShengwangRtcProvider("shengwang", "bad", self.certificate)

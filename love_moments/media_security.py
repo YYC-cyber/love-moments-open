@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -32,6 +35,56 @@ class SanitizedImage:
     thumbnail_mime_type: str = "image/jpeg"
     thumbnail_extension: str = ".jpg"
     metadata_stripped: bool = True
+    captured_at: str | None = None
+
+
+_EXIF_CAPTURE_GROUPS = ((36867, 36881), (36868, 36882), (306, 36880))
+_OFFSET_RE = re.compile(r"^([+-])(\d{2}):(\d{2})$")
+
+
+def _text_exif(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("ascii", "ignore").strip().strip("\x00")
+    return str(value or "").strip().strip("\x00")
+
+
+def _extract_capture_time(image: Image.Image, uploader_timezone: str) -> str | None:
+    """Return only a validated UTC capture timestamp; never return raw EXIF."""
+    try:
+        exif = image.getexif()
+    except (OSError, ValueError):
+        return None
+    for date_tag, offset_tag in _EXIF_CAPTURE_GROUPS:
+        raw_date = _text_exif(exif.get(date_tag))
+        if not raw_date:
+            continue
+        try:
+            local = datetime.strptime(raw_date, "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            continue
+        if local.year < 1900:
+            continue
+        raw_offset = _text_exif(exif.get(offset_tag))
+        if raw_offset:
+            matched = _OFFSET_RE.fullmatch(raw_offset)
+            if not matched:
+                continue
+            hours, minutes = int(matched.group(2)), int(matched.group(3))
+            if hours > 14 or minutes > 59 or (hours == 14 and minutes != 0):
+                continue
+            delta = timedelta(hours=hours, minutes=minutes)
+            if matched.group(1) == "-":
+                delta = -delta
+            aware = local.replace(tzinfo=timezone(delta))
+        else:
+            try:
+                aware = local.replace(tzinfo=ZoneInfo(uploader_timezone or "Asia/Shanghai"))
+            except ZoneInfoNotFoundError:
+                aware = local.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        normalized = aware.astimezone(timezone.utc)
+        if normalized <= datetime.now(timezone.utc) + timedelta(hours=24):
+            return normalized.replace(microsecond=0).isoformat()
+    return None
 
 
 def _open_verified(data: bytes) -> Image.Image:
@@ -89,9 +142,10 @@ def _resize_for_storage(image: Image.Image) -> Image.Image:
     return resized
 
 
-def sanitize_image(data: bytes, detected_mime_type: str) -> SanitizedImage:
+def sanitize_image(data: bytes, detected_mime_type: str, uploader_timezone: str = "Asia/Shanghai") -> SanitizedImage:
     image = _open_verified(data)
     try:
+        captured_at = _extract_capture_time(image, uploader_timezone)
         transposed = ImageOps.exif_transpose(image)
         if transposed is not image:
             image.close()
@@ -131,6 +185,7 @@ def sanitize_image(data: bytes, detected_mime_type: str) -> SanitizedImage:
             width=width,
             height=height,
             thumbnail=thumbnail,
+            captured_at=captured_at,
         )
     except (OSError, ValueError) as exc:
         if isinstance(exc, ValueError) and str(exc).startswith("不支持"):

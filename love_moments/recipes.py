@@ -455,6 +455,11 @@ def _plain(value: Decimal) -> str:
 
 
 def build_shopping_items(meal_items: Iterable[dict]) -> list[dict]:
+    # Imported lazily because the kitchen domain reuses the recipe
+    # canonicalizer.  Generated shopping rows always use the fixed nine-key
+    # contract; the old seven Chinese labels remain read-only compatibility.
+    from .kitchen import SHOPPING_CATEGORIES, shopping_category_key
+
     merged: dict[tuple[str, str, str], dict] = {}
     vague_counter = 0
     for meal in meal_items:
@@ -492,12 +497,12 @@ def build_shopping_items(meal_items: Iterable[dict]) -> list[dict]:
                 "quantity_text": str(ingredient.get("quantity_text", "")),
                 "canonical_unit": str(ingredient.get("canonical_unit", "vague")),
                 "unit_family": family,
-                "category": ingredient_category(canonical_name),
+                "category": shopping_category_key(canonical_name),
                 "specification": specification.split("#", 1)[0],
                 "sources": [source],
             }
             merged[key] = row
-    category_order = {name: index for index, name in enumerate(("蔬菜", "肉禽", "水产", "蛋奶", "主食", "调味品", "其他"))}
+    category_order = {name: index for index, (name, _) in enumerate(SHOPPING_CATEGORIES)}
     result = sorted(merged.values(), key=lambda row: (category_order.get(row["category"], 99), row["display_name"], row["specification"]))
     for index, row in enumerate(result, 1):
         row["position"] = index

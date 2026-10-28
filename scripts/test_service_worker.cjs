@@ -8,6 +8,12 @@ const listeners = {};
 const notifications = [];
 const navigation = [];
 const badgeChanges = [];
+const cacheEntries = new Map([
+  ["/", { source: "cached-shell" }],
+  ["/static/app.js", { source: "cached-app" }],
+]);
+const cachePuts = [];
+let fetchMode = "fail";
 let focused = false;
 const existingClient = {
   url: "https://love.example/?screen=home",
@@ -18,8 +24,32 @@ const context = {
   URL,
   Promise,
   Set,
-  fetch: async () => { throw new Error("not used"); },
-  caches: {},
+  fetch: async request => {
+    if (fetchMode === "fail") throw new Error("offline");
+    return {
+      ok: true,
+      headers: { get: () => fetchMode === "no-store" ? "private, no-store" : "public, max-age=60" },
+      clone() { return this; },
+      request,
+    };
+  },
+  caches: {
+    async open() {
+      return {
+        async addAll() {},
+        async put(key, value) {
+          const cacheKey = typeof key === "string" ? key : `${new URL(key.url).pathname}${new URL(key.url).search}`;
+          cachePuts.push(cacheKey);
+        },
+      };
+    },
+    async match(key) {
+      const cacheKey = typeof key === "string" ? key : `${new URL(key.url).pathname}${new URL(key.url).search}`;
+      return cacheEntries.get(cacheKey);
+    },
+    async keys() { return ["older-love-cache"]; },
+    async delete() { return true; },
+  },
   self: {
     location: { origin: "https://love.example" },
     registration: {
@@ -42,6 +72,62 @@ vm.runInNewContext(source, context, { filename: "sw.js" });
 for (const name of ["install", "activate", "fetch", "push", "notificationclick"]) {
   assert.equal(typeof listeners[name], "function", `missing ${name} listener`);
 }
+
+// Offline shortcut URLs are documents for the public shell. Private APIs,
+// media and mutations remain completely outside the worker fetch pipeline.
+let shortcutResponse;
+listeners.fetch({
+  request: { url: "https://love.example/?action=moment", method: "GET", mode: "navigate" },
+  respondWith(value) { shortcutResponse = value; },
+});
+Promise.resolve(shortcutResponse).then(response => {
+  assert.deepEqual(response, { source: "cached-shell" });
+});
+for (const request of [
+  { url: "https://love.example/api/v1/bootstrap", method: "GET" },
+  { url: "https://love.example/api/v1/messages", method: "POST" },
+  { url: "https://love.example/api/v1/media/private/content", method: "GET" },
+  { url: "https://other.example/static/app.js", method: "GET" },
+]) listeners.fetch({ request, respondWith() { throw new Error(`${request.url} must bypass the worker`); } });
+
+// Query variants must update only the canonical public shell key. Static
+// failures must not receive root HTML as a misleading fallback.
+fetchMode = "cacheable";
+let onlineShortcut;
+listeners.fetch({
+  request: { url: "https://love.example/?screen=chat", method: "GET", mode: "navigate" },
+  respondWith(value) { onlineShortcut = value; },
+});
+Promise.resolve(onlineShortcut).then(async () => {
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(cachePuts.includes("/"));
+  assert.equal(cachePuts.includes("/?screen=chat"), false);
+
+  let onlineStatic;
+  listeners.fetch({
+    request: { url: "https://love.example/static/app.js?v=20261027", method: "GET" },
+    respondWith(value) { onlineStatic = value; },
+  });
+  await onlineStatic;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(cachePuts.includes("/static/app.js"), "static query variants must update the canonical pathname key");
+  assert.equal(cachePuts.includes("/static/app.js?v=20261027"), false, "query variants must not create duplicate cache entries");
+
+  fetchMode = "fail";
+  let cachedStatic;
+  listeners.fetch({
+    request: { url: "https://love.example/static/app.js?v=offline", method: "GET" },
+    respondWith(value) { cachedStatic = value; },
+  });
+  assert.deepEqual(await cachedStatic, { source: "cached-app" }, "offline query variants must hit the bare-path cache entry");
+
+  let staticResponse;
+  listeners.fetch({
+    request: { url: "https://love.example/static/missing.js", method: "GET" },
+    respondWith(value) { staticResponse = value; },
+  });
+  assert.equal(staticResponse, undefined, "non-allowlisted static requests must bypass the worker");
+});
 
 let pushWork;
 listeners.push({

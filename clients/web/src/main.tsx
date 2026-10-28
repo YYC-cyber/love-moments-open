@@ -1,12 +1,22 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { LoveMomentsClient, type ManifestCache } from "@love-moments/domain-client";
+import { LoveMomentsClient, buildH5SmartLink, createPrivateCache, type CacheIdentity, type ManifestCache } from "@love-moments/domain-client";
 import { surfaces, type Surface, type UiManifest, type UiNode } from "@love-moments/ui-contract";
 import "./style.css";
 
+const privateCache = createPrivateCache({
+  async getItem(key) { return localStorage.getItem(key); },
+  async setItem(key, value) { localStorage.setItem(key, value); },
+  async getAllKeys() { return Object.keys(localStorage); },
+  async multiRemove(keys) { keys.forEach(key => localStorage.removeItem(key)); }
+});
+const identityKey = "love-react-scope";
+try { const identity = JSON.parse(localStorage.getItem(identityKey) || "null") as CacheIdentity | null; if (identity) void privateCache.setIdentity(identity); } catch { localStorage.removeItem(identityKey); }
+surfaces.forEach(surface => localStorage.removeItem(`love-react-${surface}`));
 const cache: ManifestCache = {
-  async get(surface) { try { return JSON.parse(localStorage.getItem(`love-react-${surface}`) || "null"); } catch { localStorage.removeItem(`love-react-${surface}`); return null; } },
-  async set(surface, value) { localStorage.setItem(`love-react-${surface}`, JSON.stringify(value)); }
+  scope: privateCache.scope,
+  async get(surface) { try { return JSON.parse(await privateCache.getItem(`react-ui:${surface}`) || "null"); } catch { return null; } },
+  async set(surface, value) { await privateCache.setItem(`react-ui:${surface}`, JSON.stringify(value)); }
 };
 const client = new LoveMomentsClient("", cache);
 const labels: Record<Surface, string> = { home: "首页", chat: "消息", trip: "旅行", timeline: "时光", life: "我们" };
@@ -27,11 +37,26 @@ function App() {
   const [password, setPassword] = useState("");
   const [preview, setPreview] = useState<{ id: string; data: Record<string, unknown> }>();
 
-  const load = () => {
+  const load = () => { void (async () => {
     setError("");
-    client.getManifest(surface).then(value => { setManifest(value); setLoginRequired(false); }).catch((cause: Error & { status?: number }) => { setError(cause.message); if (cause.status === 401) setLoginRequired(true); });
-  };
+    try {
+      try {
+        const value = await client.bootstrap<{ user: { id: string }; couple?: { id: string; version: number }; permission_version: number }>();
+        const identity = { user_id: value.user.id, couple_id: value.couple?.id || "unpaired", permission_version: value.permission_version };
+        await privateCache.setIdentity(identity);
+        localStorage.setItem(identityKey, JSON.stringify(identity));
+      } catch (cause) { if ((cause as { status?: number }).status) throw cause; }
+      setManifest(await client.getManifest(surface)); setLoginRequired(false);
+    } catch (cause) {
+      const failure = cause as Error & { status?: number }; setError(failure.message);
+      if (failure.status === 401 || failure.status === 403) { await privateCache.setIdentity(null); localStorage.removeItem(identityKey); setManifest(undefined); setIntent(""); setPreview(undefined); setLoginRequired(true); }
+    }
+  })(); };
   useEffect(load, [surface]);
+  useEffect(() => {
+    const changed = (event: StorageEvent) => { if (event.key === "love-auth-sync" || (event.key === "love-active-scope" && event.oldValue && event.oldValue !== event.newValue)) { void privateCache.setIdentity(null); localStorage.removeItem(identityKey); setManifest(undefined); setIntent(""); setPreview(undefined); load(); } };
+    window.addEventListener("storage", changed); return () => window.removeEventListener("storage", changed);
+  }, [surface]);
 
   async function login(event: React.FormEvent) {
     event.preventDefault();
@@ -45,15 +70,7 @@ function App() {
   }
   async function openAction(id: string) { const result = await client.preview(id); setPreview({ id, data: result.preview }); }
   function openNode(node: UiNode) {
-    const screenByType: Partial<Record<UiNode["type"], Surface>> = {
-      couple_overview: "home", daily_question: "home", quick_capture: "home",
-      message_summary: "chat", favorite_memory: "chat", suggested_reply: "chat", import_guide: "chat", trip_share: "trip",
-      trip_countdown: "trip", trip_variant_compare: "trip", itinerary_timeline: "trip", budget_summary: "trip", hotel_quote: "trip", risk_alert: "trip", impact_diff: "trip", approval_state: "trip",
-      featured_memory: "timeline", timeline_summary: "timeline", month_album: "timeline", footprint_summary: "timeline", year_report: "timeline", privacy_status: "timeline",
-      wishlist: "life", calendar_summary: "life", anniversary: "life", todo_summary: "life", preference_summary: "life", pending_items: "life"
-    };
-    const screen = screenByType[node.type] || surface;
-    window.location.assign(`/?screen=${screen}&smart=${node.type}`);
+    window.location.assign(buildH5SmartLink(surface, node.type));
   }
   async function confirm() { if (!preview) return; await client.confirm(preview.id, `web:${preview.id}:${Date.now()}`); setPreview(undefined); load(); }
   async function cancel() { if (preview) await client.cancel(preview.id).catch(() => undefined); setPreview(undefined); }

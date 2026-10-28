@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import calendar as calendar_module
 import hashlib
 import hmac
 import json
@@ -10,6 +11,7 @@ import secrets
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 import re
 from contextlib import contextmanager
@@ -21,7 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .providers import DatePlannerProvider, LocalDatePlanner, LocalTravelPlanner, TravelPlannerProvider
 from .phase_three import BROAD_DESTINATIONS, PhaseThreeMixin
 from .storage import LocalMediaStorage, MediaStorage
-from .schema import SCHEMA_SQL, SCHEMA_VERSION
+from .schema import SCHEMA_SQL, SCHEMA_VERSION, V34_SCHEMA_MARKER, schema_inventory
 from .intelligent_ui import (
     COMPONENTS_BY_SURFACE,
     SURFACES,
@@ -43,6 +45,14 @@ from .notifications import NotificationMixin
 from .life_assistant import LifeAssistantProvider, RuleBasedLifeAssistant
 from .life_assistant_store import LifeAssistantMixin
 from .daily_summary import DailySummaryMixin
+from .provenance import ProvenanceMixin
+from .couple_interactions import CoupleInteractionMixin
+from .expression_assistant import ExpressionAssistant, MODES, expression_assistant_from_env
+from .kitchen import KitchenMixin
+from .travel_tools import TravelToolsMixin
+from .memories import DATE_SOURCE_LABELS, SOURCE_LABELS, MemoryMixin
+from .future_letters import FutureLetterMixin
+from .album_exports import AlbumExportMixin
 
 
 DEMO_USER = "demo-user-a"
@@ -121,7 +131,7 @@ def validate_new_password(password: str, username: str = "") -> None:
     if len(password) < 10 or len(password) > 128:
         raise ValueError("密码长度需为 10–128 位")
     lowered = password.casefold()
-    if lowered in {"12345678", "1234567890", "password123", "love1234", "qwerty12345", "test123"}:
+    if lowered in {"12345678", "1234567890", "password123", "love1234", "qwerty12345"}:
         raise ValueError("密码过于常见，请换一个更安全的密码")
     if username and username.casefold() in lowered:
         raise ValueError("密码不能包含账号名")
@@ -132,10 +142,17 @@ def validate_new_password(password: str, username: str = "") -> None:
 
 class LoveMomentsStore(
     DailySummaryMixin,
+    AlbumExportMixin,
+    MemoryMixin,
+    FutureLetterMixin,
+    ProvenanceMixin,
+    CoupleInteractionMixin,
     LifeAssistantMixin,
     NotificationMixin,
     TravelAssistantMixin,
     SharedContentMixin,
+    KitchenMixin,
+    TravelToolsMixin,
     MealRecipeMixin,
     PhaseThreeMixin,
 ):
@@ -149,6 +166,7 @@ class LoveMomentsStore(
         storage: MediaStorage | None = None,
         travel_assistant: TravelAssistantProvider | None = None,
         life_assistant: LifeAssistantProvider | None = None,
+        expression_assistant: ExpressionAssistant | None = None,
         seed_demo_data: bool = False,
     ):
         self.db_path = str(db_path)
@@ -166,15 +184,23 @@ class LoveMomentsStore(
         self._live_restaurant_cache: dict[tuple[str, float, float, str], dict[str, Any]] = {}
         self._live_restaurant_cache_lock = threading.Lock()
         self.life_assistant_provider = life_assistant or RuleBasedLifeAssistant()
+        self.expression_assistant = expression_assistant or expression_assistant_from_env()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.media_root = Path(media_root) if media_root else Path(self.db_path).parent / "media"
         for folder in ("images", "audio", "videos", "thumbnails", "temp"):
             (self.media_root / folder).mkdir(parents=True, exist_ok=True)
+        self.album_export_root = self.media_root / "temp" / "album_exports"
+        self.album_export_root.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            self.album_export_root.chmod(0o700)
+        self._album_artifact_lock = threading.RLock()
         self.local_storage = LocalMediaStorage(self.media_root)
         self.storage = storage or self.local_storage
         self._media_signing_key = self._load_media_signing_key()
         self.migrate()
+        self.recover_stale_ai_usage_events()
         self._recover_life_assistant_jobs_after_restart()
+        self._recover_ui_generation_jobs_after_restart()
         self._seed_builtin_recipes()
         self._configure_external_request_guards()
         if hasattr(self.travel_assistant, "before_request"):
@@ -189,6 +215,21 @@ class LoveMomentsStore(
         self._ensure_minimum_plan_choices()
         self._repair_legacy_travel_templates()
         self._harden_local_permissions()
+
+    def _recover_ui_generation_jobs_after_restart(self) -> int:
+        """Close orphaned UI jobs without storing or replaying private intents."""
+        now = utc_now()
+        with self.connection() as db:
+            return int(
+                db.execute(
+                    """
+                    UPDATE ui_generation_jobs
+                    SET status='failed', error_code='SERVER_RESTARTED', completed_at=?
+                    WHERE status IN ('queued','running') AND completed_at IS NULL
+                    """,
+                    (now,),
+                ).rowcount
+            )
 
     def _ensure_minimum_plan_choices(self) -> None:
         """Add newly introduced plan styles without replacing existing edits."""
@@ -444,11 +485,22 @@ class LoveMomentsStore(
 
     def migrate(self) -> None:
         with self.connection() as db:
+            existing_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+            if existing_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"数据库版本 {existing_version} 高于当前程序支持的 {SCHEMA_VERSION}，已拒绝写入"
+                )
             # Journal mode is a database-level setting. Changing it for every
             # request can race when both partners log in at the same time.
             db.execute("PRAGMA journal_mode = WAL")
             db.execute("PRAGMA synchronous = NORMAL")
-            db.executescript(SCHEMA_SQL)
+            base_schema, v34_schema = SCHEMA_SQL.split(V34_SCHEMA_MARKER, 1)
+            db.executescript(base_schema)
+            # executescript commits before a script, so begin explicitly in
+            # the script that creates the v34 tables.  It intentionally has no
+            # COMMIT: all new tables, guarded ALTERs, sidecar backfills,
+            # verification and version stamping share this transaction.
+            db.executescript(f"BEGIN IMMEDIATE;\n{v34_schema}")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
             if "username" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN username TEXT")
@@ -533,6 +585,10 @@ class LoveMomentsStore(
                 "deleted_at": "TEXT",
                 "purged_at": "TEXT",
                 "version": "INTEGER NOT NULL DEFAULT 1",
+                "captured_at": "TEXT",
+                "date_source": "TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(date_source IN ('legacy_unknown','user_confirmed','media_capture','trip_date','system_provisional'))",
+                "source_type": "TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown'))",
+                "duration_ms": "INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0)",
             }.items():
                 if name not in media_columns:
                     db.execute(f"ALTER TABLE media_assets ADD COLUMN {name} {definition}")
@@ -675,17 +731,119 @@ class LoveMomentsStore(
             db.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_couple_status ON media_assets(couple_id, status, created_at DESC)")
             db.execute("UPDATE call_records SET updated_at=COALESCE(updated_at, ended_at, answered_at, started_at)")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL REFERENCES users(id),
-                    token_hash TEXT NOT NULL UNIQUE,
-                    expires_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
-            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash)")
+
+            grant_columns = {row["name"] for row in db.execute("PRAGMA table_info(ai_context_grants)").fetchall()}
+            for name, definition in {
+                "revoked_at": "TEXT",
+                "last_used_at": "TEXT",
+                "resource_version": "INTEGER CHECK(resource_version IS NULL OR resource_version >= 1)",
+                "usage_scope": "TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(usage_scope IN ('legacy_unknown','selected_content'))",
+                "request_id": "TEXT",
+                "version": "INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)",
+            }.items():
+                if name not in grant_columns:
+                    db.execute(f"ALTER TABLE ai_context_grants ADD COLUMN {name} {definition}")
+
+            calendar_columns = {row["name"] for row in db.execute("PRAGMA table_info(calendar_entries)").fetchall()}
+            for name, definition in {
+                "participant_a_id": "TEXT REFERENCES users(id)",
+                "participant_b_id": "TEXT REFERENCES users(id) CHECK(participant_b_id IS NULL OR (participant_a_id IS NOT NULL AND participant_b_id <> participant_a_id))",
+                "blocks_time": "INTEGER NOT NULL DEFAULT 0 CHECK(blocks_time IN (0,1))",
+                "source_type": "TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(source_type IN ('human','real_api','rules','ai','mock','cache','legacy_unknown'))",
+            }.items():
+                if name not in calendar_columns:
+                    db.execute(f"ALTER TABLE calendar_entries ADD COLUMN {name} {definition}")
+
+            list_item_columns = {row["name"] for row in db.execute("PRAGMA table_info(shared_list_items)").fetchall()}
+            for name, definition in {
+                "item_kind": "TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK(item_kind IN ('legacy_unknown','general','gift','meal','travel'))",
+                "deleted_at": "TEXT",
+                "created_at": "TEXT",
+                "updated_at": "TEXT",
+            }.items():
+                if name not in list_item_columns:
+                    db.execute(f"ALTER TABLE shared_list_items ADD COLUMN {name} {definition}")
+
+            substitution_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(ingredient_substitutions)").fetchall()
+            }
+            for name, definition in {
+                "meal_item_id": "TEXT REFERENCES meal_cart_items(id) ON DELETE CASCADE",
+                "snapshot_ingredient_ref": "TEXT",
+                "meal_version": "INTEGER CHECK(meal_version IS NULL OR meal_version >= 1)",
+                "expected_versions_json": "TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(expected_versions_json) AND json_type(expected_versions_json)='object')",
+                "rule_key": "TEXT",
+                "rule_version": "INTEGER CHECK(rule_version IS NULL OR rule_version >= 1)",
+            }.items():
+                if name not in substitution_columns:
+                    db.execute(f"ALTER TABLE ingredient_substitutions ADD COLUMN {name} {definition}")
+
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_grants_active ON ai_context_grants(couple_id,user_id,purpose,expires_at) WHERE revoked_at IS NULL"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_grants_resource ON ai_context_grants(couple_id,user_id,resource_type,resource_id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_calendar_busy ON calendar_entries(couple_id,starts_at,ends_at) WHERE deleted_at IS NULL AND blocks_time=1"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shared_list_items_active ON shared_list_items(list_id,deleted_at,position)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_owner_visibility ON media_assets(couple_id,owner_id,visibility,status,created_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ingredient_substitutions_meal "
+                "ON ingredient_substitutions(meal_item_id,status,created_at DESC) "
+                "WHERE meal_item_id IS NOT NULL"
+            )
+
+            # Stable sidecar identifiers and INSERT OR IGNORE make repeated
+            # upgrades non-destructive.  Unknown means exactly unknown: no
+            # dates, authors or source claims are inferred from content.
+            provenance_sources = (
+                ("moment", "moments", "id", "couple_id", "creator_id", "created_at"),
+                ("media", "media_assets", "id", "couple_id", "owner_id", "created_at"),
+                ("trip", "trips", "id", "couple_id", None, "created_at"),
+                ("recipe", "recipes", "id", "couple_id", "owner_id", "created_at"),
+                ("calendar_entry", "calendar_entries", "id", "couple_id", "creator_id", "created_at"),
+            )
+            for resource_type, table, id_column, couple_column, owner_column, created_column in provenance_sources:
+                target_column = f"{resource_type}_id"
+                owner_expression = owner_column if owner_column else "NULL"
+                predicate = f"{couple_column} IS NOT NULL"
+                db.execute(
+                    f"""
+                    INSERT OR IGNORE INTO memory_provenance(
+                        id,couple_id,owner_id,{target_column},source_type,date_source,
+                        evidence_json,version,created_at,updated_at
+                    )
+                    SELECT 'prov_{resource_type}_' || {id_column},{couple_column},{owner_expression},{id_column},
+                           'legacy_unknown','legacy_unknown','{{}}',1,
+                           COALESCE({created_column},CURRENT_TIMESTAMP),COALESCE({created_column},CURRENT_TIMESTAMP)
+                    FROM {table} WHERE {predicate}
+                    """
+                )
+            db.execute(
+                """
+                INSERT OR IGNORE INTO memory_provenance(
+                    id,couple_id,owner_id,shared_list_item_id,source_type,date_source,
+                    evidence_json,version,created_at,updated_at
+                )
+                SELECT 'prov_shared_list_item_' || i.id,l.couple_id,i.creator_id,i.id,
+                       'legacy_unknown','legacy_unknown','{}',1,
+                       COALESCE(i.created_at,CURRENT_TIMESTAMP),COALESCE(i.updated_at,i.created_at,CURRENT_TIMESTAMP)
+                FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id
+                """
+            )
+
+            inventory = schema_inventory(db, expected_version=SCHEMA_VERSION)
+            if not inventory["structural_ok"]:
+                raise RuntimeError("数据库 v34 结构不完整，迁移已回滚")
+            if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("数据库存在外键孤立记录，迁移已回滚且未升级版本")
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -776,7 +934,9 @@ class LoveMomentsStore(
 
     def _seed_phase_two(self, db: sqlite3.Connection) -> None:
         """Add stable self-hosted demo data without overwriting user changes."""
-        if not db.execute("SELECT 1 FROM couples WHERE id=?", (DEMO_COUPLE,)).fetchone():
+        if not db.execute(
+            "SELECT 1 FROM couples WHERE id=? AND status='active'", (DEMO_COUPLE,),
+        ).fetchone():
             return
         now = utc_now()
         db.executemany(
@@ -787,8 +947,8 @@ class LoveMomentsStore(
             ],
         )
         db.execute(
-            "INSERT OR IGNORE INTO couple_statuses(user_id, couple_id, status_code, emoji, text, expires_at, updated_at) VALUES (?, ?, 'home', '⌂', '已到家', NULL, ?)",
-            (DEMO_PARTNER, DEMO_COUPLE, now),
+            "INSERT OR IGNORE INTO couple_statuses(user_id, couple_id, status_code, emoji, text, expires_at, updated_at) VALUES (?, ?, 'home', '⌂', '已到家', ?, ?)",
+            (DEMO_PARTNER, DEMO_COUPLE, (datetime.now(timezone.utc) + timedelta(hours=8)).replace(microsecond=0).isoformat(), now),
         )
 
     def _insert_generated_plans(
@@ -896,15 +1056,16 @@ class LoveMomentsStore(
             (couple_id, couple_id),
         )
         sequence = int(cursor.lastrowid)
-        self._insert_realtime_partner_notification(
-            db,
-            couple_id=couple_id,
-            actor_id=actor_id,
-            event_type=event_type,
-            resource_id=resource_id,
-            payload=payload or {},
-            sequence=sequence,
-        )
+        if not (payload or {}).get("owner_only"):
+            self._insert_realtime_partner_notification(
+                db,
+                couple_id=couple_id,
+                actor_id=actor_id,
+                event_type=event_type,
+                resource_id=resource_id,
+                payload=payload or {},
+                sequence=sequence,
+            )
         return sequence
 
     @staticmethod
@@ -913,22 +1074,96 @@ class LoveMomentsStore(
         item["payload"] = parse_json(item.pop("payload_json", "{}"), {})
         return item
 
+    def _resource_visible_to_user(self, db: sqlite3.Connection, resource_type: str, resource_id: str, user_id: str) -> bool:
+        """Keep private shared-resource metadata out of partner replay/export."""
+        if resource_type == "media":
+            row = db.execute("SELECT owner_id AS owner,visibility FROM media_assets WHERE id=?", (resource_id,)).fetchone()
+        elif resource_type == "moment":
+            row = db.execute("SELECT creator_id AS owner,visibility FROM moments WHERE id=?", (resource_id,)).fetchone()
+        elif resource_type == "trip_emergency":
+            row = db.execute(
+                "SELECT creator_id AS owner,visibility FROM trip_emergency_entries WHERE id=? AND deleted_at IS NULL",
+                (resource_id,),
+            ).fetchone()
+        elif resource_type == "voice_transcript":
+            row = db.execute(
+                """SELECT t.owner_id AS owner,
+                          CASE WHEN t.status='ready'
+                                 AND (t.visibility='shared'
+                                      OR (t.visibility='delayed' AND t.reveal_at<=?))
+                                 AND m.visibility='shared' AND media.visibility='shared'
+                                 AND m.deleted_at IS NULL AND m.purged_at IS NULL
+                                 AND media.status='ready' AND media.deleted_at IS NULL
+                                 AND media.purged_at IS NULL
+                                 AND c.status='active'
+                                 AND a.deleted_at IS NULL AND b.deleted_at IS NULL
+                               THEN 'shared' ELSE 'private' END AS visibility
+                   FROM voice_transcripts t
+                   JOIN moments m ON m.id=t.moment_id AND m.media_id=t.media_id
+                                          AND m.couple_id=t.couple_id
+                   JOIN media_assets media ON media.id=t.media_id AND media.couple_id=t.couple_id
+                   JOIN couples c ON c.id=t.couple_id
+                   JOIN users a ON a.id=c.member_a
+                   JOIN users b ON b.id=c.member_b
+                   WHERE t.id=? AND ? IN (c.member_a,c.member_b)""",
+                (utc_now(), resource_id, user_id),
+            ).fetchone()
+        elif resource_type == "future_letter":
+            letter = db.execute("SELECT * FROM future_letters WHERE id=?", (resource_id,)).fetchone()
+            if not letter or letter["status"] == "deleted":
+                return False
+            if letter["author_id"] == user_id:
+                return True
+            return bool(
+                letter["status"] == "delivered"
+                and letter["recipient_id"] == user_id
+                and self._future_pair_active(db, letter)
+            )
+        else:
+            return True
+        return bool(row and (row["owner"] == user_id or row["visibility"] == "shared"))
+
+    def _event_visible_to_user(self, db: sqlite3.Connection, row: sqlite3.Row, user_id: str) -> bool:
+        if row["actor_id"] == user_id:
+            return True
+        payload = parse_json(row["payload_json"], {})
+        if payload.get("owner_only") or payload.get("visibility") in {"private", "delayed"}:
+            return False
+        if row["event_type"].startswith("media."):
+            resource_type = "media"
+        elif row["event_type"].startswith("moment."):
+            resource_type = "moment"
+        else:
+            resource_type = payload.get("resource", "")
+        return self._resource_visible_to_user(db, resource_type, row["resource_id"], user_id)
+
     def list_realtime_events(self, after: object = 0, limit: int = 100, user_id: str = DEMO_USER) -> dict:
         try:
             after_number = max(0, int(after))
         except (TypeError, ValueError) as error:
             raise ValueError("事件序号必须是整数") from error
+        visible_limit = max(1, min(int(limit), 200))
+        cursor = after_number
+        items: list[dict] = []
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
-            rows = db.execute(
-                "SELECT * FROM realtime_events WHERE couple_id=? AND sequence>? ORDER BY sequence LIMIT ?",
-                (couple["id"], after_number, max(1, min(int(limit), 200))),
-            ).fetchall()
-            latest = db.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM realtime_events WHERE couple_id=?",
-                (couple["id"],),
-            ).fetchone()[0]
-        return {"items": [self._event_dict(row) for row in rows], "latest_sequence": int(latest)}
+            # Limit visible results, while bounding each request to five
+            # chunks (at most 1,000 examined rows). A hidden-only page can
+            # advance its cursor without skipping the next shared event.
+            for _ in range(5):
+                rows = db.execute(
+                    "SELECT * FROM realtime_events WHERE couple_id=? AND sequence>? ORDER BY sequence LIMIT 200",
+                    (couple["id"], cursor),
+                ).fetchall()
+                for row in rows:
+                    cursor = int(row["sequence"])
+                    if self._event_visible_to_user(db, row, user_id):
+                        items.append(self._event_dict(row))
+                        if len(items) == visible_limit:
+                            break
+                if len(items) == visible_limit or len(rows) < 200:
+                    break
+        return {"items": items, "latest_sequence": cursor}
 
     @staticmethod
     def _idempotent_result(
@@ -1527,7 +1762,7 @@ class LoveMomentsStore(
             try:
                 couple_row, partner_id = self._couple_context(db, user_id)
             except ValueError:
-                return {"user": user, "needs_pairing": True}
+                return {"user": user, "needs_pairing": True, "permission_version": 0}
             partner = self.public_user(db.execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone())
             couple = dict(couple_row)
             trip_row = db.execute("SELECT id FROM trips WHERE couple_id=? AND deleted_at IS NULL ORDER BY start_date DESC, created_at DESC, rowid DESC LIMIT 1", (couple["id"],)).fetchone()
@@ -1535,6 +1770,7 @@ class LoveMomentsStore(
             "user": user,
             "partner": partner,
             "couple": couple,
+            "permission_version": couple["version"],
             "needs_pairing": False,
             "messages": self.list_messages(user_id=user_id),
             "moments": self.list_moments(user_id=user_id),
@@ -1544,6 +1780,7 @@ class LoveMomentsStore(
             "coupleContext": self.get_couple_context(user_id=user_id),
             "weeklyReview": self.get_weekly_review(user_id=user_id),
             "datePlans": self.list_date_plans(user_id=user_id),
+            "decisions": self.list_decisions(user_id=user_id),
             "trips": self.list_trips(user_id),
             "calendar": self.list_calendar_entries(user_id),
             "preferences": self.list_preferences(user_id),
@@ -1551,12 +1788,12 @@ class LoveMomentsStore(
         }
 
     STATUS_PRESETS = {
-        "miss_you": ("♡", "想你了"),
         "busy": ("◷", "忙碌中"),
+        "want_chat": ("♡", "想和你聊聊"),
+        "need_company": ("♧", "需要陪伴"),
+        "feeling_low": ("☁", "心情不太好"),
         "moving": ("↗", "在路上"),
         "home": ("⌂", "已到家"),
-        "happy": ("☺", "心情不错"),
-        "quiet": ("☁", "想安静一下"),
         "custom": ("✦", "分享此刻"),
     }
     CITY_COORDINATES = {
@@ -1580,28 +1817,36 @@ class LoveMomentsStore(
         code = str(payload.get("status_code", "")).strip()
         if code not in self.STATUS_PRESETS:
             raise ValueError("请选择有效的状态")
+        duration = payload.get("duration_minutes")
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 30 <= duration <= 10080:
+            raise ValueError("状态时长需为 30–10080 分钟的整数")
         default_emoji, default_text = self.STATUS_PRESETS[code]
-        text = str(payload.get("text", default_text)).strip()[:60]
+        supplied_text = payload.get("text")
+        if supplied_text is not None and not isinstance(supplied_text, str):
+            raise ValueError("状态文字必须是文字")
+        text = str(supplied_text or ("" if code == "custom" else default_text)).strip()[:60]
         if not text:
             raise ValueError("状态文字不能为空")
-        emoji = str(payload.get("emoji", default_emoji)).strip()[:8] or default_emoji
-        expires_at = payload.get("expires_at")
-        if expires_at:
-            expires_at = parse_iso_datetime(expires_at, "状态失效时间")
-            maximum = (datetime.now(timezone.utc) + timedelta(days=7)).replace(microsecond=0).isoformat()
-            if expires_at <= utc_now() or expires_at > maximum:
-                raise ValueError("状态失效时间需在未来 7 天内")
-        now = utc_now()
+        emoji = default_emoji
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(minutes=duration)).isoformat()
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
-            existing = db.execute("SELECT version FROM couple_statuses WHERE user_id=?", (user_id,)).fetchone()
+            existing = db.execute(
+                "SELECT version FROM couple_statuses WHERE user_id=? AND couple_id=?",
+                (user_id, couple["id"]),
+            ).fetchone()
             version = (existing["version"] + 1) if existing else 1
             db.execute(
                 "INSERT INTO couple_statuses(user_id, couple_id, status_code, emoji, text, expires_at, version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET couple_id=excluded.couple_id, status_code=excluded.status_code, emoji=excluded.emoji, text=excluded.text, expires_at=excluded.expires_at, version=excluded.version, updated_at=excluded.updated_at",
                 (user_id, couple["id"], code, emoji, text, expires_at, version, now),
             )
-            self._event(db, couple["id"], user_id, "presence.changed", user_id, {"statusCode": code, "version": version})
-            row = db.execute("SELECT * FROM couple_statuses WHERE user_id=?", (user_id,)).fetchone()
+            self._event(db, couple["id"], user_id, "presence.changed", user_id, {"statusCode": code, "version": version, "expiresAt": expires_at})
+            row = db.execute(
+                "SELECT * FROM couple_statuses WHERE user_id=? AND couple_id=?",
+                (user_id, couple["id"]),
+            ).fetchone()
         return dict(row)
 
     def clear_status(self, user_id: str = DEMO_USER) -> dict:
@@ -1670,10 +1915,17 @@ class LoveMomentsStore(
         now = utc_now()
         with self.connection() as db:
             couple, partner_id = self._couple_context(db, user_id)
-            db.execute("DELETE FROM couple_statuses WHERE couple_id=? AND expires_at IS NOT NULL AND expires_at<=?", (couple["id"], now))
+            valid_codes = tuple(self.STATUS_PRESETS)
+            placeholders = ",".join("?" for _ in valid_codes)
+            db.execute(
+                f"""DELETE FROM couple_statuses WHERE couple_id=? AND (
+                    expires_at IS NULL OR expires_at<=? OR status_code NOT IN ({placeholders})
+                )""",
+                (couple["id"], now, *valid_codes),
+            )
             rows = db.execute(
-                "SELECT u.id, u.nickname, u.avatar_label, u.timezone AS account_timezone, s.status_code, s.emoji, s.text AS status_text, s.expires_at, s.updated_at AS status_updated_at, l.city, l.country, l.latitude, l.longitude, l.timezone FROM users u LEFT JOIN couple_statuses s ON s.user_id=u.id LEFT JOIN user_locations l ON l.user_id=u.id WHERE u.id IN (?, ?)",
-                (user_id, partner_id),
+                "SELECT u.id, u.nickname, u.avatar_label, u.timezone AS account_timezone, s.status_code, s.emoji, s.text AS status_text, s.expires_at, s.updated_at AS status_updated_at, l.city, l.country, l.latitude, l.longitude, l.timezone FROM users u LEFT JOIN couple_statuses s ON s.user_id=u.id AND s.couple_id=? LEFT JOIN user_locations l ON l.user_id=u.id WHERE u.id IN (?, ?)",
+                (couple["id"], user_id, partner_id),
             ).fetchall()
             trip = db.execute("SELECT title, start_date FROM trips WHERE couple_id=? AND deleted_at IS NULL AND start_date>=? ORDER BY start_date LIMIT 1", (couple["id"], date.today().isoformat())).fetchone()
         members = []
@@ -1711,8 +1963,21 @@ class LoveMomentsStore(
             "time_difference_minutes": self._time_difference_minutes(members),
         }
         with self.connection() as db:
-            version_row = db.execute("SELECT version FROM widget_snapshots WHERE user_id=?", (user_id,)).fetchone()
-            version = (version_row["version"] + 1) if version_row else 1
+            version_row = db.execute("SELECT version,snapshot_json FROM widget_snapshots WHERE user_id=?", (user_id,)).fetchone()
+            def stable_widget_value(value: dict) -> dict:
+                clean = json.loads(json.dumps(value, ensure_ascii=False))
+                for member in clean.get("members", []):
+                    member.pop("local_time", None)
+                    member.pop("status_age_minutes", None)
+                return clean
+            previous = None
+            if version_row:
+                try:
+                    previous = json.loads(version_row["snapshot_json"])
+                except (TypeError, json.JSONDecodeError):
+                    previous = None
+            changed = previous is None or stable_widget_value(previous) != stable_widget_value(context)
+            version = 1 if not version_row else int(version_row["version"]) + int(changed)
             db.execute(
                 "INSERT INTO widget_snapshots(user_id, couple_id, version, snapshot_json, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET version=excluded.version, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at",
                 (user_id, couple["id"], version, json.dumps(context, ensure_ascii=False), now),
@@ -1758,7 +2023,7 @@ class LoveMomentsStore(
                     (couple["id"], start_at, end_at),
                 ).fetchone()
                 completed = db.execute(
-                    "SELECT COUNT(*) FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=? AND i.completed_at>=? AND i.completed_at<?",
+                    "SELECT COUNT(*) FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=? AND i.deleted_at IS NULL AND i.completed_at>=? AND i.completed_at<?",
                     (couple["id"], start_at, end_at),
                 ).fetchone()[0]
                 dates = db.execute(
@@ -1879,13 +2144,234 @@ class LoveMomentsStore(
         "value": ("预算友好", "把预算用在最值得一起记住的地方", 0.68, "轻快"),
     }
 
-    def create_date_plan(self, payload: dict, user_id: str = DEMO_USER) -> dict:
-        city = str(payload.get("city", "")).strip()
+    @staticmethod
+    def _date_interest_tags(preferences: object) -> list[str]:
+        if not isinstance(preferences, dict):
+            return []
+        raw = preferences.get("interests", preferences.get("interest", []))
+        if isinstance(raw, str):
+            values = re.split(r"[,，、/\s]+", raw)
+        elif isinstance(raw, list):
+            values = [str(item) for item in raw]
+        else:
+            values = []
+        allowed = {"不限", "室内", "室外", "美食", "展览", "运动", "散步", "摄影", "电影", "手作", "自然"}
+        return list(dict.fromkeys(item.strip() for item in values if item.strip() in allowed))[:8]
+
+    @staticmethod
+    def _date_plan_zone(candidate: dict | None) -> tuple[ZoneInfo | None, bool]:
+        country = str((candidate or {}).get("country") or "").strip().casefold()
+        provider_name = str((candidate or {}).get("provider") or "").strip()
+        explicit_timezone = str((candidate or {}).get("timezone") or "").strip()
+        if provider_name == "amap" or country in {"中国", "china", "cn"}:
+            return ZoneInfo("Asia/Shanghai"), True
+        if explicit_timezone:
+            try:
+                return ZoneInfo(explicit_timezone), True
+            except ZoneInfoNotFoundError:
+                pass
+        # Account timezone is not destination evidence. An unverified overseas
+        # or manual scope therefore cannot claim exact timed conflicts.
+        return None, False
+
+    @staticmethod
+    def _month_occurrence(anchor: date, year: int, month: int) -> date:
+        return date(year, month, min(anchor.day, calendar_module.monthrange(year, month)[1]))
+
+    @classmethod
+    def _recurrence_dates(cls, anchor: date, target: date, recurrence: str) -> list[date]:
+        if recurrence == "none":
+            return [anchor]
+        if target < anchor:
+            return []
+        if recurrence == "daily":
+            values = [target, target - timedelta(days=1)]
+        elif recurrence == "weekly":
+            latest = target - timedelta(days=(target - anchor).days % 7)
+            values = [latest, latest - timedelta(days=7)]
+        elif recurrence == "monthly":
+            month_index = target.year * 12 + target.month - 1
+            values = []
+            for index in (month_index, month_index - 1):
+                year, month_zero = divmod(index, 12)
+                values.append(cls._month_occurrence(anchor, year, month_zero + 1))
+        elif recurrence == "yearly":
+            values = [
+                date(year, anchor.month, min(anchor.day, calendar_module.monthrange(year, anchor.month)[1]))
+                for year in (target.year, target.year - 1)
+            ]
+        else:
+            return [anchor]
+        return list(dict.fromkeys(value for value in values if value >= anchor))
+
+    def _date_busy_context(
+        self,
+        db: sqlite3.Connection,
+        *,
+        user_id: str,
+        plan_date: str,
+        start_time: str,
+        end_time: str,
+        candidate: dict | None,
+    ) -> dict:
+        couple, partner_id = self._couple_context(db, user_id)
+        rows = db.execute(
+            """SELECT starts_at,ends_at,all_day,recurrence,participant_a_id,participant_b_id
+            FROM calendar_entries
+            WHERE couple_id=? AND deleted_at IS NULL AND blocks_time=1
+              AND (participant_a_id IN (?,?) OR participant_b_id IN (?,?))""",
+            (couple["id"], user_id, partner_id, user_id, partner_id),
+        ).fetchall()
+        plan_zone, timezone_confirmed = self._date_plan_zone(candidate)
+        intervals: list[dict[str, object]] = []
+        day_value = date.fromisoformat(plan_date)
+        day_start = datetime.combine(day_value, datetime.min.time(), tzinfo=plan_zone) if plan_zone else None
+        requested_start = day_start + timedelta(minutes=LocalDatePlanner._minutes(start_time)) if day_start else None
+        requested_end = day_start + timedelta(minutes=LocalDatePlanner._minutes(end_time)) if day_start else None
+        for row in rows:
+            recurrence = str(row["recurrence"] or "none")
+            if row["all_day"]:
+                try:
+                    base_start = date.fromisoformat(str(row["starts_at"])[:10])
+                    base_end = date.fromisoformat(str(row["ends_at"])[:10]) if row["ends_at"] else base_start + timedelta(days=1)
+                except ValueError:
+                    continue
+                if base_end <= base_start:
+                    base_end = base_start + timedelta(days=1)
+                duration = base_end - base_start
+                if any(
+                    occurrence < day_value + timedelta(days=1) and occurrence + duration > day_value
+                    for occurrence in self._recurrence_dates(base_start, day_value, recurrence)
+                ):
+                    raise ValueError("这一天有明确的全天占用，不能生成双人约会")
+                continue
+            if not row["ends_at"] or plan_zone is None:
+                continue
+            try:
+                base_start_dt = datetime.fromisoformat(str(row["starts_at"]).replace("Z", "+00:00"))
+                base_end_dt = datetime.fromisoformat(str(row["ends_at"]).replace("Z", "+00:00"))
+                if base_start_dt.tzinfo is None:
+                    base_start_dt = base_start_dt.replace(tzinfo=plan_zone)
+                if base_end_dt.tzinfo is None:
+                    base_end_dt = base_end_dt.replace(tzinfo=plan_zone)
+                base_start_dt = base_start_dt.astimezone(plan_zone)
+                base_end_dt = base_end_dt.astimezone(plan_zone)
+            except ValueError:
+                continue
+            duration = base_end_dt - base_start_dt
+            if duration <= timedelta(0) or requested_start is None or requested_end is None:
+                continue
+            for occurrence_date in self._recurrence_dates(base_start_dt.date(), day_value, recurrence):
+                occurrence_start = datetime(
+                    occurrence_date.year, occurrence_date.month, occurrence_date.day,
+                    base_start_dt.hour, base_start_dt.minute, base_start_dt.second,
+                    tzinfo=plan_zone, fold=base_start_dt.fold,
+                )
+                occurrence_end = occurrence_start + duration
+                overlap_start = max(occurrence_start, requested_start)
+                overlap_end = min(occurrence_end, requested_end)
+                if overlap_start < overlap_end:
+                    intervals.append({
+                        "start": overlap_start.strftime("%H:%M"),
+                        "end": overlap_end.strftime("%H:%M"),
+                        "all_day": False,
+                    })
+        intervals = [dict(item) for item in {
+            (str(item["start"]), str(item["end"]), bool(item["all_day"])): item for item in intervals
+        }.values()]
+        intervals.sort(key=lambda item: (str(item["start"]), str(item["end"])))
+        if len(LocalDatePlanner._free_starts({
+            "start_time": start_time, "end_time": end_time, "busy_intervals": intervals,
+        })) < 2:
+            raise ValueError("双方空闲时间不足以安排一套完整约会")
+        member_ids = [user_id, partner_id]
+        busy_hash = hashlib.sha256(json.dumps({
+            "couple_id": str(couple["id"]), "member_ids": sorted(member_ids),
+            "plan_date": plan_date, "start_time": start_time, "end_time": end_time,
+            "busy_intervals": intervals,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return {
+            "couple_id": str(couple["id"]), "member_ids": member_ids,
+            "busy_hash": busy_hash, "busy_intervals": intervals,
+            "timezone_confirmed": timezone_confirmed,
+        }
+
+    def _date_context_snapshot(
+        self,
+        *,
+        user_id: str,
+        plan_date: str,
+        start_time: str,
+        end_time: str,
+        place_candidate_id: object,
+        preferences: object,
+        weather_provider: object | None = None,
+        candidate_snapshot: dict | None = None,
+        place_candidates_snapshot: list[dict] | None = None,
+    ) -> dict:
+        candidate = dict(candidate_snapshot) if isinstance(candidate_snapshot, dict) else (
+            self._destination_candidate(place_candidate_id, user_id) if place_candidate_id else None
+        )
+        if candidate is not None:
+            candidate = {
+                "candidate_id": str(candidate.get("candidate_id") or place_candidate_id or ""), **candidate,
+                "source_type": str(candidate.get("source_type") or ("human" if candidate.get("provider") == "manual" else "legacy_unknown")),
+                "evidence_at": str(candidate.get("evidence_at") or candidate.get("created_at") or ""),
+            }
+        with self.connection() as db:
+            busy = self._date_busy_context(
+                db, user_id=user_id, plan_date=plan_date, start_time=start_time,
+                end_time=end_time, candidate=candidate,
+            )
+        weather: dict[str, object] = {"source_type": "unavailable"}
+        if candidate and candidate.get("latitude") is not None and candidate.get("longitude") is not None and weather_provider:
+            try:
+                forecast = weather_provider.forecast(
+                    candidate["latitude"], candidate["longitude"], plan_date, plan_date, "auto",
+                )
+            except (RuntimeError, ValueError, TimeoutError):
+                forecast = None
+            if isinstance(forecast, dict) and forecast.get("items"):
+                item = forecast["items"][0]
+                weather = {
+                    "source_type": str(forecast.get("source_type") or "legacy_unknown"),
+                    "original_source_type": str(forecast.get("original_source_type") or forecast.get("source_type") or "legacy_unknown"),
+                    "provider": str(forecast.get("provider") or forecast.get("source") or "Open-Meteo")[:80],
+                    "evidence_at": str(forecast.get("evidence_at") or ""),
+                    "cache_age_seconds": forecast.get("cache_age_seconds"),
+                    "summary": str(item.get("label") or "")[:100],
+                    "precipitation_probability": item.get("precipitation_probability"),
+                    "temperature_min": item.get("temperature_min"),
+                    "temperature_max": item.get("temperature_max"),
+                }
+        interest_tags = self._date_interest_tags(preferences)
+        if place_candidates_snapshot is not None:
+            place_candidates = [dict(item) for item in place_candidates_snapshot if isinstance(item, dict)][:6]
+        else:
+            place_candidates = (
+                self._destination_candidate_pool(place_candidate_id, user_id, 6, interest_tags)
+                if candidate is not None else []
+            )
+        return {
+            **busy,
+            "interest_tags": interest_tags,
+            "place_candidates": place_candidates,
+            "location": candidate,
+            "weather": weather,
+        }
+
+    def create_date_plan(
+        self,
+        payload: dict,
+        user_id: str = DEMO_USER,
+        weather_provider: object | None = None,
+    ) -> dict:
+        city_query = str(payload.get("city", "")).strip()
         title = str(payload.get("title", "我们的约会")).strip()[:100]
         plan_date = str(payload.get("plan_date", "")).strip()
         start_time = str(payload.get("start_time", "14:00"))
         end_time = str(payload.get("end_time", "21:00"))
-        if not city or len(city) > 80:
+        if not city_query or len(city_query) > 80:
             raise ValueError("请填写约会城市")
         try:
             date.fromisoformat(plan_date)
@@ -1902,17 +2388,42 @@ class LoveMomentsStore(
         preferences = payload.get("preferences", {})
         if not isinstance(preferences, dict):
             raise ValueError("约会偏好必须是对象")
+        context = self._date_context_snapshot(
+            user_id=user_id, plan_date=plan_date, start_time=start_time, end_time=end_time,
+            place_candidate_id=payload.get("place_candidate_id"), preferences=preferences,
+            weather_provider=weather_provider,
+        )
+        location = context.get("location") or {}
+        city = next((
+            str(location.get(field) or "").strip()
+            for field in ("city", "province", "district", "country", "name")
+            if str(location.get(field) or "").strip()
+        ), "") if location else city_query
+        if location and not city:
+            raise ValueError("已确认地点缺少城市或行政区域，请重新搜索")
+        saved_preferences = {
+            "interest_tags": context["interest_tags"], "location": context["location"],
+            "place_candidates": context["place_candidates"],
+            "busy_intervals": context["busy_intervals"], "weather": context["weather"],
+            "timezone_confirmed": context["timezone_confirmed"],
+            "generation_context": {
+                "couple_id": context["couple_id"],
+                "member_ids": sorted(context["member_ids"]),
+                "busy_hash": context["busy_hash"],
+            },
+        }
         date_plan_id, now = new_id("date"), utc_now()
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             db.execute(
                 "INSERT INTO date_plans(id, couple_id, creator_id, title, plan_date, start_time, end_time, city, budget_cents, preferences_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
-                (date_plan_id, couple["id"], user_id, title or "我们的约会", plan_date, start_time, end_time, city, budget_cents, json.dumps(preferences, ensure_ascii=False), now, now),
+                (date_plan_id, couple["id"], user_id, title or "我们的约会", plan_date, start_time, end_time, city, budget_cents, json.dumps(saved_preferences, ensure_ascii=False), now, now),
             )
             self._event(db, couple["id"], user_id, "date_plan.created", date_plan_id, {})
         return self.generate_date_plan(date_plan_id, user_id=user_id)
 
-    def _local_date_variants(self, plan: sqlite3.Row) -> list[dict]:
+    def _local_date_variants(self, plan: sqlite3.Row | dict) -> list[dict]:
+        preferences = parse_json(plan["preferences_json"], {})
         return self.date_planner.generate_variants({
             "title": plan["title"],
             "city": plan["city"],
@@ -1920,7 +2431,10 @@ class LoveMomentsStore(
             "start_time": plan["start_time"],
             "end_time": plan["end_time"],
             "budget_cents": plan["budget_cents"],
-            "preferences": parse_json(plan["preferences_json"], {}),
+            "interest_tags": preferences.get("interest_tags", []),
+            "busy_intervals": preferences.get("busy_intervals", []),
+            "place_candidates": preferences.get("place_candidates") or ([preferences["location"]] if preferences.get("location") else []),
+            "weather": preferences.get("weather", {"source_type": "unavailable"}),
         })
 
     def generate_date_plan(self, date_plan_id: str, user_id: str = DEMO_USER) -> dict:
@@ -1934,14 +2448,99 @@ class LoveMomentsStore(
                 raise ValueError("已确认的约会不能重新生成")
             plan_snapshot = dict(plan)
 
+        snapshot_preferences = parse_json(plan_snapshot["preferences_json"], {})
+        persisted_location = snapshot_preferences.get("location") if isinstance(snapshot_preferences.get("location"), dict) else None
+        persisted_pool = snapshot_preferences.get("place_candidates") if isinstance(snapshot_preferences.get("place_candidates"), list) else []
+        # Establish the provider-before baseline from durable plan snapshots,
+        # not the short-lived search-candidate table. This makes old plans
+        # safely regenerable while still detecting every concurrent calendar
+        # or relationship change made after the provider starts.
+        try:
+            expected_context = self._date_context_snapshot(
+                user_id=user_id,
+                plan_date=str(plan_snapshot["plan_date"]),
+                start_time=str(plan_snapshot["start_time"]),
+                end_time=str(plan_snapshot["end_time"]),
+                place_candidate_id=None,
+                preferences={"interests": snapshot_preferences.get("interest_tags", [])},
+                weather_provider=None,
+                candidate_snapshot=persisted_location,
+                place_candidates_snapshot=persisted_pool,
+            )
+        except (KeyError, ValueError) as error:
+            raise ConflictError("情侣关系或共同日历已变化，请重新生成约会方案") from error
+        snapshot_preferences.update({
+            "busy_intervals": expected_context["busy_intervals"],
+            "timezone_confirmed": expected_context["timezone_confirmed"],
+            "generation_context": {
+                "couple_id": expected_context["couple_id"],
+                "member_ids": sorted(expected_context["member_ids"]),
+                "busy_hash": expected_context["busy_hash"],
+            },
+        })
+        plan_snapshot["preferences_json"] = json.dumps(snapshot_preferences, ensure_ascii=False)
+        legacy_scope_warning = not persisted_location or str(persisted_location.get("source_type") or "legacy_unknown") not in {"real_api", "cache"}
+
         # The provider may reserve an external quota and perform a slow network
         # request. Never keep a SQLite transaction open while that happens: the
         # atomic quota reservation uses its own connection, and both partners
         # must remain able to read and write while the model is responding.
         variants = self._local_date_variants(plan_snapshot)
+        for variant in variants:
+            generation_source = str(variant.get("generation_source") or "legacy_unknown")
+            generation_message = str(variant.get("generation_message") or "")[:120]
+            if legacy_scope_warning:
+                generation_message = (
+                    "旧计划地点范围尚未地图核验，请重新选择真实地点；" + generation_message
+                )[:120]
+            for item in variant.get("items", []):
+                item["generationSource"] = generation_source
+                item["generationMessage"] = generation_message
+
+        try:
+            current_context = self._date_context_snapshot(
+                user_id=user_id,
+                plan_date=str(plan_snapshot["plan_date"]),
+                start_time=str(plan_snapshot["start_time"]),
+                end_time=str(plan_snapshot["end_time"]),
+                place_candidate_id=None,
+                preferences={"interests": snapshot_preferences.get("interest_tags", [])},
+                weather_provider=None,
+                candidate_snapshot=persisted_location,
+                place_candidates_snapshot=persisted_pool,
+            )
+        except (KeyError, ValueError) as error:
+            raise ConflictError("情侣关系或共同日历已变化，请重新生成约会方案") from error
+        if (
+            str(current_context.get("couple_id")) != str(expected_context.get("couple_id"))
+            or sorted(current_context.get("member_ids", [])) != sorted(expected_context.get("member_ids", []))
+            or str(current_context.get("busy_hash")) != str(expected_context.get("busy_hash"))
+        ):
+            raise ConflictError("共同日历的空闲时间已变化，请重新生成约会方案")
 
         with self.connection() as db:
-            couple, _ = self._couple_context(db, user_id)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                final_context = self._date_busy_context(
+                    db,
+                    user_id=user_id,
+                    plan_date=str(plan_snapshot["plan_date"]),
+                    start_time=str(plan_snapshot["start_time"]),
+                    end_time=str(plan_snapshot["end_time"]),
+                    candidate=persisted_location,
+                )
+            except ValueError as error:
+                raise ConflictError("情侣关系或共同日历已变化，请重新生成约会方案") from error
+            if (
+                str(final_context.get("couple_id")) != str(expected_context.get("couple_id"))
+                or sorted(final_context.get("member_ids", [])) != sorted(expected_context.get("member_ids", []))
+                or str(final_context.get("busy_hash")) != str(expected_context.get("busy_hash"))
+            ):
+                raise ConflictError("共同日历的空闲时间已变化，请重新生成约会方案")
+            couple_id = str(final_context["couple_id"])
+            couple = db.execute("SELECT * FROM couples WHERE id=? AND status='active'", (couple_id,)).fetchone()
+            if not couple:
+                raise ConflictError("情侣关系已变化，请重新生成约会方案")
             plan = db.execute("SELECT * FROM date_plans WHERE id=? AND couple_id=?", (date_plan_id, couple["id"])).fetchone()
             if not plan:
                 raise KeyError("约会计划不存在")
@@ -1957,7 +2556,10 @@ class LoveMomentsStore(
                     "INSERT INTO date_plan_variants(id, date_plan_id, style, name, summary, expected_cost_cents, intensity, weather_fit, items_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (variant_id, date_plan_id, value["style"], value["name"], value["summary"], value["expected_cost_cents"], value["intensity"], value["weather_fit"], json.dumps(value["items"], ensure_ascii=False), now),
                 )
-            db.execute("UPDATE date_plans SET status='voting', selected_variant_id=NULL, final_items_json='[]', version=version+1, updated_at=? WHERE id=?", (now, date_plan_id))
+            db.execute(
+                "UPDATE date_plans SET status='voting', selected_variant_id=NULL, final_items_json='[]', preferences_json=?, version=version+1, updated_at=? WHERE id=?",
+                (json.dumps(snapshot_preferences, ensure_ascii=False), now, date_plan_id),
+            )
             self._event(db, couple["id"], user_id, "date_plan.generated", date_plan_id, {})
         return self.get_date_plan(date_plan_id, user_id)
 
@@ -1985,10 +2587,31 @@ class LoveMomentsStore(
                 public_votes.append({"user_id": vote["user_id"], "nickname": vote["nickname"], "locked": True})
         result = dict(plan)
         result["preferences"] = parse_json(result.pop("preferences_json"), {})
+        result["preferences"].pop("generation_context", None)
+        result["preferences"].pop("place_candidates", None)
+        result["location"] = result["preferences"].get("location")
+        result["busy_intervals"] = result["preferences"].get("busy_intervals", [])
+        result["weather"] = result["preferences"].get("weather", {"source_type": "unavailable"})
         result["final_items"] = parse_json(result.pop("final_items_json"), [])
         result["variants"] = [{**dict(row), "items": parse_json(row["items_json"], [])} for row in variants]
         for value in result["variants"]:
             value.pop("items_json", None)
+            value["generation_source"] = (
+                value["items"][0].get("generationSource", value["items"][0].get("recommendationSource", "legacy_unknown"))
+                if value["items"] else "legacy_unknown"
+            )
+            value["generation_message"] = (
+                value["items"][0].get("generationMessage") if value["items"]
+                else ""
+            ) or (
+                "由模型根据已确认信息生成" if value["generation_source"] == "ai"
+                else "使用本地安全规则生成" if value["generation_source"] == "rules"
+                else "来源未记录"
+            )
+        sources = {value["generation_source"] for value in result["variants"]}
+        result["generation_source"] = next(iter(sources)) if len(sources) == 1 else "legacy_unknown"
+        messages = list(dict.fromkeys(value["generation_message"] for value in result["variants"] if value["generation_message"]))
+        result["generation_message"] = messages[0] if len(messages) == 1 else "方案来源不同，请查看每套方案标记"
         result["votes"] = public_votes
         result["both_voted"] = both_voted
         result["my_vote"] = next((vote["variant_id"] for vote in votes if vote["user_id"] == user_id), None)
@@ -2138,6 +2761,7 @@ class LoveMomentsStore(
         if not isinstance(metadata, dict):
             raise ValueError("消息 metadata 必须是对象")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, partner_id = self._couple_context(db, user_id)
             previous = self._idempotent_result(db, couple["id"], user_id, "message.create", payload.get("idempotency_key"))
             if previous:
@@ -2214,8 +2838,423 @@ class LoveMomentsStore(
                 self._event(db, couple["id"], user_id, "message.read", ids[-1], {"messageIds": ids, "readAt": now})
         return {"updated": len(ids), "read_at": now}
 
+    def suggest_expression(
+        self,
+        *,
+        mode: object,
+        message_id: object = None,
+        draft: object = None,
+        idempotency_key: object,
+        user_id: str,
+    ) -> dict:
+        """Rewrite exactly one caller-owned text without reading chat context."""
+        idempotency_key = str(idempotency_key or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{8,160}", idempotency_key):
+            raise ValueError("幂等键格式无效")
+        if mode not in MODES:
+            raise ValueError("表达模式无效")
+        has_message = isinstance(message_id, str) and bool(message_id.strip())
+        has_draft = isinstance(draft, str) and bool(draft.strip())
+        if has_message == has_draft:
+            raise ValueError("请选择本人一条消息或填写当前草稿，且只能选择一种")
+        request_payload = {
+            "mode": mode,
+            "message_id": message_id.strip() if has_message else None,
+            "draft": draft.strip() if has_draft else None,
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(request_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        request_id = new_id("expression")
+        owner_token = secrets.token_hex(24)
+        # Provider calls are capped at 60 seconds.  Wait beyond the 75-second
+        # stale boundary so an abandoned owner is recovered by this request
+        # instead of leaving a durable pending receipt behind.
+        wait_deadline = time.monotonic() + 80
+        couple_id = ""
+        couple_version = 0
+        initial_couple_id: str | None = None
+        initial_couple_version: int | None = None
+        source_text = ""
+        poll_attempt = 0
+
+        # Claim one provider execution before leaving SQLite.  Exact concurrent
+        # retries poll through read-only connections; only the initial insert or
+        # a confirmed stale takeover briefly acquires a write transaction.
+        while True:
+            owns_pending = False
+            with self.connection() as db:
+                try:
+                    couple, _ = self._couple_context(db, user_id)
+                except ValueError as error:
+                    if initial_couple_id is not None:
+                        raise ConflictError("情侣空间已经变化，请重新提交") from error
+                    raise
+                couple_id = str(couple["id"])
+                couple_version = int(couple["version"])
+                if initial_couple_id is None:
+                    initial_couple_id = couple_id
+                    initial_couple_version = couple_version
+                elif couple_id != initial_couple_id or couple_version != initial_couple_version:
+                    raise ConflictError("情侣空间已经变化，请重新提交")
+                if has_message:
+                    message = db.execute(
+                        "SELECT id,sender_id,type,content FROM messages WHERE id=? AND couple_id=?",
+                        (request_payload["message_id"], couple_id),
+                    ).fetchone()
+                    if not message or message["sender_id"] != user_id:
+                        raise PermissionError("只能整理自己明确选择的文字消息")
+                    if message["type"] != "text" or not str(message["content"] or "").strip():
+                        raise ValueError("只能整理本人发送的文字消息")
+                    source_text = str(message["content"]).strip()
+                    if len(source_text) > 4000:
+                        raise ValueError("所选文字不能超过 4000 个字符")
+                else:
+                    source_text = str(request_payload["draft"] or "").strip()
+                    if not 1 <= len(source_text) <= 4000:
+                        raise ValueError("当前草稿长度需为 1–4000 个字符")
+                row = db.execute(
+                    """SELECT result_json,created_at FROM mutation_idempotency
+                    WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                      AND idempotency_key=?""",
+                    (couple_id, user_id, idempotency_key),
+                ).fetchone()
+                receipt = parse_json(row["result_json"], {}) if row else None
+                if receipt is not None:
+                    if receipt.get("_request_hash") != request_hash:
+                        raise ConflictError("幂等标识已用于另一项表达请求")
+                    state = str(receipt.get("_state") or "legacy")
+                    if state == "succeeded":
+                        saved = receipt.get("result")
+                        if not isinstance(saved, dict):
+                            raise ConflictError("表达请求回执无效，请重新提交")
+                        return dict(saved)
+                    if state == "failed":
+                        if receipt.get("failure_code") == "scope_changed":
+                            raise ConflictError("情侣空间已经变化，请重新提交")
+                        raise RuntimeError("表达辅助暂时不可用，原草稿已保留，请稍后重试")
+                    if state == "legacy":
+                        return {key: value for key, value in receipt.items() if key != "_request_hash"}
+                    started_raw = str(receipt.get("_started_at") or row["created_at"])
+                    try:
+                        started_at = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+                        if started_at.tzinfo is None:
+                            started_at = started_at.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        started_at = datetime.fromtimestamp(0, timezone.utc)
+                    stale = (datetime.now(timezone.utc) - started_at.astimezone(timezone.utc)).total_seconds() >= 75
+                else:
+                    stale = False
+
+            if row is None:
+                with self.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        current_couple, _ = self._couple_context(db, user_id)
+                    except ValueError as error:
+                        raise ConflictError("情侣空间已经变化，请重新提交") from error
+                    if (
+                        str(current_couple["id"]) != initial_couple_id
+                        or int(current_couple["version"]) != initial_couple_version
+                    ):
+                        raise ConflictError("情侣空间已经变化，请重新提交")
+                    existing = db.execute(
+                        """SELECT 1 FROM mutation_idempotency
+                        WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                          AND idempotency_key=?""",
+                        (couple_id, user_id, idempotency_key),
+                    ).fetchone()
+                    if existing:
+                        continue
+                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(microsecond=0).isoformat()
+                    db.execute(
+                        """DELETE FROM mutation_idempotency
+                        WHERE operation='expression.suggest' AND created_at<=?
+                          AND COALESCE(json_extract(result_json,'$._state'),'')<>'pending'""",
+                        (cutoff,),
+                    )
+                    pending = {
+                        "_state": "pending", "_request_hash": request_hash,
+                        "_owner_token": owner_token, "_request_id": request_id,
+                        "_started_at": utc_now(),
+                    }
+                    db.execute(
+                        """INSERT INTO mutation_idempotency(
+                        couple_id,user_id,operation,idempotency_key,result_json,created_at
+                        ) VALUES (?,?, 'expression.suggest',?,?,?)""",
+                        (couple_id, user_id, idempotency_key, json.dumps(pending, ensure_ascii=False), pending["_started_at"]),
+                    )
+                    owns_pending = True
+                    if has_message:
+                        expires = (datetime.now(timezone.utc) + timedelta(minutes=15)).replace(microsecond=0).isoformat()
+                        grant_id = new_id("grant")
+                        db.execute(
+                            """INSERT INTO ai_context_grants(
+                                id,couple_id,user_id,surface,resource_type,resource_id,purpose,
+                                expires_at,created_at,resource_version,usage_scope,request_id,last_used_at
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                grant_id, couple_id, user_id, "chat", "message", request_payload["message_id"],
+                                "expression.suggest", expires, utc_now(), 1, "selected_content",
+                                request_id, utc_now(),
+                            ),
+                        )
+            elif stale:
+                with self.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        current_couple, _ = self._couple_context(db, user_id)
+                    except ValueError as error:
+                        raise ConflictError("情侣空间已经变化，请重新提交") from error
+                    if (
+                        str(current_couple["id"]) != initial_couple_id
+                        or int(current_couple["version"]) != initial_couple_version
+                    ):
+                        raise ConflictError("情侣空间已经变化，请重新提交")
+                    current_row = db.execute(
+                        """SELECT result_json,created_at FROM mutation_idempotency
+                        WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                          AND idempotency_key=?""",
+                        (couple_id, user_id, idempotency_key),
+                    ).fetchone()
+                    if not current_row:
+                        continue
+                    current_receipt = parse_json(current_row["result_json"], {})
+                    if current_receipt.get("_request_hash") != request_hash:
+                        raise ConflictError("幂等标识已用于另一项表达请求")
+                    if current_receipt.get("_state") != "pending":
+                        continue
+                    current_started_raw = str(current_receipt.get("_started_at") or current_row["created_at"])
+                    try:
+                        current_started = datetime.fromisoformat(current_started_raw.replace("Z", "+00:00"))
+                        if current_started.tzinfo is None:
+                            current_started = current_started.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        current_started = datetime.fromtimestamp(0, timezone.utc)
+                    if (datetime.now(timezone.utc) - current_started.astimezone(timezone.utc)).total_seconds() < 75:
+                        continue
+                    old_request_id = str(current_receipt.get("_request_id") or "")
+                    if old_request_id:
+                        db.execute(
+                            """UPDATE ai_usage_events SET status='unknown',finished_at=?,
+                            failure_code='process_interrupted'
+                            WHERE couple_id=? AND request_id=? AND status='started'""",
+                            (utc_now(), couple_id, old_request_id),
+                        )
+                    pending = {
+                        "_state": "pending", "_request_hash": request_hash,
+                        "_owner_token": owner_token, "_request_id": request_id,
+                        "_started_at": utc_now(),
+                    }
+                    db.execute(
+                        """UPDATE mutation_idempotency SET result_json=?,created_at=?
+                        WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                          AND idempotency_key=?""",
+                        (json.dumps(pending, ensure_ascii=False), pending["_started_at"], couple_id, user_id, idempotency_key),
+                    )
+                    owns_pending = True
+                    if has_message:
+                        expires = (datetime.now(timezone.utc) + timedelta(minutes=15)).replace(microsecond=0).isoformat()
+                        db.execute(
+                            """INSERT INTO ai_context_grants(
+                                id,couple_id,user_id,surface,resource_type,resource_id,purpose,
+                                expires_at,created_at,resource_version,usage_scope,request_id,last_used_at
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                new_id("grant"), couple_id, user_id, "chat", "message", request_payload["message_id"],
+                                "expression.suggest", expires, utc_now(), 1, "selected_content",
+                                request_id, utc_now(),
+                            ),
+                        )
+            if owns_pending:
+                break
+            if time.monotonic() >= wait_deadline:
+                raise RuntimeError("相同表达请求仍在处理中，请稍后重试")
+            base_delay = min(0.5, 0.025 * (2 ** min(poll_attempt, 5)))
+            jitter = 0.75 + (secrets.randbelow(501) / 1000)
+            time.sleep(min(base_delay * jitter, max(0.0, wait_deadline - time.monotonic())))
+            poll_attempt += 1
+
+        provider_name = str(getattr(self.expression_assistant, "name", "unknown"))[:100]
+        provider_model = str(getattr(self.expression_assistant, "model", "unknown"))[:100]
+        is_external = bool(getattr(self.expression_assistant, "is_external", False))
+        if is_external:
+            try:
+                self.record_ai_usage_event(
+                    actor_kind="user", feature="expression.suggest", provider=provider_name,
+                    model=provider_model, request_id=request_id, status="started",
+                    request_sent=False, user_id=user_id, couple_id=couple_id,
+                )
+            except (PermissionError, ValueError) as error:
+                with self.connection() as db:
+                    failed = {
+                        "_state": "failed", "_request_hash": request_hash,
+                        "failure_code": "scope_changed", "_request_id": request_id,
+                    }
+                    db.execute(
+                        """UPDATE mutation_idempotency SET result_json=?
+                        WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                          AND idempotency_key=? AND json_extract(result_json,'$._owner_token')=?""",
+                        (json.dumps(failed, ensure_ascii=False), couple_id, user_id, idempotency_key, owner_token),
+                    )
+                raise ConflictError("情侣空间已经变化，请重新提交") from error
+
+            # This short transaction is the dispatch boundary: a lifecycle
+            # change either wins first and prevents the external call, or this
+            # marks the one usage row as sent before provider I/O begins.
+            with self.connection() as db:
+                dispatch_allowed = db.execute(
+                    """UPDATE ai_usage_events SET request_sent=1
+                    WHERE request_id=? AND provider=? AND model=? AND status='started'
+                      AND request_sent=0
+                      AND EXISTS (
+                        SELECT 1 FROM couples c JOIN users u ON u.id=?
+                        WHERE c.id=? AND (c.member_a=? OR c.member_b=?)
+                          AND c.status='active' AND c.version=? AND u.deleted_at IS NULL
+                      )
+                      AND EXISTS (
+                        SELECT 1 FROM mutation_idempotency m
+                        WHERE m.couple_id=? AND m.user_id=?
+                          AND m.operation='expression.suggest' AND m.idempotency_key=?
+                          AND json_extract(m.result_json,'$._owner_token')=?
+                          AND json_extract(m.result_json,'$._state')='pending'
+                      )""",
+                    (
+                        request_id, provider_name, provider_model,
+                        user_id, couple_id, user_id, user_id, couple_version,
+                        couple_id, user_id, idempotency_key, owner_token,
+                    ),
+                ).rowcount == 1
+                if not dispatch_allowed:
+                    db.execute(
+                        """UPDATE ai_usage_events SET status='failed',finished_at=?,
+                        failure_code='scope_changed'
+                        WHERE request_id=? AND provider=? AND model=? AND status='started'""",
+                        (utc_now(), request_id, provider_name, provider_model),
+                    )
+                    failed = {
+                        "_state": "failed", "_request_hash": request_hash,
+                        "failure_code": "scope_changed", "_request_id": request_id,
+                    }
+                    db.execute(
+                        """UPDATE mutation_idempotency SET result_json=?
+                        WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                          AND idempotency_key=? AND json_extract(result_json,'$._owner_token')=?""",
+                        (
+                            json.dumps(failed, ensure_ascii=False), couple_id, user_id,
+                            idempotency_key, owner_token,
+                        ),
+                    )
+            if not dispatch_allowed:
+                raise ConflictError("情侣空间已经变化，请重新提交")
+        started = datetime.now(timezone.utc)
+        provider_error: Exception | None = None
+        suggestion = None
+        try:
+            suggestion = self.expression_assistant.suggest(
+                source_text, mode=str(mode), request_id=request_id,
+            )
+            if not isinstance(suggestion.text, str) or not suggestion.text.strip() or len(suggestion.text.strip()) > 4000:
+                raise ValueError("表达服务返回内容无效")
+        except Exception as error:
+            provider_error = error
+
+        latency_ms = max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+        result = None if suggestion is None else {
+            "text": suggestion.text.strip(), "mode": str(mode), "provider": suggestion.provider,
+            "model": suggestion.model, "source": "message" if has_message else "draft",
+        }
+        final_error: str | None = None
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            scope = db.execute(
+                """SELECT c.status,c.version,u.deleted_at
+                FROM couples c JOIN users u ON u.id=?
+                WHERE c.id=? AND (c.member_a=? OR c.member_b=?)""",
+                (user_id, couple_id, user_id, user_id),
+            ).fetchone()
+            active_scope = bool(
+                scope and scope["status"] == "active" and scope["deleted_at"] is None
+                and int(scope["version"]) == couple_version
+            )
+            pending_row = db.execute(
+                """SELECT result_json FROM mutation_idempotency
+                WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                  AND idempotency_key=?""",
+                (couple_id, user_id, idempotency_key),
+            ).fetchone()
+            pending = parse_json(pending_row["result_json"], {}) if pending_row else {}
+            owns_receipt = pending.get("_owner_token") == owner_token and pending.get("_state") == "pending"
+            if not active_scope or not owns_receipt:
+                status = "failed"
+                failure_code = "scope_changed"
+                final_error = "scope_changed"
+                receipt = {
+                    "_state": "failed", "_request_hash": request_hash,
+                    "failure_code": failure_code, "_request_id": request_id,
+                }
+            elif provider_error is not None:
+                is_timeout = isinstance(provider_error, TimeoutError)
+                status = "timeout" if is_timeout else "failed"
+                failure_code = "timeout" if is_timeout else "provider_error"
+                final_error = failure_code
+                receipt = {
+                    "_state": "failed", "_request_hash": request_hash,
+                    "failure_code": failure_code, "_request_id": request_id,
+                }
+            else:
+                status = "succeeded"
+                failure_code = None
+                receipt = {
+                    "_state": "succeeded", "_request_hash": request_hash,
+                    "_request_id": request_id, "result": result,
+                }
+            usage = suggestion.usage if suggestion is not None and isinstance(suggestion.usage, dict) else {}
+            if is_external:
+                if owns_receipt and active_scope:
+                    db.execute(
+                        """UPDATE ai_usage_events SET status=?,finished_at=?,latency_ms=?,
+                        input_tokens=?,output_tokens=?,total_tokens=?,failure_code=?
+                        WHERE request_id=? AND provider=? AND model=? AND status='started'
+                          AND request_sent=1""",
+                        (
+                            status, utc_now(), latency_ms, usage.get("input_tokens"),
+                            usage.get("output_tokens"), usage.get("total_tokens"), failure_code,
+                            request_id, provider_name, provider_model,
+                        ),
+                    )
+                else:
+                    # Lifecycle cleanup already fixed the terminal meaning.
+                    # Only supplement non-content telemetry from the real call.
+                    db.execute(
+                        """UPDATE ai_usage_events SET request_sent=1,
+                        latency_ms=COALESCE(?,latency_ms),
+                        input_tokens=COALESCE(?,input_tokens),
+                        output_tokens=COALESCE(?,output_tokens),
+                        total_tokens=COALESCE(?,total_tokens)
+                        WHERE request_id=? AND provider=? AND model=?""",
+                        (
+                            latency_ms, usage.get("input_tokens"), usage.get("output_tokens"),
+                            usage.get("total_tokens"), request_id, provider_name, provider_model,
+                        ),
+                    )
+            if owns_receipt:
+                db.execute(
+                    """UPDATE mutation_idempotency SET result_json=?
+                    WHERE couple_id=? AND user_id=? AND operation='expression.suggest'
+                      AND idempotency_key=?""",
+                    (json.dumps(receipt, ensure_ascii=False), couple_id, user_id, idempotency_key),
+                )
+        if final_error == "scope_changed":
+            raise ConflictError("情侣空间已经变化，请重新提交")
+        if provider_error is not None:
+            raise RuntimeError("表达辅助暂时不可用，原草稿已保留，请稍后重试") from provider_error
+        if result is None:  # pragma: no cover - defensive terminal guard
+            raise RuntimeError("表达辅助暂时不可用，原草稿已保留，请稍后重试")
+        return result
+
     @staticmethod
-    def _detect_media(data: bytes) -> tuple[str, str, str]:
+    def _detect_media(data: bytes, declared_type: object = "") -> tuple[str, str, str]:
         head = data[:32]
         if head.startswith(b"\xff\xd8\xff"):
             return "image", "image/jpeg", ".jpg"
@@ -2233,12 +3272,16 @@ class LoveMomentsStore(
             return "audio", "audio/mpeg", ".mp3"
         if len(head) >= 12 and head[4:8] == b"ftyp":
             brand = head[8:12]
-            if brand in {b"M4A ", b"M4B ", b"M4P "}:
+            declared = str(declared_type or "").split(";", 1)[0].strip().lower()
+            if brand in {b"M4A ", b"M4B ", b"M4P "} or declared == "audio/mp4":
                 return "audio", "audio/mp4", ".m4a"
             if brand == b"qt  ":
                 return "video", "video/quicktime", ".mov"
             return "video", "video/mp4", ".mp4"
         if head.startswith(b"\x1aE\xdf\xa3"):
+            declared = str(declared_type or "").split(";", 1)[0].strip().lower()
+            if declared == "audio/webm":
+                return "audio", "audio/webm", ".webm"
             return "video", "video/webm", ".webm"
         raise ValueError("仅支持 JPG、PNG、GIF、WebP、MP3、WAV、Ogg、M4A、MP4、MOV 或 WebM")
 
@@ -2256,18 +3299,16 @@ class LoveMomentsStore(
         item["metadata_stripped"] = bool(item.get("metadata_stripped"))
         return item
 
-    @staticmethod
-    def _assert_media_visible(row: sqlite3.Row | dict, user_id: str) -> None:
+    def _assert_media_visible(self, row: sqlite3.Row | dict, user_id: str) -> None:
         if row["owner_id"] == user_id:
             return
         visibility = row["visibility"]
         if visibility == "shared":
             return
-        if visibility == "delayed" and row["reveal_at"] and row["reveal_at"] <= utc_now():
-            return
         raise PermissionError("无权查看这项私密媒体")
 
     def _media_row_for_user(self, db: sqlite3.Connection, media_id: str, user_id: str, *, status: str = "ready") -> sqlite3.Row:
+        self._reconcile_delayed_moments(db)
         couple, _ = self._couple_context(db, user_id)
         row = db.execute(
             "SELECT * FROM media_assets WHERE id=? AND couple_id=? AND status=? AND purged_at IS NULL",
@@ -2337,6 +3378,7 @@ class LoveMomentsStore(
             "image/gif": ("image", 20 * 1024 * 1024), "image/webp": ("image", 20 * 1024 * 1024),
             "audio/mpeg": ("audio", 30 * 1024 * 1024), "audio/wav": ("audio", 30 * 1024 * 1024),
             "audio/ogg": ("audio", 30 * 1024 * 1024), "audio/mp4": ("audio", 30 * 1024 * 1024),
+            "audio/webm": ("audio", 30 * 1024 * 1024),
             "video/mp4": ("video", 200 * 1024 * 1024), "video/quicktime": ("video", 200 * 1024 * 1024),
             "video/webm": ("video", 200 * 1024 * 1024), "application/octet-stream": ("unknown", 200 * 1024 * 1024),
         }
@@ -2523,7 +3565,7 @@ class LoveMomentsStore(
     ) -> dict:
         if not data:
             raise ValueError("媒体文件不能为空")
-        kind, detected_type, extension = self._detect_media(data)
+        kind, detected_type, extension = self._detect_media(data, declared_type)
         limits = {"image": 20 * 1024 * 1024, "audio": 30 * 1024 * 1024, "video": 200 * 1024 * 1024}
         if len(data) > limits[kind]:
             label = {"image": "图片", "audio": "音频", "video": "视频"}[kind]
@@ -2536,21 +3578,32 @@ class LoveMomentsStore(
         visibility_text = str(visibility or "shared")
         if visibility_text not in {"shared", "private"}:
             raise ValueError("媒体可见范围无效")
+        # Uploading never grants partner access. The authoritative association
+        # promotes this owner-private object in its own database transaction.
+        visibility_text = "private"
         safe_name = re.sub(r"[\x00-\x1f\x7f]", "_", Path(str(original_name or f"media{extension}")).name).strip()[:180] or f"media{extension}"
         media_id = new_id("media")
         width = height = None
+        captured_at = None
         metadata_stripped = False
         thumbnail: bytes | None = None
         thumbnail_key: str | None = None
         thumbnail_checksum: str | None = None
+        with self.connection() as db:
+            self._couple_context(db, user_id)
+            timezone_row = db.execute("SELECT timezone FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+            if not timezone_row:
+                raise KeyError("用户不存在")
+            uploader_timezone = str(timezone_row["timezone"] or "Asia/Shanghai")
         if kind == "image":
-            sanitized = sanitize_image(data, detected_type)
+            sanitized = sanitize_image(data, detected_type, uploader_timezone)
             data = sanitized.content
             detected_type = sanitized.mime_type
             extension = sanitized.extension
             width, height = sanitized.width, sanitized.height
             metadata_stripped = sanitized.metadata_stripped
             thumbnail = sanitized.thumbnail
+            captured_at = sanitized.captured_at
         elif kind == "video" and thumbnail_data:
             if len(thumbnail_data) > 3 * 1024 * 1024:
                 raise ValueError("视频封面文件过大")
@@ -2571,7 +3624,7 @@ class LoveMomentsStore(
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             duplicate = db.execute(
-                "SELECT * FROM media_assets WHERE couple_id=? AND owner_id=? AND checksum=? AND visibility=? AND status='ready' AND purged_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM media_assets WHERE couple_id=? AND owner_id=? AND checksum=? AND visibility=? AND reveal_at IS NULL AND status='ready' AND purged_at IS NULL AND NOT EXISTS (SELECT 1 FROM moments WHERE media_id=media_assets.id) AND NOT EXISTS (SELECT 1 FROM recipe_media WHERE url='/api/v1/media/' || media_assets.id) ORDER BY created_at DESC LIMIT 1",
                 (couple["id"], user_id, checksum, visibility_text),
             ).fetchone()
             if duplicate:
@@ -2614,11 +3667,28 @@ class LoveMomentsStore(
             with self.connection() as db:
                 couple, _ = self._couple_context(db, user_id)
                 db.execute(
-                    "INSERT INTO media_assets(id, couple_id, owner_id, kind, original_name, mime_type, relative_path, thumbnail_path, thumbnail_checksum, size_bytes, width, height, metadata_stripped, visibility, status, storage_provider, storage_key, checksum, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)",
-                    (media_id, couple["id"], user_id, kind, safe_name, detected_type, relative_path, thumbnail_key, thumbnail_checksum, len(data), width, height, int(metadata_stripped), visibility_text, stored.provider, stored.key, stored.checksum, now),
+                    """INSERT INTO media_assets(
+                        id,couple_id,owner_id,kind,original_name,mime_type,relative_path,
+                        thumbnail_path,thumbnail_checksum,size_bytes,width,height,metadata_stripped,
+                        visibility,status,storage_provider,storage_key,checksum,created_at,
+                        captured_at,date_source,source_type
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?,?,?,?,?)""",
+                    (
+                        media_id, couple["id"], user_id, kind, safe_name, detected_type,
+                        relative_path, thumbnail_key, thumbnail_checksum, len(data), width, height,
+                        int(metadata_stripped), visibility_text, stored.provider, stored.key,
+                        stored.checksum, now, captured_at,
+                        "media_capture" if captured_at else "legacy_unknown", "human",
+                    ),
+                )
+                self._upsert_memory_provenance_in_connection(
+                    db, "media", media_id, couple["id"], user_id,
+                    source_type="human",
+                    date_source="media_capture" if captured_at else "legacy_unknown",
+                    resource_version=1,
                 )
                 self._audit(db, "media.created", "media", media_id, {"kind": kind, "size": len(data), "metadata_stripped": metadata_stripped}, actor_id=user_id)
-                self._event(db, couple["id"], user_id, "media.created", media_id, {"kind": kind})
+                self._event(db, couple["id"], user_id, "media.created", media_id, {"kind": kind, "owner_only": True})
                 row = db.execute("SELECT * FROM media_assets WHERE id=?", (media_id,)).fetchone()
         except Exception:
             self.storage.delete(stored.key)
@@ -2669,6 +3739,7 @@ class LoveMomentsStore(
 
     def list_media(self, user_id: str = DEMO_USER) -> list[dict]:
         with self.connection() as db:
+            self._reconcile_delayed_moments(db)
             couple, _ = self._couple_context(db, user_id)
             rows = db.execute("SELECT * FROM media_assets WHERE couple_id=? AND status='ready' AND purged_at IS NULL ORDER BY created_at DESC", (couple["id"],)).fetchall()
         result = []
@@ -2716,18 +3787,41 @@ class LoveMomentsStore(
         labels: list[str] = []
         if db.execute("SELECT 1 FROM moments WHERE media_id=? AND purged_at IS NULL LIMIT 1", (media_id,)).fetchone():
             labels.append("恋爱瞬间")
+        if db.execute("SELECT 1 FROM voice_transcripts WHERE media_id=? LIMIT 1", (media_id,)).fetchone():
+            labels.append("语音转写")
         if db.execute("SELECT 1 FROM chat_imports WHERE media_id=? AND status IN ('draft','confirmed') LIMIT 1", (media_id,)).fetchone():
             labels.append("聊天导入")
+        if db.execute("SELECT 1 FROM recipe_media m JOIN recipes r ON r.id=m.recipe_id WHERE m.url=? AND r.deleted_at IS NULL LIMIT 1", (f"/api/v1/media/{media_id}",)).fetchone():
+            labels.append("菜谱图片")
         for row in db.execute("SELECT metadata FROM messages WHERE metadata LIKE ?", (f"%{media_id}%",)).fetchall():
             if parse_json(row["metadata"], {}).get("mediaId") == media_id:
                 labels.append("消息")
                 break
         return labels
 
+    @staticmethod
+    def _sharing_context_valid(db: sqlite3.Connection, couple_id: str, owner_id: str) -> bool:
+        return bool(db.execute(
+            "SELECT 1 FROM couples c JOIN users a ON a.id=c.member_a JOIN users b ON b.id=c.member_b WHERE c.id=? AND c.status='active' AND ? IN (c.member_a,c.member_b) AND a.deleted_at IS NULL AND b.deleted_at IS NULL",
+            (couple_id, owner_id),
+        ).fetchone())
+
+    def _reconcile_delayed_moments(self, db: sqlite3.Connection) -> None:
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        for moment in db.execute("SELECT id,couple_id,creator_id,media_id FROM moments WHERE visibility='delayed' AND reveal_at<=? AND deleted_at IS NULL AND purged_at IS NULL", (utc_now(),)).fetchall():
+            visible = self._sharing_context_valid(db, moment["couple_id"], moment["creator_id"])
+            db.execute("UPDATE moments SET visibility=?,reveal_at=NULL,version=version+1 WHERE id=?", ("shared" if visible else "private", moment["id"]))
+            if moment["media_id"]:
+                self._sync_media_visibility(db, moment["media_id"])
+
     def _sync_media_visibility(self, db: sqlite3.Connection, media_id: str) -> None:
         """Reconcile one object against every active message and moment using it."""
-        media = db.execute("SELECT visibility,reveal_at FROM media_assets WHERE id=? AND status='ready'", (media_id,)).fetchone()
+        media = db.execute("SELECT * FROM media_assets WHERE id=? AND status='ready'", (media_id,)).fetchone()
         if not media:
+            return
+        if db.execute("SELECT 1 FROM recipe_media m JOIN recipes r ON r.id=m.recipe_id WHERE m.url=? AND r.deleted_at IS NULL AND r.visibility='couple' LIMIT 1", (f"/api/v1/media/{media_id}",)).fetchone():
+            db.execute("UPDATE media_assets SET visibility='shared',reveal_at=NULL,version=version+1 WHERE id=? AND visibility!='shared'", (media_id,))
             return
         visibility: str
         reveal_at: str | None
@@ -2736,14 +3830,12 @@ class LoveMomentsStore(
                 visibility, reveal_at = "shared", None
                 break
         else:
-            moments = db.execute("SELECT visibility,reveal_at FROM moments WHERE media_id=? AND deleted_at IS NULL AND purged_at IS NULL", (media_id,)).fetchall()
-            if not moments:
-                return
+            moments = db.execute("SELECT * FROM moments WHERE media_id=? AND deleted_at IS NULL AND purged_at IS NULL", (media_id,)).fetchall()
             now = utc_now()
-            if any(item["visibility"] == "shared" or (item["visibility"] == "delayed" and item["reveal_at"] and item["reveal_at"] <= now) for item in moments):
+            if any(item["visibility"] == "shared" or (item["visibility"] == "delayed" and item["reveal_at"] and item["reveal_at"] <= now and self._sharing_context_valid(db, item["couple_id"], item["creator_id"])) for item in moments):
                 visibility, reveal_at = "shared", None
             else:
-                delayed = sorted(item["reveal_at"] for item in moments if item["visibility"] == "delayed" and item["reveal_at"])
+                delayed = sorted(item["reveal_at"] for item in moments if item["visibility"] == "delayed" and item["reveal_at"] and item["reveal_at"] > now)
                 visibility, reveal_at = ("delayed", delayed[0]) if delayed else ("private", None)
         if media["visibility"] != visibility or media["reveal_at"] != reveal_at:
             db.execute("UPDATE media_assets SET visibility=?,reveal_at=?,version=version+1 WHERE id=?", (visibility, reveal_at, media_id))
@@ -2805,10 +3897,11 @@ class LoveMomentsStore(
 
     def media_usage(self, user_id: str = DEMO_USER) -> dict:
         with self.connection() as db:
+            self._reconcile_delayed_moments(db)
             couple, _ = self._couple_context(db, user_id)
             rows = db.execute(
-                "SELECT kind, COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM media_assets WHERE couple_id=? AND status='ready' AND purged_at IS NULL AND (owner_id=? OR visibility='shared' OR (visibility='delayed' AND reveal_at IS NOT NULL AND reveal_at<=?)) GROUP BY kind",
-                (couple["id"], user_id, utc_now()),
+                "SELECT kind, COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM media_assets WHERE couple_id=? AND status='ready' AND purged_at IS NULL AND (owner_id=? OR visibility='shared') GROUP BY kind",
+                (couple["id"], user_id),
             ).fetchall()
             owner_bytes = int(db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM media_assets WHERE owner_id=? AND purged_at IS NULL", (user_id,)).fetchone()[0])
             couple_bytes = int(db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM media_assets WHERE couple_id=? AND purged_at IS NULL", (couple["id"],)).fetchone()[0])
@@ -3077,6 +4170,10 @@ class LoveMomentsStore(
                 "INSERT INTO moments(id, couple_id, creator_id, type, title, body, occurred_at, visibility) VALUES (?, ?, ?, 'call', '语音通话', ?, ?, 'shared')",
                 (moment_id, row["couple_id"], user_id, note or f"通话 {duration_seconds} 秒", ended_at),
             )
+            self._upsert_memory_provenance_in_connection(
+                db, "moment", moment_id, row["couple_id"], user_id,
+                source_type="human", date_source="user_confirmed", resource_version=1,
+            )
             self._audit(db, "call.ended", "call", call_id, {"duration_seconds": duration_seconds}, actor_id=user_id)
             target_id = row["callee_id"] if row["caller_id"] == user_id else row["caller_id"]
             self._event(db, row["couple_id"], user_id, "call.ended", call_id, {"toUserId": target_id, "durationSeconds": duration_seconds})
@@ -3086,13 +4183,29 @@ class LoveMomentsStore(
 
     def list_moments(self, limit: int = 50, user_id: str = DEMO_USER) -> list[dict]:
         with self.connection() as db:
-            couple, _ = self._couple_context(db, user_id)
+            self._reconcile_delayed_moments(db)
+            try:
+                couple, _ = self._memory_couple_context(db, user_id)
+            except ValueError:
+                return []
             rows = db.execute(
-                "SELECT * FROM moments WHERE couple_id=? AND deleted_at IS NULL AND (visibility='shared' OR creator_id=?) AND (reveal_at IS NULL OR reveal_at<=? OR creator_id=?) ORDER BY occurred_at DESC LIMIT ?",
-                (couple["id"], user_id, utc_now(), user_id, limit),
+                f"""SELECT m.*,COALESCE(p.source_type,'legacy_unknown') AS provenance_source_type,
+                           COALESCE(p.date_source,'legacy_unknown') AS provenance_date_source
+                    FROM moments m LEFT JOIN memory_provenance p ON p.moment_id=m.id
+                    WHERE {self._visible_moment_sql('m')}
+                    ORDER BY m.occurred_at DESC,m.id DESC LIMIT ?""",
+                (couple["id"], user_id, utc_now(), limit),
             ).fetchall()
             items = [dict(row) for row in rows]
             for item in items:
+                source_type = item.pop("provenance_source_type")
+                date_source = item.pop("provenance_date_source")
+                item["provenance"] = {
+                    "source_type": source_type,
+                    "source_label": SOURCE_LABELS.get(source_type, "来源未记录"),
+                    "date_source": date_source,
+                    "date_source_label": DATE_SOURCE_LABELS.get(date_source, "时间来源未记录"),
+                }
                 reactions = db.execute(
                     "SELECT r.user_id,r.reaction,r.updated_at,u.nickname,u.avatar_label FROM moment_reactions r JOIN users u ON u.id=r.user_id WHERE r.moment_id=? ORDER BY r.updated_at",
                     (item["id"],),
@@ -3144,10 +4257,16 @@ class LoveMomentsStore(
                 raise ValueError("延时公开时间必须晚于当前时间")
         else:
             reveal_at = None
-        occurred_at = parse_iso_datetime(payload["occurred_at"], "发生时间") if payload.get("occurred_at") else utc_now()
+        explicit_occurred_at = bool(payload.get("occurred_at"))
+        occurred_at = parse_iso_datetime(payload["occurred_at"], "发生时间") if explicit_occurred_at else None
+        date_source = "user_confirmed" if explicit_occurred_at else "system_provisional"
         moment_id = new_id("moment")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
+            previous = self._idempotent_result(db, couple["id"], user_id, "moment.create", payload.get("idempotency_key"))
+            if previous:
+                return previous
             media_value = payload.get("media_id")
             if media_value is not None and not isinstance(media_value, str):
                 raise ValueError("瞬间媒体 ID 无效")
@@ -3160,16 +4279,27 @@ class LoveMomentsStore(
                 if media["owner_id"] != user_id:
                     raise PermissionError("只能使用自己上传的媒体")
                 media_url = f"/api/v1/media/{media_id}"
+                if occurred_at is None and media["captured_at"]:
+                    occurred_at = str(media["captured_at"])
+                    date_source = "media_capture"
+            if occurred_at is None:
+                occurred_at = utc_now()
             db.execute(
                 "INSERT INTO moments(id, couple_id, creator_id, type, title, body, occurred_at, location, mood, visibility, reveal_at, media_url, media_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (moment_id, couple["id"], user_id, moment_type, title[:200], str(payload.get("body", ""))[:5000], occurred_at, str(payload.get("location", ""))[:200] or None, str(payload.get("mood", ""))[:50] or None, visibility, reveal_at, media_url, media_id),
             )
+            self._upsert_memory_provenance_in_connection(
+                db, "moment", moment_id, couple["id"], user_id,
+                source_type="human", date_source=date_source, resource_version=1,
+            )
             if media_id:
                 self._sync_media_visibility(db, media_id)
             self._audit(db, "moment.created", "moment", moment_id, {"visibility": visibility}, actor_id=user_id)
-            self._event(db, couple["id"], user_id, "moment.created", moment_id, {"type": moment_type, "visibility": visibility})
+            self._event(db, couple["id"], user_id, "moment.created", moment_id, {"type": moment_type, "visibility": visibility, "owner_only": visibility != "shared"})
             row = db.execute("SELECT * FROM moments WHERE id = ?", (moment_id,)).fetchone()
-        return dict(row)
+            result = dict(row)
+            self._save_idempotent_result(db, couple["id"], user_id, "moment.create", payload.get("idempotency_key"), result)
+        return result
 
     def update_moment(self, moment_id: str, payload: dict, user_id: str = DEMO_USER) -> dict:
         if not isinstance(payload, dict):
@@ -3226,6 +4356,13 @@ class LoveMomentsStore(
             db.execute(
                 "UPDATE moments SET title=?,body=?,occurred_at=?,location=?,mood=?,visibility=?,reveal_at=?,version=version+1 WHERE id=?",
                 (title[:200], body[:5000], occurred_at, location[:200] if location else None, mood[:50] if mood else None, visibility, reveal, moment_id),
+            )
+            provenance = db.execute("SELECT * FROM memory_provenance WHERE moment_id=?", (moment_id,)).fetchone()
+            self._upsert_memory_provenance_in_connection(
+                db, "moment", moment_id, couple["id"], user_id,
+                source_type="human",
+                date_source="user_confirmed" if "occurred_at" in payload else (provenance["date_source"] if provenance else "legacy_unknown"),
+                resource_version=int(row["version"]) + 1,
             )
             if row["media_id"]:
                 self._sync_media_visibility(db, row["media_id"])
@@ -3311,37 +4448,64 @@ class LoveMomentsStore(
             trip["date_conflicts"] = [dict(row) for row in conflicts]
         return trip
 
-    def select_variant(self, trip_id: str, style: str, user_id: str = DEMO_USER) -> dict:
+    def select_variant(
+        self,
+        trip_id: str,
+        style: str,
+        user_id: str = DEMO_USER,
+        idempotency_key: object = None,
+    ) -> dict:
         if style not in {"slow", "classic", "value", "food", "nature"}:
             raise ValueError("无效的方案类型")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
+            previous = self._idempotent_result(
+                db,
+                couple["id"],
+                user_id,
+                "trip.variant.select",
+                idempotency_key,
+            )
+            if previous:
+                if previous.get("trip_id") != trip_id or previous.get("style") != style:
+                    raise ConflictError("相同幂等键已用于另一套旅行方案")
+                replayed = True
+            else:
+                replayed = False
             trip = db.execute("SELECT * FROM trips WHERE id=? AND couple_id=? AND deleted_at IS NULL", (trip_id, couple["id"])).fetchone()
             if not trip:
                 raise KeyError("旅行不存在")
             variant = db.execute("SELECT id, name FROM plan_variants WHERE trip_id=? AND style=?", (trip_id, style)).fetchone()
             if not variant:
                 raise ValueError("这套方案尚未生成")
-            if trip["active_variant"] == style and trip["status"] in {"pending_approval", "confirmed"}:
-                return self.get_trip(trip_id, user_id=user_id)
-            revision = int(trip["current_revision"]) + 1
-            revision_id = new_id("revision")
-            item_count = db.execute(
-                "SELECT COUNT(*) AS n FROM itinerary_items i JOIN trip_days d ON d.id=i.day_id WHERE d.variant_id=?",
-                (variant["id"],),
-            ).fetchone()["n"]
-            diff = {"selected_variant": style, "variant_name": variant["name"], "selected_count": item_count}
-            db.execute(
-                "UPDATE trips SET active_variant=?, current_revision=?, status='pending_approval', version=version+1, updated_at=? WHERE id=?",
-                (style, revision, utc_now(), trip_id),
+            if not replayed and not (trip["active_variant"] == style and trip["status"] in {"pending_approval", "confirmed"}):
+                revision = int(trip["current_revision"]) + 1
+                revision_id = new_id("revision")
+                item_count = db.execute(
+                    "SELECT COUNT(*) AS n FROM itinerary_items i JOIN trip_days d ON d.id=i.day_id WHERE d.variant_id=?",
+                    (variant["id"],),
+                ).fetchone()["n"]
+                diff = {"selected_variant": style, "variant_name": variant["name"], "selected_count": item_count}
+                db.execute(
+                    "UPDATE trips SET active_variant=?, current_revision=?, status='pending_approval', version=version+1, updated_at=? WHERE id=?",
+                    (style, revision, utc_now(), trip_id),
+                )
+                db.execute("DELETE FROM approvals WHERE trip_id=?", (trip_id,))
+                db.execute(
+                    "INSERT INTO plan_revisions(id, trip_id, revision, parent_revision, author_type, diff_json, reason, created_at) VALUES (?, ?, ?, ?, 'user', ?, '采用整套方案', ?)",
+                    (revision_id, trip_id, revision, trip["current_revision"], json.dumps(diff, ensure_ascii=False), utc_now()),
+                )
+                self._audit(db, "trip.variant_selected", "trip", trip_id, {**diff, "revision": revision}, actor_id=user_id)
+                self._event(db, couple["id"], user_id, "life.updated", trip_id, {"resource": "trip", "style": style, "revision": revision})
+            self._save_idempotent_result(
+                db,
+                couple["id"],
+                user_id,
+                "trip.variant.select",
+                idempotency_key,
+                {"trip_id": trip_id, "style": style},
             )
-            db.execute("DELETE FROM approvals WHERE trip_id=?", (trip_id,))
-            db.execute(
-                "INSERT INTO plan_revisions(id, trip_id, revision, parent_revision, author_type, diff_json, reason, created_at) VALUES (?, ?, ?, ?, 'user', ?, '采用整套方案', ?)",
-                (revision_id, trip_id, revision, trip["current_revision"], json.dumps(diff, ensure_ascii=False), utc_now()),
-            )
-            self._audit(db, "trip.variant_selected", "trip", trip_id, {**diff, "revision": revision}, actor_id=user_id)
-            self._event(db, couple["id"], user_id, "life.updated", trip_id, {"resource": "trip", "style": style, "revision": revision})
         return self.get_trip(trip_id, user_id=user_id)
 
     def regenerate_trip(self, trip_id: str, user_id: str = DEMO_USER, preserve_manual: bool = True) -> dict:
@@ -3568,33 +4732,96 @@ class LoveMomentsStore(
             if not list_row:
                 return {"id": None, "couple_id": couple["id"], "type": "wishlist", "title": "我们的心愿", "items": []}
             result = dict(list_row)
-            result["items"] = [dict(row) for row in db.execute("SELECT * FROM shared_list_items WHERE list_id=? ORDER BY position", (result["id"],)).fetchall()]
+            rows = db.execute(
+                "SELECT * FROM shared_list_items WHERE list_id=? AND deleted_at IS NULL ORDER BY position",
+                (result["id"],),
+            ).fetchall()
+            result["items"] = [self._wishlist_item_for_user(db, row, user_id) for row in rows]
         return result
+
+    @staticmethod
+    def _wishlist_item_for_user(db: sqlite3.Connection, row: sqlite3.Row, user_id: str) -> dict:
+        item = {
+            key: row[key]
+            for key in (
+                "id", "list_id", "creator_id", "text", "note", "completed_at", "position",
+                "version", "item_kind", "created_at", "updated_at",
+            )
+        }
+        item["is_creator"] = row["creator_id"] == user_id
+        if not item["is_creator"]:
+            claim = db.execute(
+                "SELECT * FROM wishlist_claims WHERE item_id=? AND claimant_id=? AND status='active'",
+                (row["id"], user_id),
+            ).fetchone()
+            item["can_claim"] = bool(row["item_kind"] == "gift" and not row["completed_at"] and not claim)
+            item["my_claim"] = CoupleInteractionMixin._claim_private(claim, include_note=True) if claim else None
+        return item
+
+    def _cancel_active_wishlist_claim(
+        self, db: sqlite3.Connection, *, couple_id: str, item_id: str,
+        actor_id: str, now: str, reason: str,
+    ) -> None:
+        claim = db.execute(
+            "SELECT * FROM wishlist_claims WHERE item_id=? AND status='active'",
+            (item_id,),
+        ).fetchone()
+        if not claim:
+            return
+        db.execute(
+            "UPDATE wishlist_claims SET status='cancelled',version=version+1,updated_at=?,ended_at=? WHERE id=?",
+            (now, now, claim["id"]),
+        )
+        self._insert_in_app_notification(
+            db, couple_id=couple_id, recipient_id=str(claim["claimant_id"]), actor_id=actor_id,
+            event_type="wishlist.claim_cancelled", resource_type="shared_list_item", resource_id=item_id,
+            title="一份礼物心愿有变化", body="这份礼物心愿已结束，你的私密准备记录已经关闭。",
+            url="/?screen=life", dedupe_key=f"wishlist-claim-cancelled:{item_id}:{reason}",
+        )
 
     def toggle_wishlist_item(self, item_id: str, completed: object, user_id: str = DEMO_USER) -> dict:
         if not isinstance(completed, bool):
             raise ValueError("completed 必须是布尔值")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
-            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=?", (item_id, couple["id"])).fetchone()
+            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=? AND i.deleted_at IS NULL", (item_id, couple["id"])).fetchone()
             if not row:
                 raise KeyError("心愿不存在")
+            if row["item_kind"] == "gift" and row["creator_id"] != user_id:
+                raise PermissionError("礼物心愿请使用私密认领入口")
+            active_claim = db.execute("SELECT claimant_id FROM wishlist_claims WHERE item_id=? AND status='active'", (item_id,)).fetchone()
+            if completed and active_claim and row["creator_id"] != user_id:
+                raise PermissionError("请使用礼物认领的完成入口")
             completed_at = utc_now() if completed else None
-            db.execute("UPDATE shared_list_items SET completed_at=?, version=version+1 WHERE id=?", (completed_at, item_id))
+            if completed and row["creator_id"] == user_id:
+                self._cancel_active_wishlist_claim(
+                    db, couple_id=str(couple["id"]), item_id=item_id,
+                    actor_id=user_id, now=completed_at, reason="completed",
+                )
+            db.execute("UPDATE shared_list_items SET completed_at=?, version=version+1,updated_at=? WHERE id=?", (completed_at, utc_now(), item_id))
             self._audit(db, "wishlist.toggled", "shared_list_item", item_id, {"completed": completed}, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", item_id, {"resource": "wishlist", "completed": completed})
-            updated = dict(db.execute("SELECT * FROM shared_list_items WHERE id=?", (item_id,)).fetchone())
+            updated = self._wishlist_item_for_user(db, db.execute("SELECT * FROM shared_list_items WHERE id=?", (item_id,)).fetchone(), user_id)
         return updated
 
     def create_wishlist_item(self, payload: dict, user_id: str = DEMO_USER) -> dict:
         text = str(payload.get("text", "")).strip()
         note = str(payload.get("note", "")).strip()
+        item_kind = str(payload.get("item_kind", "general")).strip()
         if not text:
             raise ValueError("愿望内容不能为空")
         if len(text) > 300 or len(note) > 1000:
             raise ValueError("愿望内容过长")
+        if item_kind not in {"general", "gift", "meal", "travel"}:
+            raise ValueError("愿望类型无效")
+        now = utc_now()
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
+            previous = self._idempotent_result(db, couple["id"], user_id, "wishlist.create", payload.get("idempotency_key"))
+            if previous:
+                return previous
             list_row = db.execute("SELECT id FROM shared_lists WHERE couple_id=? AND type='wishlist' LIMIT 1", (couple["id"],)).fetchone()
             if not list_row:
                 list_id = new_id("list")
@@ -3603,11 +4830,13 @@ class LoveMomentsStore(
                 list_id = list_row["id"]
             position = db.execute("SELECT COALESCE(MAX(position),0)+1 AS value FROM shared_list_items WHERE list_id=?", (list_id,)).fetchone()["value"]
             item_id = new_id("wish")
-            db.execute("INSERT INTO shared_list_items(id,list_id,creator_id,text,note,position) VALUES (?,?,?,?,?,?)", (item_id, list_id, user_id, text, note, position))
+            db.execute("INSERT INTO shared_list_items(id,list_id,creator_id,text,note,position,item_kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (item_id, list_id, user_id, text, note, position, item_kind, now, now))
             self._audit(db, "wishlist.created", "shared_list_item", item_id, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", item_id, {"resource": "wishlist", "operation": "created"})
             row = db.execute("SELECT * FROM shared_list_items WHERE id=?", (item_id,)).fetchone()
-        return dict(row)
+            result = self._wishlist_item_for_user(db, row, user_id)
+            self._save_idempotent_result(db, couple["id"], user_id, "wishlist.create", payload.get("idempotency_key"), result)
+        return result
 
     def update_wishlist_item(self, item_id: str, payload: dict, user_id: str = DEMO_USER) -> dict:
         text = str(payload.get("text", "")).strip()
@@ -3618,26 +4847,37 @@ class LoveMomentsStore(
             raise ValueError("愿望内容过长")
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
-            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=?", (item_id, couple["id"])).fetchone()
+            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=? AND i.deleted_at IS NULL", (item_id, couple["id"])).fetchone()
             if not row:
                 raise KeyError("心愿不存在")
+            if row["item_kind"] == "gift" and row["creator_id"] != user_id:
+                raise PermissionError("只有创建者可以编辑礼物心愿")
             if payload.get("expected_version") is not None and int(payload["expected_version"]) != int(row["version"]):
                 raise ConflictError("心愿已被另一方修改，请刷新")
-            db.execute("UPDATE shared_list_items SET text=?,note=?,version=version+1 WHERE id=?", (text, note, item_id))
+            db.execute("UPDATE shared_list_items SET text=?,note=?,version=version+1,updated_at=? WHERE id=?", (text, note, utc_now(), item_id))
             self._audit(db, "wishlist.updated", "shared_list_item", item_id, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", item_id, {"resource": "wishlist", "operation": "updated"})
             updated = db.execute("SELECT * FROM shared_list_items WHERE id=?", (item_id,)).fetchone()
-        return dict(updated)
+            return self._wishlist_item_for_user(db, updated, user_id)
 
     def delete_wishlist_item(self, item_id: str, expected_version: object, user_id: str = DEMO_USER) -> dict:
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             couple, _ = self._couple_context(db, user_id)
-            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=?", (item_id, couple["id"])).fetchone()
+            row = db.execute("SELECT i.* FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE i.id=? AND l.couple_id=? AND i.deleted_at IS NULL", (item_id, couple["id"])).fetchone()
             if not row:
                 raise KeyError("心愿不存在")
+            if row["item_kind"] == "gift" and row["creator_id"] != user_id:
+                raise PermissionError("只有创建者可以删除礼物心愿")
             if expected_version is not None and int(expected_version) != int(row["version"]):
                 raise ConflictError("心愿已被另一方修改，请刷新")
-            db.execute("DELETE FROM shared_list_items WHERE id=?", (item_id,))
+            now = utc_now()
+            if row["creator_id"] == user_id:
+                self._cancel_active_wishlist_claim(
+                    db, couple_id=str(couple["id"]), item_id=item_id,
+                    actor_id=user_id, now=now, reason="deleted",
+                )
+            db.execute("UPDATE shared_list_items SET deleted_at=?,version=version+1,updated_at=? WHERE id=?", (now, now, item_id))
             self._audit(db, "wishlist.deleted", "shared_list_item", item_id, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", item_id, {"resource": "wishlist", "operation": "deleted"})
         return {"id": item_id, "deleted": True}
@@ -3707,7 +4947,7 @@ class LoveMomentsStore(
             trip = db.execute("SELECT id, title, destination, start_date, end_date, budget_cents, status, active_variant, current_revision, version FROM trips WHERE couple_id=? AND deleted_at IS NULL ORDER BY start_date DESC, created_at DESC, rowid DESC LIMIT 1", (couple["id"],)).fetchone()
         message_count = db.execute("SELECT COUNT(*) AS n FROM messages WHERE couple_id=?", (couple["id"],)).fetchone()["n"]
         shared_moment_count = db.execute("SELECT COUNT(*) AS n FROM moments WHERE couple_id=? AND visibility='shared' AND deleted_at IS NULL", (couple["id"],)).fetchone()["n"]
-        wish = db.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN i.completed_at IS NULL THEN 1 ELSE 0 END) AS pending FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=?", (couple["id"],)).fetchone()
+        wish = db.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN i.completed_at IS NULL THEN 1 ELSE 0 END) AS pending FROM shared_list_items i JOIN shared_lists l ON l.id=i.list_id WHERE l.couple_id=? AND i.deleted_at IS NULL", (couple["id"],)).fetchone()
         calendar = db.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN entry_type='anniversary' THEN 1 ELSE 0 END) AS anniversaries, SUM(CASE WHEN entry_type='todo' AND completed_at IS NULL THEN 1 ELSE 0 END) AS pending_todos FROM calendar_entries WHERE couple_id=? AND deleted_at IS NULL", (couple["id"],)).fetchone()
         preferences = db.execute("SELECT COUNT(*) AS n FROM partner_preferences WHERE couple_id=? AND deleted_at IS NULL", (couple["id"],)).fetchone()["n"]
         meal_counts = db.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN status='selected' THEN 1 ELSE 0 END) AS pending FROM meal_cart_items WHERE couple_id=? AND status!='cancelled'", (couple["id"],)).fetchone()
@@ -3724,6 +4964,7 @@ class LoveMomentsStore(
         if not isinstance(refs, list) or len(refs) > 10:
             raise ValueError("一次最多授权 10 条内容")
         expiry = (datetime.now(timezone.utc) + timedelta(minutes=15)).replace(microsecond=0).isoformat()
+        grant_request_id = new_id("grant_request")
         for ref in refs:
             if not isinstance(ref, str) or not re.fullmatch(r"(?:message|moment):[A-Za-z0-9_-]{1,120}", ref):
                 raise ValueError("授权资源格式无效")
@@ -3731,16 +4972,74 @@ class LoveMomentsStore(
             if kind == "message":
                 row = db.execute("SELECT id, type, content, sent_at FROM messages WHERE id=? AND couple_id=?", (resource_id, couple["id"])).fetchone()
                 content = {"ref": ref, "type": row["type"], "text": row["content"], "date": row["sent_at"]} if row else None
+                resource_version = 1 if row else None
             else:
-                row = db.execute("SELECT id, creator_id, type, title, body, occurred_at, visibility FROM moments WHERE id=? AND couple_id=? AND deleted_at IS NULL", (resource_id, couple["id"])).fetchone()
+                row = db.execute("SELECT id, creator_id, type, title, body, occurred_at, visibility,version FROM moments WHERE id=? AND couple_id=? AND deleted_at IS NULL", (resource_id, couple["id"])).fetchone()
                 if row and row["visibility"] != "shared" and row["creator_id"] != user_id:
                     row = None
                 content = {"ref": ref, "type": row["type"], "title": row["title"], "text": row["body"], "date": row["occurred_at"]} if row else None
+                resource_version = int(row["version"]) if row else None
             if not content:
                 raise PermissionError("无权授权该内容")
             context["authorizedContent"].append(content)
-            db.execute("INSERT INTO ai_context_grants(id, couple_id, user_id, surface, resource_type, resource_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (new_id("grant"), couple["id"], user_id, surface, kind, resource_id, "ui.compose", expiry, utc_now()))
+            db.execute(
+                """
+                INSERT INTO ai_context_grants(
+                    id,couple_id,user_id,surface,resource_type,resource_id,purpose,
+                    expires_at,created_at,resource_version,usage_scope,request_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    new_id("grant"), couple["id"], user_id, surface, kind, resource_id,
+                    "ui.compose", expiry, utc_now(), resource_version,
+                    "selected_content", grant_request_id,
+                ),
+            )
+        if refs:
+            context["grantRequestId"] = grant_request_id
         return context, couple
+
+    def _consume_ai_context_grants(
+        self, request_id: str, user_id: str, expected_count: int
+    ) -> None:
+        """Recheck selected content immediately before an external dispatch."""
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            rows = db.execute(
+                """
+                SELECT * FROM ai_context_grants
+                WHERE request_id=? AND couple_id=? AND user_id=?
+                  AND purpose='ui.compose' AND usage_scope='selected_content'
+                  AND revoked_at IS NULL AND expires_at>?
+                ORDER BY id
+                """,
+                (request_id, couple["id"], user_id, utc_now()),
+            ).fetchall()
+            if len(rows) != expected_count:
+                raise ConflictError("内容授权已经过期，请重新选择")
+            for grant in rows:
+                if grant["resource_type"] == "message":
+                    current = db.execute(
+                        "SELECT 1 AS version FROM messages WHERE id=? AND couple_id=?",
+                        (grant["resource_id"], couple["id"]),
+                    ).fetchone()
+                elif grant["resource_type"] == "moment":
+                    current = db.execute(
+                        """
+                        SELECT version FROM moments
+                        WHERE id=? AND couple_id=? AND deleted_at IS NULL
+                          AND (visibility='shared' OR creator_id=?)
+                        """,
+                        (grant["resource_id"], couple["id"], user_id),
+                    ).fetchone()
+                else:
+                    current = None
+                if not current or int(current["version"]) != int(grant["resource_version"] or 0):
+                    raise ConflictError("授权内容已经变化，请重新选择")
+            db.execute(
+                "UPDATE ai_context_grants SET last_used_at=?,version=version+1 WHERE request_id=? AND user_id=? AND last_used_at IS NULL",
+                (utc_now(), request_id, user_id),
+            )
 
     @staticmethod
     def _context_identity(context: dict) -> tuple[int, str]:
@@ -3892,6 +5191,10 @@ class LoveMomentsStore(
         # Compose outside the database transaction. Remote composers first make
         # an atomic quota reservation on a separate connection; holding the job
         # transaction here would otherwise block that reservation until timeout.
+        if refs:
+            self._consume_ai_context_grants(
+                str(context.get("grantRequestId") or ""), user_id, len(refs)
+            )
         generated_by = "ai"
         error_code = None
         try:
@@ -4036,50 +5339,90 @@ class LoveMomentsStore(
     def confirm_ui_action(self, action_id: str, idempotency_key: object, user_id: str = DEMO_USER) -> dict:
         if not isinstance(idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9:_-]{8,100}", idempotency_key):
             raise ValueError("幂等键格式无效")
+        domain_key = f"ui:{action_id}:{hashlib.sha256(idempotency_key.encode()).hexdigest()[:24]}"
+        operation_by_action = {
+            "send_message": "message.create",
+            "create_moment": "moment.create",
+            "select_trip_variant": "trip.variant.select",
+            "create_calendar_entry": "calendar.create",
+            "create_wishlist_item": "wishlist.create",
+        }
         with self.connection() as db:
-            previous = db.execute("SELECT status, result_json FROM ui_action_drafts WHERE idempotency_key=?", (idempotency_key,)).fetchone()
-            if previous and previous["result_json"]:
-                return {"ok": True, "idempotent": True, "result": parse_json(previous["result_json"], {})}
-            if previous:
-                raise ConflictError("相同操作正在执行，请稍后查询结果")
             couple, _ = self._couple_context(db, user_id)
             row = db.execute("SELECT * FROM ui_action_drafts WHERE id=? AND couple_id=? AND creator_id=?", (action_id, couple["id"], user_id)).fetchone()
             if not row:
                 raise KeyError("动作草稿不存在")
-            if row["status"] != "draft" or row["expires_at"] <= utc_now():
+            if row["idempotency_key"] == idempotency_key and row["result_json"]:
+                return {"ok": True, "idempotent": True, "result": parse_json(row["result_json"], {})}
+            resuming = row["status"] == "executing" and row["idempotency_key"] == idempotency_key
+            if row["status"] == "executing" and not resuming:
+                raise ConflictError("这项操作正在使用另一请求执行")
+            if row["status"] not in {"draft", "executing"} or row["expires_at"] <= utc_now():
                 raise ValueError("动作草稿已失效")
             expected, payload, action_type = parse_json(row["expected_versions_json"], {}), parse_json(row["payload_json"], {}), row["action_type"]
-            if "couple" in expected and int(couple["version"]) != int(expected["couple"]):
-                raise ConflictError("共同空间已变化，请重新预览")
-            if "trip" in expected:
-                trip = db.execute("SELECT version FROM trips WHERE id=? AND couple_id=?", (payload.get("trip_id"), couple["id"])).fetchone()
-                if not trip or int(trip["version"]) != int(expected["trip"]):
-                    raise ConflictError("旅行方案已变化，请重新预览")
-            try:
-                claimed = db.execute("UPDATE ui_action_drafts SET status='executing', idempotency_key=? WHERE id=? AND status='draft'", (idempotency_key, action_id))
-            except sqlite3.IntegrityError as error:
-                raise ConflictError("相同操作正在执行，请稍后查询结果") from error
-            if claimed.rowcount != 1:
-                raise ConflictError("动作状态已变化，请重新预览")
+            operation = operation_by_action.get(action_type, "")
+            domain_receipt = db.execute(
+                "SELECT result_json FROM mutation_idempotency WHERE couple_id=? AND user_id=? AND operation=? AND idempotency_key=?",
+                (couple["id"], user_id, operation, domain_key),
+            ).fetchone() if resuming and operation else None
+            if not domain_receipt:
+                if "couple" in expected and int(couple["version"]) != int(expected["couple"]):
+                    raise ConflictError("共同空间已变化，请重新预览")
+                if "trip" in expected:
+                    trip = db.execute("SELECT version FROM trips WHERE id=? AND couple_id=?", (payload.get("trip_id"), couple["id"])).fetchone()
+                    if not trip or int(trip["version"]) != int(expected["trip"]):
+                        raise ConflictError("旅行方案已变化，请重新预览")
+            if not resuming:
+                try:
+                    claimed = db.execute(
+                        "UPDATE ui_action_drafts SET status='executing', idempotency_key=? WHERE id=? AND couple_id=? AND creator_id=? AND status='draft'",
+                        (idempotency_key, action_id, couple["id"], user_id),
+                    )
+                except sqlite3.IntegrityError as error:
+                    raise ConflictError("这个幂等键已用于另一项操作") from error
+                if claimed.rowcount != 1:
+                    raise ConflictError("动作状态已变化，请重新预览")
         try:
             if action_type == "send_message":
-                result = self.create_message({"type": "text", "content": payload["content"]}, user_id=user_id)
+                result = self.create_message({"type": "text", "content": payload["content"], "idempotency_key": domain_key}, user_id=user_id)
             elif action_type == "create_moment":
-                result = self.create_moment(payload, user_id=user_id)
+                result = self.create_moment({**payload, "idempotency_key": domain_key}, user_id=user_id)
             elif action_type == "select_trip_variant":
-                result = self.select_variant(payload["trip_id"], payload["style"], user_id=user_id)
+                result = self.select_variant(
+                    payload["trip_id"],
+                    payload["style"],
+                    user_id=user_id,
+                    idempotency_key=domain_key,
+                )
             elif action_type == "create_calendar_entry":
-                result = self.create_calendar_entry(payload, user_id=user_id)
+                result = self.create_calendar_entry({**payload, "idempotency_key": domain_key}, user_id=user_id)
             elif action_type == "create_wishlist_item":
-                result = self.create_wishlist_item(payload, user_id=user_id)
+                result = self.create_wishlist_item({**payload, "idempotency_key": domain_key}, user_id=user_id)
             else:
                 raise ValueError("该动作尚未开放执行")
         except Exception:
             with self.connection() as db:
-                db.execute("UPDATE ui_action_drafts SET status='draft', idempotency_key=NULL WHERE id=? AND status='executing'", (action_id,))
+                # A domain mutation may already have committed before a process
+                # interruption. Keep an existing executing claim recoverable;
+                # ordinary validation/provider failures can safely return the
+                # draft to the user because no idempotent receipt was written.
+                receipt = db.execute(
+                    "SELECT result_json FROM mutation_idempotency WHERE couple_id=? AND user_id=? AND operation=? AND idempotency_key=?",
+                    (couple["id"], user_id, operation_by_action.get(action_type, ""), domain_key),
+                ).fetchone()
+                if not receipt:
+                    db.execute("UPDATE ui_action_drafts SET status='draft', idempotency_key=NULL WHERE id=? AND couple_id=? AND creator_id=? AND status='executing' AND idempotency_key=?", (action_id, couple["id"], user_id, idempotency_key))
             raise
         with self.connection() as db:
-            db.execute("UPDATE ui_action_drafts SET status='confirmed', result_json=?, confirmed_at=? WHERE id=? AND status='executing' AND idempotency_key=?", (json.dumps(result, ensure_ascii=False), utc_now(), action_id, idempotency_key))
+            confirmed = db.execute(
+                "UPDATE ui_action_drafts SET status='confirmed', result_json=?, confirmed_at=? WHERE id=? AND couple_id=? AND creator_id=? AND status='executing' AND idempotency_key=?",
+                (json.dumps(result, ensure_ascii=False), utc_now(), action_id, couple["id"], user_id, idempotency_key),
+            )
+            if confirmed.rowcount != 1:
+                current = db.execute("SELECT result_json,idempotency_key FROM ui_action_drafts WHERE id=? AND couple_id=? AND creator_id=?", (action_id, couple["id"], user_id)).fetchone()
+                if current and current["idempotency_key"] == idempotency_key and current["result_json"]:
+                    return {"ok": True, "idempotent": True, "result": parse_json(current["result_json"], {})}
+                raise ConflictError("动作完成状态无法确认，请重新读取结果")
             self._audit(db, "ui.action_confirmed", "ui_action", action_id, {"type": action_type}, actor_id=user_id)
         return {"ok": True, "idempotent": False, "result": result}
 
