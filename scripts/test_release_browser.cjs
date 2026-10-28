@@ -14,9 +14,33 @@ async function login(page, origin, username, password) {
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.locator("#authUsername").fill(username);
   await page.locator("#authPassword").fill(password);
+  const loginResponsePromise = page.waitForResponse(response => (
+    response.url().endsWith("/api/v1/auth/login")
+      && response.request().method() === "POST"
+  ), { timeout: 60_000 });
+  const bootstrapResponsePromise = page.waitForResponse(response => (
+    response.url().endsWith("/api/v1/bootstrap")
+      && response.request().method() === "GET"
+  ), { timeout: 60_000 });
   await page.locator("#authSubmit").click();
-  await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
-  await page.waitForFunction(() => Boolean(document.querySelector(".avatar-a")?.dataset.avatarTheme));
+  const loginResponse = await loginResponsePromise;
+  if (!loginResponse.ok()) {
+    throw new Error(`${username} 登录接口失败 (${loginResponse.status()})：${await loginResponse.text()}`);
+  }
+  const bootstrapResponse = await bootstrapResponsePromise;
+  if (!bootstrapResponse.ok()) {
+    throw new Error(`${username} 初始化接口失败 (${bootstrapResponse.status()})：${await bootstrapResponse.text()}`);
+  }
+  await page.waitForFunction(
+    () => document.querySelector("#authGate")?.classList.contains("hidden"),
+    null,
+    { timeout: 60_000 },
+  );
+  await page.waitForFunction(
+    () => Boolean(document.querySelector(".avatar-a")?.dataset.avatarTheme),
+    null,
+    { timeout: 60_000 },
+  );
 }
 
 async function logout(page) {
