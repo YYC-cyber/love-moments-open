@@ -1,0 +1,27 @@
+# Love Moments · 恋屿 Python 依赖
+#
+# Python 版本要求：3.11 或更高版本（以 pyproject.toml 为准）。
+# Pillow 用于真实解码图片、移除 EXIF/GPS 等元数据并生成受保护缩略图。
+Pillow>=12.0.0,<13
+# certifi 为七牛云等外部 HTTPS 接口提供独立可信 CA 证书链，避免 macOS
+# Python 未安装系统根证书时连接失败；仍然执行严格证书校验。
+certifi>=2024.8.30
+# 标准 Web Push（VAPID + RFC 8291 内容加密）。用于 iOS/iPadOS 16.4+
+# 主屏幕 Web App、Android 与桌面浏览器的免费后台通知，不依赖 FCM Key。
+pywebpush>=2.5.0,<3
+#
+# 在新电脑的项目根目录执行：
+#   python3 -m venv .venv
+#   source .venv/bin/activate          # Windows: .venv\Scripts\activate
+#   python -m pip install -r requirements.txt
+#
+# 这里有意不写第三方包，也不执行 `-e .`：从项目根目录运行
+# `python3 main.py` 即可，干净环境不需要额外下载 setuptools。
+#
+# 前端、H5 浏览器测试和 React Native 的依赖不由 pip 管理。
+# 请另外安装 Node.js 与 pnpm，然后执行：
+#   corepack enable
+#   pnpm install --frozen-lockfile
+#
+# 环境变量不要复制真实密钥到代码仓库；在新电脑上复制模板后填写：
+#   cp .env.example .env

@@ -1,0 +1,40 @@
+{
+  "name": "Love Moments · 恋屿",
+  "short_name": "恋屿",
+  "id": "/",
+  "scope": "/",
+  "description": "属于两个人的生活与回忆空间",
+  "start_url": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#f8f2ec",
+  "theme_color": "#7d2638",
+  "lang": "zh-CN",
+  "categories": ["lifestyle", "social", "travel"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/static/assets/love-moments-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/assets/love-moments-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/assets/love-moments-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "发送消息", "short_name": "消息", "url": "/?screen=chat" },
+    { "name": "记录瞬间", "short_name": "瞬间", "url": "/?action=moment" }
+  ]
+}

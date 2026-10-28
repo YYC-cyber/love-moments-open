@@ -1,0 +1,6 @@
+{
+  "name":"@love-moments/mobile","version":"0.1.0","private":true,"main":"index.js",
+  "scripts":{"start":"expo start --dev-client","typecheck":"tsc --noEmit"},
+  "dependencies":{"@love-moments/design-tokens":"workspace:*","@love-moments/domain-client":"workspace:*","@love-moments/ui-contract":"workspace:*","@react-native-async-storage/async-storage":"^2.2.0","expo":"^54.0.13","expo-secure-store":"~15.0.8","react":"19.1.0","react-native":"0.81.4","react-native-webview":"13.15.0"},
+  "devDependencies":{"@types/react":"^19.1.16","typescript":"^5.9.3"}
+}

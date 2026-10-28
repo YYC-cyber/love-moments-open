@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
+    image: love-moments:production
+    container_name: love-moments-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${LOVE_MOMENTS_ENV_FILE:-/etc/love-moments/love-moments.env}
+    ports:
+      - "127.0.0.1:52013:52013"
+    volumes:
+      - /srv/love-moments:/srv/love-moments
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json,urllib.request;
+          response=urllib.request.urlopen('http://127.0.0.1:52013/api/health',timeout=8);
+          assert response.status == 200 and json.load(response).get('status') == 'ok'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

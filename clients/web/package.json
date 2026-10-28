@@ -1,0 +1,9 @@
+{
+  "name": "@love-moments/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev":"vite","build":"vite build","typecheck":"tsc --noEmit"},
+  "dependencies": {"@love-moments/design-tokens":"workspace:*","@love-moments/domain-client":"workspace:*","@love-moments/ui-contract":"workspace:*","@vitejs/plugin-react":"^5.0.4","vite":"^7.1.9","react":"^19.1.1","react-dom":"^19.1.1"},
+  "devDependencies": {"@types/react":"^19.1.16","@types/react-dom":"^19.1.9","typescript":"^5.9.3"}
+}

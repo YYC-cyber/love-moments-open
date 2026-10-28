@@ -1,0 +1,14 @@
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name __PUBLIC_IPV4__;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://__PUBLIC_IPV4__$request_uri;
+    }
+}

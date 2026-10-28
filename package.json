@@ -1,0 +1,24 @@
+{
+  "name": "love-moments-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build:web": "pnpm --filter @love-moments/web build",
+    "test": "pnpm -r --if-present test",
+    "test:backend": "python3 -m unittest discover -s tests -v",
+    "test:browser": "node scripts/run_release_browser.cjs",
+    "test:assistant-browser": "node scripts/test_life_assistant_browser.cjs",
+    "test:romantic-ui-browser": "node scripts/test_romantic_compact_ui_browser.cjs",
+    "test:rtc": "node scripts/run_rtc_audit.cjs",
+    "test:push": "node scripts/test_service_worker.cjs",
+    "audit:recipes": "python3 scripts/audit_recipe_catalog.py",
+    "backup:local": "python3 scripts/backup_local.py"
+  },
+  "dependencies": {
+    "agora-rtc-sdk-ng": "4.24.8"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew Love Moments short-lived IP TLS certificate
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot-ip/bin/certbot renew --quiet --no-random-sleep-on-renew --deploy-hook "/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx"

@@ -1,0 +1,13 @@
+[project]
+name = "love-moments"
+version = "0.1.0"
+description = "Love Moments · 恋屿 — a private shared space for two"
+requires-python = ">=3.11"
+dependencies = [
+    "Pillow>=12.0.0,<13",
+    "certifi>=2024.8.30",
+    "pywebpush>=2.5.0,<3",
+]
+
+[tool.ruff]
+line-length = 100

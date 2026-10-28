@@ -1,0 +1,2 @@
+# 兼容旧拼写。标准 Python 依赖文件是 requirements.txt。
+-r requirements.txt

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Love Moments backup and restore verification every day
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

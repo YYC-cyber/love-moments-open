@@ -1,0 +1,8 @@
+[Unit]
+Description=Create and verify the daily Love Moments backup
+After=love-moments.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/love-moments/current
+ExecStart=/usr/bin/docker compose -f deploy/docker-compose.production.yml exec -T app python scripts/maintenance.py --task daily

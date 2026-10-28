@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f2ec">
+  <meta name="color-scheme" content="light">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="description" content="Love Moments · 恋屿，属于两个人的生活与回忆空间">
+  <title>Love Moments · 恋屿</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%238e3f52'/%3E%3Cpath d='M18 15v34h29v-8H27V15z' fill='%23fff8f2'/%3E%3C/svg%3E">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/love-moments-icon-180.png">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <section class="auth-gate" id="authGate" aria-label="账号登录">
+    <div class="auth-panel">
+      <div class="auth-brand"><span class="brand-mark">L</span><div><strong>恋屿</strong><small>LOVE MOMENTS</small></div></div>
+      <div id="authAccountView">
+        <span class="eyebrow ink">PRIVATE SPACE FOR TWO</span>
+        <h1>登录你们的<br>共同小岛</h1>
+        <p class="auth-lead">使用恋屿账号和密码登录，不连接微信或其他社交账号。</p>
+        <div class="auth-tabs"><button class="active" data-auth-mode="login">登录</button><button data-auth-mode="register">注册</button></div>
+        <form id="authForm">
+          <label class="field register-only"><span>昵称</span><input id="authNickname" autocomplete="nickname" placeholder="希望对方怎样称呼你"></label>
+          <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required></label>
+          <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required></label>
+          <button class="primary-button" id="authSubmit">登录</button>
+        </form>
+        <p class="account-note" id="registrationNote">请使用你们各自注册的账号登录。注册时填写的昵称，会成为你在情侣空间里的名字和头像文字。</p>
+        <details class="pair-help">
+          <summary>两个新账号怎么组成情侣？</summary>
+          <p>两人各自注册 → 一人生成邀请码 → 另一人登录自己的账号并输入邀请码。建议使用两台设备或普通窗口加隐私窗口。</p>
+        </details>
+      </div>
+      <div id="pairingView" hidden>
+        <span class="eyebrow ink">PAIR WITH YOUR LOVE</span>
+        <h1>把小岛的另一半<br>交给喜欢的人</h1>
+        <p class="auth-lead">你们各自注册账号后，由一人生成邀请码，另一人输入邀请码即可建立私密共同空间。</p>
+        <ol class="pairing-steps" aria-label="组成情侣账号的步骤">
+          <li><b>1</b><span>两个人分别注册自己的独立账号</span></li>
+          <li><b>2</b><span>其中一人点击下方按钮，生成 24 小时有效的邀请码</span></li>
+          <li><b>3</b><span>另一人在自己的账号中输入邀请码，立即组成情侣空间</span></li>
+        </ol>
+        <button class="primary-button" data-action="create-invite">生成我的邀请码</button>
+        <div class="invite-code" id="inviteCode" hidden></div>
+        <div class="or-divider"><span>或者</span></div>
+        <form id="pairForm">
+          <label class="field"><span>伴侣邀请码</span><input id="pairCode" autocomplete="off" placeholder="输入 10 位邀请码" required></label>
+          <label class="field"><span>正式在一起的日期</span><input id="pairAnniversary" type="date" required></label>
+          <button class="secondary-auth-button">接受邀请并进入</button>
+        </form>
+        <button class="auth-logout" data-action="logout">退出当前账号</button>
+      </div>
+    </div>
+  </section>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <main class="phone-shell romantic-compact" aria-label="Love Moments H5 原型">
+    <header class="app-header">
+      <button class="brand" data-nav="home" aria-label="返回首页">
+        <span class="brand-mark">L</span>
+        <span><strong>恋屿</strong><small>LOVE MOMENTS</small></span>
+      </button>
+      <button class="avatar-pair" data-action="open-profile" aria-label="查看情侣空间">
+        <span class="avatar avatar-a">♡</span><span class="avatar avatar-b">♡</span>
+      </button>
+    </header>
+
+    <section class="screen active" data-screen="home">
+      <div class="home-hero">
+        <img src="/static/assets/couple-lake-hero.png" alt="情侣在湖畔旅行的背影">
+        <div class="hero-shade"></div>
+        <div class="hero-copy">
+          <span class="eyebrow" id="storyYear">OUR STORY</span>
+          <h1>一起走过<br><em id="togetherDays">—</em> 天</h1>
+          <p id="nextTripSummary">正在读取你们的下一段旅程</p>
+        </div>
+        <button class="hero-memory" data-action="open-on-this-day">⌁ 那年今日</button>
+      </div>
+
+      <div class="content home-content">
+        <div class="section-heading">
+          <div><span class="eyebrow ink" id="todayLabel">TODAY</span><h2>今天，也要好好相爱</h2></div>
+          <div class="home-heading-actions"><span class="weather">天气待同步</span><button class="notification-center-button" data-action="open-notifications" aria-label="打开通知中心">◌<b id="notificationUnreadBadge" hidden>0</b></button></div>
+        </div>
+        <section class="life-assistant-home card" aria-labelledby="lifeAssistantHeading">
+          <div class="life-assistant-heading">
+            <div><span class="eyebrow ink">TODAY FOR US</span><h3 id="lifeAssistantHeading">双人生活助理</h3><p>把一句话变成双方都能查看的共同方案，确认前不会修改任何内容。</p></div>
+            <button type="button" data-action="open-assistant-plans">方案记录</button>
+          </div>
+          <div class="life-assistant-today" id="lifeAssistantToday" aria-live="polite"><span>正在整理今天的共同事项…</span></div>
+          <div class="life-assistant-priorities" id="lifeAssistantPriorities"></div>
+          <form class="life-assistant-form" id="lifeAssistantForm">
+            <label for="lifeAssistantInput">告诉恋屿你们想做什么</label>
+            <div><input id="lifeAssistantInput" maxlength="1000" placeholder="例如：周六晚上想吃番茄炒蛋，加入日历并生成采购清单" required><button class="primary-button">预览方案</button></div>
+          </form>
+          <div class="life-assistant-examples" aria-label="生活助理示例">
+            <button type="button" data-life-assistant-example="周六晚上想吃番茄炒蛋，加入日历并生成采购清单">安排周六晚餐</button>
+            <button type="button" data-life-assistant-example="明天待办：检查采购清单">整理明天待办</button>
+          </div>
+          <article class="daily-couple-summary" id="dailyCoupleSummary" hidden></article>
+        </section>
+        <details class="smart-disclosure home-smart">
+          <summary><span><b>问恋屿整理首页</b><small>只看待确认事项、纪念日或旅行变化</small></span></summary>
+          <section class="smart-panel" data-smart="home" aria-label="首页智能编排"></section>
+        </details>
+
+        <div class="status-card card" data-action="edit-status" role="button" tabindex="0">
+          <div class="status-person"><span class="avatar avatar-b large">♡</span><span class="online-dot"></span></div>
+          <div class="grow"><small id="partnerMomentLabel">对方的此刻</small><strong id="partnerStatusText">还没有分享状态</strong><span id="partnerContextText">点这里也分享你的状态</span></div>
+          <button class="icon-button" data-action="send-heart" aria-label="发送爱心">♡</button>
+        </div>
+
+        <div class="couple-context-grid" id="coupleContextGrid" aria-label="双方时间和天气"></div>
+
+        <div class="quick-grid" aria-label="记录这一刻">
+          <button data-action="new-moment" data-type="照片"><span>◉</span>照片</button>
+          <button data-action="new-moment" data-type="文字"><span>✎</span>文字</button>
+          <button data-action="new-moment" data-type="语音"><span>∿</span>语音</button>
+          <button data-action="new-moment" data-type="位置"><span>⌖</span>位置</button>
+        </div>
+
+        <article class="question-card card">
+          <div class="card-top"><span class="pill rose">今日默契</span><span id="questionNumber">每日一题</span></div>
+          <h3>正在读取今天的问题…</h3>
+          <div class="answer-lock" id="answerState">
+            <span>等待同步</span><span class="lock">仅在回答后解锁</span>
+          </div>
+          <button class="primary-button" data-action="answer-question">写下我的答案</button>
+        </article>
+
+        <div class="section-heading compact"><h2>正在发生</h2><button data-nav="life">查看全部</button></div>
+        <div class="horizontal-cards">
+          <button class="mini-event" data-nav="trip">
+            <span class="mini-icon wine">↗</span><span><small id="homeTripName">旅行计划</small><strong id="homeTripStatus">查看当前方案</strong></span><b>›</b>
+          </button>
+          <button class="mini-event" data-action="open-anniversaries">
+            <span class="mini-icon sand">♡</span><span><small id="homeAnniversaryName">恋爱纪念日</small><strong id="homeAnniversaryCountdown">查看纪念日</strong></span><b>›</b>
+          </button>
+        </div>
+        <details class="compact-more home-more">
+          <summary><span><b>更多生活动态</b><small>每周回顾与约会安排</small></span></summary>
+          <div class="compact-more-body">
+            <article class="weekly-preview card" id="weeklyPreview"></article>
+            <article class="date-preview card" id="datePreview"></article>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="screen" data-screen="chat">
+      <div class="content chat-content">
+        <div class="page-title-row">
+          <div><span class="eyebrow ink">JUST BETWEEN US</span><h1>伴侣</h1><small class="presence">○ 正在读取连接状态</small></div>
+          <div class="header-actions"><button data-action="import-chat" aria-label="导入聊天">⇩</button><button data-action="start-call" aria-label="语音通话">☎</button></div>
+        </div>
+        <details class="smart-disclosure">
+          <summary><span><b>问恋屿</b><small>整理对话、收藏回忆或生成共同事项</small></span></summary>
+          <section class="smart-panel" data-smart="chat" aria-label="消息智能编排"></section>
+        </details>
+        <div class="messages" id="messages">
+          <div class="message system">正在读取你们的真实消息…</div>
+        </div>
+        <div class="chat-compose-dock" aria-label="消息输入区">
+          <div class="chat-suggestions">
+            <button data-action="quick-message">想你了 ♡</button><button data-action="quick-message">今晚打电话吗</button>
+          </div>
+          <form class="composer" id="chatForm">
+            <button type="button" data-action="attach" aria-label="添加附件">＋</button>
+            <input id="chatInput" autocomplete="off" placeholder="和 TA 说点什么…" aria-label="消息内容">
+            <button class="send" aria-label="发送">↑</button>
+          </form>
+        </div>
+        <input id="chatMediaInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp,audio/*,video/mp4,video/webm,video/quicktime" hidden>
+      </div>
+    </section>
+
+    <section class="screen" data-screen="trip">
+      <div class="content trip-content">
+        <div class="page-title-row trip-title">
+          <div><span class="eyebrow ink">OUR NEXT ESCAPE</span><h1 id="tripTitle">还没有选择旅行</h1><p id="tripMeta">创建后会显示真实日期与预算</p></div>
+          <div class="header-actions"><button id="tripDetailButton" data-action="open-trip-detail" hidden>详情</button><button id="editTripButton" data-action="edit-trip" hidden>设置</button><button class="danger-text" id="deleteTripButton" data-action="delete-trip" aria-label="删除当前旅行" hidden>删除</button><button class="round-add" data-action="new-trip" aria-label="创建旅行">＋</button></div>
+        </div>
+        <label class="trip-switcher"><span>查看旅行</span><select id="tripSwitcher" aria-label="切换旅行计划"></select></label>
+        <nav class="section-tabs" aria-label="旅行功能页">
+          <button class="active" data-trip-section="overview">概览</button><button data-trip-section="assistant">问 AI</button><button data-trip-section="plans">五套方案</button><button data-trip-section="itinerary">每日行程</button><button data-trip-section="stays">酒店</button><button data-trip-section="tools">路线报价</button>
+        </nav>
+        <div data-trip-panel="overview">
+          <article class="destination-warning card" id="tripDestinationWarning" hidden></article>
+          <section class="smart-panel" data-smart="trip" aria-label="旅行智能编排"></section>
+          <div class="trip-progress"><span class="active">偏好</span><i></i><span class="active">五套方案</span><i></i><span>共同确认</span></div>
+          <div class="ai-banner card">
+            <div class="spark">✦</div><div class="grow"><strong id="tripVariantCount">正在读取旅行方案</strong><small>可整套选择，也可逐项混搭</small></div><button class="live-pill" data-action="generate-trip">重新生成</button>
+          </div>
+        </div>
+        <div data-trip-panel="assistant">
+          <section class="trip-assistant" aria-label="AI 旅行对话助手">
+            <div class="subpage-heading"><div><span class="eyebrow ink">TRAVEL CONCIERGE</span><h2>和 AI 一起规划</h2><p id="tripAssistantScope">只使用当前旅行和已确认地点；选择与修改仍由你确认。</p></div></div>
+            <article class="trip-live-panel card" id="tripLivePanel">
+              <div class="trip-live-heading"><div><span class="eyebrow ink">LIVE TRIP</span><h3>旅行中</h3><p>按当前时间、天气和位置推荐下一站与附近餐厅。</p></div><button type="button" class="live-pill" id="tripLiveRefresh" data-action="trip-live-refresh">更新当前位置</button></div>
+              <p class="trip-live-privacy">定位仅本次请求使用，不保存位置；路线只在你点击查看时查询。</p>
+              <div class="trip-live-results" id="tripLiveResults" aria-live="polite"><div class="empty-view"><p>到达目的地后，主动更新一次位置即可获得现场建议。</p></div></div>
+            </article>
+            <div class="assistant-quick-prompts" aria-label="旅行快捷问题">
+              <button type="button" data-assistant-prompt="比较五套方案哪个更适合轻松旅行">比较五套方案</button>
+              <button type="button" data-assistant-prompt="帮我找预算内、离行程近的酒店">查询附近酒店</button>
+              <button type="button" data-assistant-prompt="找第二天晚餐，优先高评分和距离近">找附近餐厅</button>
+              <button type="button" data-assistant-prompt="我想调整第二天的行程时间">调整每日行程</button>
+              <button type="button" data-assistant-prompt="根据当前位置推荐下一站">推荐下一站</button>
+              <button type="button" data-assistant-prompt="统一比较酒店、航班和火车票">比较交通住宿</button>
+              <button type="button" data-assistant-prompt="旅行结束了，生成共同回忆">生成旅行回忆</button>
+            </div>
+            <div class="trip-assistant-messages" id="tripAssistantMessages" aria-live="polite"><div class="empty-view"><p>选择当前旅行后，可以直接告诉我预算、日期、餐次和想调整的内容。</p></div></div>
+            <form class="trip-assistant-form" id="tripAssistantForm">
+              <label for="tripAssistantInput" class="sr-only">旅行问题</label>
+              <textarea id="tripAssistantInput" maxlength="1000" rows="2" placeholder="例如：找第二天晚餐，评分 4.5 以上、2 公里内" required></textarea>
+              <button class="primary-button" id="tripAssistantSend">发送</button>
+            </form>
+          </section>
+        </div>
+        <div data-trip-panel="plans">
+          <div class="subpage-heading"><div><span class="eyebrow ink">COMPARE PLANS</span><h2>比较五套方案</h2><p>比较预算、节奏与主题，再到“每日行程”勾选想去的地点进行混搭。</p></div></div>
+          <div class="plan-tabs" role="tablist">
+            <button class="active" data-plan="slow"><span>松弛浪漫</span><small>加载中</small></button>
+            <button data-plan="classic"><span>经典充实</span><small>加载中</small></button>
+            <button data-plan="value"><span>性价比</span><small>加载中</small></button>
+            <button data-plan="food"><span>美食寻味</span><small>加载中</small></button>
+            <button data-plan="nature"><span>自然治愈</span><small>加载中</small></button>
+          </div>
+          <div class="plan-summary" id="planSummary"></div>
+          <div class="plan-generation-status" id="planGenerationStatus" role="status"></div>
+          <article class="plan-decision card">
+            <div><small>当前预览</small><strong id="planPreviewName">松弛浪漫</strong><span id="planPreviewMeta">选择后仍需双方确认</span></div>
+            <button class="primary-button" data-action="adopt-plan" id="adoptPlanButton">采用整套方案</button>
+          </article>
+        </div>
+        <div data-trip-panel="itinerary">
+          <div class="subpage-heading"><div><span class="eyebrow ink">DAILY ROUTE</span><h2>每日行程</h2><p>这里只处理时间、地点顺序和人工调整。</p></div></div>
+          <div class="day-row"><div><span class="pill wine">全部日期</span><h2 id="tripDayTitle">完整行程</h2><small id="tripDayMeta">读取已保存行程</small></div><button data-action="edit-plan">调整</button></div>
+          <div class="itinerary-tools"><button data-action="select-all-items">全选当前方案</button><button data-action="clear-mix">清空选择</button><button data-action="refresh-food" id="refreshFoodButton" hidden>查询全部日期早中晚餐馆</button></div>
+          <div class="food-recommendation-notice" id="foodRecommendationNotice" hidden></div>
+          <div class="itinerary" id="itinerary"></div>
+        </div>
+        <div data-trip-panel="stays">
+          <div class="subpage-heading"><div><span class="eyebrow ink">STAY TOGETHER</span><h2>酒店与住宿</h2><p>查看已保存酒店；真实报价以授权平台为准。</p></div></div>
+          <article class="hotel-card card selectable" data-mix="hotel">
+            <div class="hotel-image"></div>
+            <div class="hotel-info"><span class="eyebrow ink">本次住宿</span><strong>正在读取酒店</strong><small>读取已保存的区域与房型</small><div class="price-line"><b>—</b><span>暂无报价</span></div></div>
+            <button class="mix-check" data-action="toggle-mix" aria-label="加入混搭">✓</button>
+          </article>
+          <div class="price-note">最终价格以预订平台为准</div>
+        </div>
+        <div data-trip-panel="tools">
+          <div class="subpage-heading"><div><span class="eyebrow ink">ROUTE & PRICE</span><h2>路线与票价查询</h2><p>在应用内比较时间、价格、余票和规则，再跳转到对应平台购买。</p></div></div>
+          <div class="food-recommendation-notice" id="tripSearchScopeNotice" hidden></div>
+          <div class="trip-tool-row"><button data-action="trip-route">⌖ 查看路线</button><button data-action="manual-quote">＋ 手工报价</button></div>
+          <section class="quote-search-card card" aria-label="酒店查询">
+            <span class="eyebrow ink">HOTELS</span><h3>酒店住宿</h3>
+            <div class="quote-fields"><label class="field"><span>目的地</span><input id="hotelDestination" placeholder="城市、区域或酒店名称"></label><div class="two-fields"><label class="field"><span>入住</span><input id="hotelCheckIn" type="date"></label><label class="field"><span>离店</span><input id="hotelCheckOut" type="date"></label></div><label class="field"><span>入住人数</span><input id="hotelAdults" type="number" min="1" max="9" value="2"></label></div>
+            <button class="primary-button quote-submit" data-action="search-quotes" data-quote-type="hotel">查询酒店并比较</button>
+          </section>
+          <section class="quote-search-card card" aria-label="机票查询">
+            <span class="eyebrow ink">FLIGHTS</span><h3>国内 / 国际机票</h3>
+            <div class="quote-fields"><div class="two-fields"><label class="field"><span>出发城市或机场代码</span><input id="flightOrigin" placeholder="北京 / PEK"></label><label class="field"><span>到达城市或机场代码</span><input id="flightDestination" placeholder="三亚 / SYX"></label></div><div class="two-fields"><label class="field"><span>去程</span><input id="flightOutbound" type="date"></label><label class="field"><span>返程（可选）</span><input id="flightReturn" type="date"></label></div><label class="field"><span>乘客人数</span><input id="flightAdults" type="number" min="1" max="9" value="2"></label></div>
+            <button class="primary-button quote-submit" data-action="search-quotes" data-quote-type="flight">查询航班并比较</button>
+          </section>
+          <section class="quote-search-card card" aria-label="火车票查询">
+            <span class="eyebrow ink">TRAINS</span><h3>国内火车票</h3>
+            <div class="quote-fields"><div class="two-fields"><label class="field"><span>出发站</span><input id="trainOrigin" placeholder="杭州东"></label><label class="field"><span>到达站</span><input id="trainDestination" placeholder="上海虹桥"></label></div><div class="two-fields"><label class="field"><span>乘车日期</span><input id="trainDate" type="date"></label><label class="field"><span>车次类型</span><select id="trainFilter"><option value="">全部</option><option value="G">高铁 / 城际</option><option value="D">动车</option><option value="ZTK">普速</option></select></label></div></div>
+            <button class="primary-button quote-submit" data-action="search-quotes" data-quote-type="train">查询车次、座席和余票</button>
+          </section>
+          <div class="feature-results" id="tripToolResults"></div>
+        </div>
+        <article class="trip-approval card" id="tripApproval" hidden>
+          <div><small>共同确认</small><strong id="tripApprovalTitle">最终方案等待确认</strong><span id="tripApprovalMeta">双方确认后正式生效</span></div>
+          <button class="primary-button" data-action="approve-trip" id="approveTripButton">确认最终方案</button>
+        </article>
+        <div class="sticky-trip-actions">
+          <div><small>已选 <b id="mixCount">1</b> 项</small><strong>我们的方案</strong></div>
+          <button data-action="build-plan">生成最终方案</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-screen="timeline">
+      <div class="content timeline-content">
+        <div class="page-title-row"><div><span class="eyebrow ink">MEMORY LANE</span><h1>我们的时光</h1><p id="timelineStats">0 个瞬间 · 0 座城市</p></div><button class="round-add" data-action="new-moment" data-type="回忆">＋</button></div>
+        <details class="smart-disclosure">
+          <summary><span><b>问恋屿整理回忆</b><small>按年份、城市或主题查看共同内容</small></span></summary>
+          <section class="smart-panel" data-smart="timeline" aria-label="时光智能编排"></section>
+        </details>
+        <div class="timeline-viewbar" id="timelineView">
+          <div class="segmented timeline-tabs"><button class="active" data-view="list">时间线</button><button data-view="album">月相册</button><button data-view="map">足迹</button></div>
+          <details class="timeline-more">
+            <summary>更多</summary>
+            <div class="timeline-more-menu"><button data-view="report">年度报告</button><button data-view="private">仅我可见</button><button data-view="trash">回收站</button></div>
+          </details>
+        </div>
+        <div id="timelineBody">
+          <article class="empty-state card"><h3>正在读取恋爱时间线</h3><p>这里只会显示当前情侣空间中的真实内容。</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-screen="life">
+      <div class="content life-content">
+        <div class="page-title-row life-title"><div><span class="eyebrow ink">LIFE TOGETHER</span><h1 id="lifePageTitle">我们</h1><p id="lifePageSubtitle">把想做的事，一件件变成回忆</p></div><button class="settings" data-action="open-profile">⚙</button></div>
+        <nav class="section-tabs" aria-label="共同生活功能页">
+          <button class="active" data-life-section="overview">总览</button><button data-life-section="meals">点菜</button><button data-life-section="wishlist">愿望</button><button data-life-section="calendar">日历</button><button data-life-section="anniversary">纪念日</button><button data-life-section="todo">待办</button><button data-life-section="preference">偏好</button><button data-life-section="dates">约会</button>
+        </nav>
+        <div data-life-panel="overview">
+          <details class="smart-disclosure">
+            <summary><span><b>问恋屿整理共同生活</b><small>所有写入都会先预览，再由你们确认</small></span></summary>
+            <section class="smart-panel" data-smart="life" aria-label="共同生活智能编排"></section>
+          </details>
+          <div class="couple-card card">
+            <div class="couple-avatars"><span class="avatar avatar-a xl">♡</span><span class="heart-link">♡</span><span class="avatar avatar-b xl">♡</span></div>
+            <h2>我们的共同空间</h2><p>账号数据加载后显示真实信息</p>
+            <div class="couple-stats"><span><b id="momentCount">0</b>瞬间</span><span><b id="wishCount">0</b>愿望</span><span><b id="cityCount">0</b>城市</span></div>
+          </div>
+          <div class="section-heading compact"><h2>共同生活</h2><button data-action="add-life">＋ 添加</button></div>
+          <div class="life-grid life-core-actions">
+            <button data-life-section="calendar"><span class="life-icon wine">◇</span><strong>共享日历</strong><small>查看事件与安排</small></button>
+            <button data-life-section="wishlist"><span class="life-icon sage">✓</span><strong>愿望清单</strong><small id="lifeWishlistCount">查看共同愿望</small></button>
+            <button data-life-section="meals"><span class="life-icon sand">♨</span><strong>今天想吃</strong><small id="lifeMealSummary">菜谱、点菜与采购</small></button>
+            <button data-life-section="preference"><span class="life-icon sand">✎</span><strong>懂你备忘</strong><small>口味、尺码与礼物</small></button>
+          </div>
+          <details class="compact-more life-more">
+            <summary><span><b>更多与设置</b><small>纪念日、待办、约会、通知和隐私</small></span></summary>
+            <div class="compact-more-body">
+              <div class="life-grid life-more-actions">
+                <button data-life-section="anniversary"><span class="life-icon rose">♡</span><strong>纪念日</strong><small>查看每年纪念日</small></button>
+                <button data-life-section="todo"><span class="life-icon wine">✓</span><strong>共同待办</strong><small>一起完成的小事</small></button>
+                <button data-action="open-weekly"><span class="life-icon rose">⌁</span><strong>每周回顾</strong><small>一起回看这一周</small></button>
+                <button data-life-section="dates"><span class="life-icon sage">✦</span><strong>智能约会</strong><small>五套方案一起投票</small></button>
+                <button data-action="install-app"><span class="life-icon wine">⌂</span><strong>添加到主屏幕</strong><small>像 App 一样打开恋屿</small></button>
+                <button data-action="enable-notifications"><span class="life-icon sand">◌</span><strong>消息与来电提醒</strong><small id="notificationSummary">仅在此设备授权</small></button>
+              </div>
+              <div class="privacy-entry card" data-action="privacy-center"><span>⌾</span><div class="grow"><strong>隐私与共同空间</strong><small>私密内容、延时公开、设备管理</small></div><b>›</b></div>
+              <button class="secondary-button account-logout" data-action="logout">退出当前账号</button>
+            </div>
+          </details>
+        </div>
+        <div data-life-panel="dates">
+          <div class="subpage-heading"><div><span class="eyebrow ink">DATE PLANS</span><h2>智能约会</h2><p>生成五套方案、双方投票并共同确认。</p></div><button data-action="new-date">＋ 新约会</button></div>
+          <section class="date-plan-list" id="datePlanList"></section>
+        </div>
+        <div data-life-panel="meals" id="mealWorkspace">
+          <div class="subpage-heading"><div><span class="eyebrow ink">COOK TOGETHER</span><h2>今天想吃什么</h2><p>一方点菜，两个人确认日期和餐次，再自动整理采购食材。</p></div><button data-action="new-meal-wish">＋ 想吃</button></div>
+          <nav class="meal-tabs" aria-label="点菜功能页">
+            <button class="active" data-meal-section="recipes">菜谱</button><button data-meal-section="wishes">想吃清单</button><button data-meal-section="calendar">用餐日历</button><button data-meal-section="shopping">采购清单</button>
+          </nav>
+          <p class="meal-status-note" id="mealStatusNote">正在读取两个人的点菜安排…</p>
+
+          <section data-meal-panel="recipes">
+            <form id="recipeSearchForm" class="meal-search">
+              <input id="recipeSearchInput" maxlength="80" placeholder="搜索菜名，例如：番茄牛腩、意大利面">
+              <select id="recipeCuisine"><option value="">全部菜系</option><option value="chinese">中餐</option><option value="western">西餐</option></select>
+              <select id="recipeMealSlot"><option value="">全部餐次</option><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option></select>
+              <select id="recipeDifficulty"><option value="">全部难度</option><option value="easy">简单</option><option value="medium">适中</option><option value="hard">进阶</option></select>
+              <select id="recipeMaxMinutes"><option value="">不限用时</option><option value="20">20 分钟内</option><option value="40">40 分钟内</option><option value="60">60 分钟内</option></select>
+              <button>搜索</button>
+            </form>
+            <div class="meal-toolbar"><button data-action="new-custom-recipe">＋ 自建菜谱</button><button data-action="ai-recipe">✦ 智能生成</button><label class="online-recipe-source">在线来源<select id="onlineRecipeProvider" aria-label="在线菜谱来源"><option value="tianapi">中文菜谱（天聚数行）</option><option value="spoonacular">中西餐补充（Spoonacular）</option><option value="themealdb">开放国际菜谱（TheMealDB）</option></select></label><button data-action="online-recipe">⌕ 在线找菜谱</button></div>
+            <div class="recipe-grid" id="recipeList"></div>
+          </section>
+
+          <section data-meal-panel="wishes" hidden>
+            <div class="meal-section-head"><div><h3>想吃清单</h3><p>还没确定日期的菜先放这里，双方都能看到。</p></div><button data-action="new-meal-wish">＋ 添加</button></div>
+            <div class="meal-list" id="mealWishList"></div>
+          </section>
+
+          <section data-meal-panel="calendar" hidden>
+            <div class="meal-section-head"><div><h3>用餐日历</h3><p>按日期排开，早、中、晚三餐清楚归档。</p></div><div class="calendar-nav"><button data-action="meal-prev-period" aria-label="上一段">‹</button><strong id="mealCalendarTitle"></strong><button data-action="meal-next-period" aria-label="下一段">›</button></div></div>
+            <div class="meal-toolbar"><button data-action="meal-calendar-view" data-view="week">周视图</button><button data-action="meal-calendar-view" data-view="month">月视图</button><button data-action="meal-today">今天</button><button data-action="archive-meal-cart">归档已完成</button></div>
+            <div class="meal-calendar" id="mealCalendar"></div>
+            <div class="meal-day-list" id="mealDayList"></div>
+          </section>
+
+          <section data-meal-panel="shopping" hidden>
+            <div class="meal-section-head"><div><h3>采购清单</h3><p>根据已确认菜单按人数汇总，手动修改的数量不会被覆盖。</p></div><button data-action="preview-shopping">生成清单</button></div>
+            <div class="meal-toolbar"><button data-action="new-shopping-item">＋ 临时食材</button><button data-action="complete-shopping">完成采购</button></div>
+            <div class="shopping-list" id="shoppingList"></div>
+          </section>
+        </div>
+        <div data-life-panel="calendar anniversary todo preference" id="lifeRecordsPanel">
+          <div class="subpage-heading"><div><span class="eyebrow ink" id="lifeSectionEyebrow">SHARED CALENDAR</span><h2 id="lifeSectionTitle">共享日历</h2><p id="lifeSectionDescription">查看和管理两个人的共同安排。</p></div><button id="lifeSectionAdd" data-action="open-calendar">＋ 添加</button></div>
+          <section class="life-data-list" id="lifeDataList"></section>
+        </div>
+        <article class="wishlist card" data-life-panel="wishlist"></article>
+      </div>
+    </section>
+
+    <nav class="bottom-nav" aria-label="主导航">
+      <button class="active" data-nav="home"><span>⌂</span><small>首页</small></button>
+      <button data-nav="chat"><span>◌</span><small>消息</small><i class="nav-dot"></i></button>
+      <button data-nav="trip"><span>⌁</span><small>旅行</small></button>
+      <button data-nav="timeline"><span>◇</span><small>时光</small></button>
+      <button data-nav="life"><span>♡</span><small>我们</small></button>
+    </nav>
+  </main>
+
+  <div class="modal" id="itineraryDetailModal" role="dialog" aria-modal="true" aria-labelledby="itineraryDetailTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet itinerary-detail-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink">ITINERARY DETAIL</span>
+      <div id="itineraryDetailContent"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="sharedDetailModal" role="dialog" aria-modal="true" aria-labelledby="sharedDetailTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet shared-detail-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink" id="sharedDetailKind">OUR SHARED STORY</span>
+      <div id="sharedDetailContent" role="status"></div>
+      <section class="shared-comment-section" aria-labelledby="sharedCommentHeading">
+        <div class="shared-comment-heading"><div><h3 id="sharedCommentHeading">两个人的评论</h3><p>评论保存在共同空间，情侣双方登录后都能看到。</p></div><span id="sharedCommentCount">0 条</span></div>
+        <div id="sharedCommentList" class="shared-comment-list"></div>
+        <form id="sharedCommentForm" class="shared-comment-form">
+          <textarea id="sharedCommentBody" maxlength="1000" placeholder="写下想和 TA 说的话…" required></textarea>
+          <button class="primary-button">发送评论</button>
+        </form>
+      </section>
+    </div>
+  </div>
+
+  <div class="modal" id="assistantPlanModal" role="dialog" aria-modal="true" aria-labelledby="assistantPlanTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet assistant-plan-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink">OUR PLAN</span>
+      <div id="assistantPlanContent" role="status"><h2 id="assistantPlanTitle">共同方案</h2><p>正在读取方案…</p></div>
+    </div>
+  </div>
+
+  <div class="modal" id="notificationCenterModal" role="dialog" aria-modal="true" aria-labelledby="notificationCenterTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet notification-center-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <div class="notification-center-heading"><div><span class="eyebrow ink">INBOX</span><h2 id="notificationCenterTitle">通知中心</h2></div><button data-action="read-all-notifications">全部已读</button></div>
+      <p class="form-note">这里是不会因 Web Push 未送达而丢失的应用内收件箱。</p>
+      <div id="notificationCenterList" class="notification-center-list" role="status"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="recipeDetailModal" role="dialog" aria-modal="true" aria-labelledby="recipeDetailTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">RECIPE</span><div id="recipeDetailContent"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="mealScheduleModal" role="dialog" aria-modal="true" aria-labelledby="mealScheduleTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">ADD TO CALENDAR</span><h2 id="mealScheduleTitle">安排这道菜</h2>
+      <form id="mealScheduleForm">
+        <input id="mealScheduleRecipeId" type="hidden"><input id="mealScheduleWishId" type="hidden">
+        <label class="field"><span>日期</span><input id="mealScheduleDate" type="date" required></label>
+        <div class="two-fields"><label class="field"><span>餐次</span><select id="mealScheduleSlot"><option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner" selected>晚餐</option><option value="snack">加餐</option></select></label><label class="field"><span>人数</span><input id="mealScheduleServings" type="number" min="1" max="20" value="2" required></label></div>
+        <div class="two-fields"><label class="field"><span>时间（可选）</span><input id="mealScheduleTime" type="time"></label><label class="field"><span>菜品类型</span><select id="mealScheduleCourse"><option value="staple">主食</option><option value="main" selected>主菜</option><option value="side">配菜</option><option value="soup">汤</option><option value="dessert">甜点</option><option value="drink">饮品</option></select></label></div>
+        <label class="field"><span>备注</span><textarea id="mealScheduleNote" maxlength="1000" placeholder="少辣、不要香菜……"></textarea></label>
+        <button class="primary-button">加入点菜车和用餐日历</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="mealWishModal" role="dialog" aria-modal="true" aria-labelledby="mealWishTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">WANT TO EAT</span><h2 id="mealWishTitle">添加想吃的东西</h2>
+      <form id="mealWishForm"><input id="mealWishRecipeId" type="hidden"><label class="field"><span>想吃什么</span><input id="mealWishName" maxlength="100" required></label><label class="field"><span>备注</span><textarea id="mealWishNote" maxlength="1000" placeholder="想什么时候吃、口味偏好……"></textarea></label><button class="primary-button">保存到两个人的清单</button></form>
+    </div>
+  </div>
+
+  <div class="modal" id="mealWishRecipeModal" role="dialog" aria-modal="true" aria-labelledby="mealWishRecipeTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink">CHOOSE A RECIPE</span>
+      <h2 id="mealWishRecipeTitle">给想吃的菜选择做法</h2>
+      <p class="form-note" id="mealWishRecipeNote">选择后两个人都能查看做法、安排日期并生成采购食材。</p>
+      <form id="mealWishRecipeSearchForm" class="meal-wish-recipe-search">
+        <input id="mealWishRecipeSearch" maxlength="80" placeholder="输入菜名，例如：煎牛排" required>
+        <button>搜索菜谱</button>
+      </form>
+      <div class="meal-wish-recipe-results" id="mealWishRecipeResults" role="status"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="customRecipeModal" role="dialog" aria-modal="true" aria-labelledby="customRecipeTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">MY RECIPE</span><h2 id="customRecipeTitle">创建中文菜谱</h2>
+      <form id="customRecipeForm">
+        <div class="two-fields"><label class="field"><span>菜品名称</span><input id="customRecipeDishName" maxlength="100" required placeholder="例如：红烧肉"></label><label class="field"><span>这份做法名称</span><input id="customRecipeVariantName" maxlength="100" value="经典做法" required placeholder="例如：少油家常版"></label></div>
+        <label class="field"><span>展示名称</span><input id="customRecipeName" maxlength="100" required placeholder="例如：红烧肉（少油家常版）"></label>
+        <div class="two-fields"><label class="field"><span>主要烹饪方式</span><input id="customRecipeCookingMethod" maxlength="100" value="经典做法" required placeholder="红烧、清蒸、烘烤……"></label><label class="field"><span>做法标签（顿号或逗号分隔）</span><input id="customRecipeMethodTags" maxlength="200" placeholder="少油、家常、免油炸"></label></div>
+        <div class="two-fields"><label class="field"><span>菜系</span><select id="customRecipeCuisine"><option value="chinese">中餐</option><option value="western">西餐</option></select></label><label class="field"><span>分类</span><input id="customRecipeCategory" value="家常菜" maxlength="50"></label></div>
+        <div class="two-fields"><label class="field"><span>基础人数</span><input id="customRecipeServings" type="number" min="1" max="20" value="2"></label><label class="field"><span>准备与烹饪（分钟）</span><input id="customRecipeMinutes" type="number" min="1" max="1440" value="30"></label></div>
+        <label class="field"><span>额外等待（分钟）</span><input id="customRecipePassiveMinutes" type="number" min="0" max="10080" value="0"><small>填写浸泡、腌制、发酵、冷藏或放凉时间；页面会与实际动手时间分开显示。</small></label>
+        <label class="field"><span>食材（每行：名称 | 数量 | 单位 | 处理方法）</span><textarea id="customRecipeIngredients" required placeholder="番茄 | 2 | 个 | 去蒂切成 2 厘米块&#10;鸡蛋 | 3 | 个 | 充分打散&#10;盐 | 2 | 克 | 提前称好"></textarea></label>
+        <label class="field"><span>做法（每行：标题 | 做法 | 火力 | 分钟 | 完成判断）</span><textarea id="customRecipeSteps" required placeholder="备料 | 番茄切块，鸡蛋打散并加入盐 1 克 | 无需加热 | 5 | 食材切配和调料称量完成&#10;炒鸡蛋 | 锅中加油 10 毫升，倒入蛋液推炒 | 中火 | 2 | 蛋液刚凝固、表面仍湿润时盛出"></textarea></label>
+        <label class="field"><span>准确成品图</span><input id="customRecipeCover" type="file" accept="image/jpeg,image/png,image/webp,image/gif"><small>新建菜谱必须上传；图片必须就是上面填写的菜品和这种做法，不能使用相似菜或菜系示意图。</small></label>
+        <label class="check-field"><input id="customRecipeCoverExact" type="checkbox"><span>我已确认图片与当前菜品及做法版本一致</span></label>
+        <label class="field"><span>可见范围</span><select id="customRecipeVisibility"><option value="couple">双方可见</option><option value="private">仅自己可见</option></select></label>
+        <button class="primary-button">保存菜谱</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="recipeVideoModal" role="dialog" aria-modal="true" aria-labelledby="recipeVideoTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">DOMESTIC VIDEO</span><h2 id="recipeVideoTitle">添加做菜视频</h2>
+      <form id="recipeVideoForm">
+        <input id="recipeVideoRecipeId" type="hidden">
+        <label class="field"><span>国内平台链接</span><input id="recipeVideoUrl" type="url" required placeholder="哔哩哔哩、抖音或小红书链接"></label>
+        <label class="field"><span>视频标题</span><input id="recipeVideoName" maxlength="160" required></label>
+        <div class="two-fields"><label class="field"><span>用途</span><select id="recipeVideoRole"><option value="reference">参考视频</option><option value="paired">配套教学</option></select></label><label class="field"><span>与本菜谱匹配度</span><input id="recipeVideoScore" type="number" min="0" max="100" value="70" required><small>配套教学至少 80%</small></label></div>
+        <label class="field"><span>差异说明</span><textarea id="recipeVideoDifferences" maxlength="1000" placeholder="每行一项，例如：视频使用 500 克肉，本菜谱使用 400 克"></textarea></label>
+        <label class="check-field"><input id="recipeVideoIngredientsChecked" type="checkbox"><span>已逐项核对主要食材和调料用量</span></label>
+        <label class="check-field"><input id="recipeVideoStepsChecked" type="checkbox"><span>已核对备菜顺序、火力和关键步骤</span></label>
+        <button class="primary-button">保存视频链接</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="shoppingPreviewModal" role="dialog" aria-modal="true" aria-labelledby="shoppingPreviewTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SHOPPING PREVIEW</span><h2 id="shoppingPreviewTitle">确认采购范围</h2><div class="two-fields"><label class="field"><span>开始日期</span><input id="shoppingRangeStart" type="date"></label><label class="field"><span>结束日期</span><input id="shoppingRangeEnd" type="date"></label></div><button class="secondary-button" data-action="build-shopping-preview">查看变更预览</button><div id="shoppingPreviewContent"></div><button class="primary-button" id="applyShoppingPreview" data-action="apply-shopping-preview" hidden>确认生成采购清单</button></div>
+  </div>
+
+  <div class="modal" id="shoppingItemModal" role="dialog" aria-modal="true" aria-labelledby="shoppingItemTitle" aria-hidden="true">
+    <div class="sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">ADD INGREDIENT</span><h2 id="shoppingItemTitle">添加临时食材</h2><form id="shoppingItemForm"><label class="field"><span>食材</span><input id="shoppingItemName" maxlength="80" required></label><div class="two-fields"><label class="field"><span>数量</span><input id="shoppingItemQuantity" type="number" min="0" step="0.1" value="1"></label><label class="field"><span>单位</span><select id="shoppingItemUnit"><option>个</option><option>克</option><option>千克</option><option>毫升</option><option>升</option><option>包</option><option>盒</option><option>份</option></select></label></div><label class="field"><span>分类</span><input id="shoppingItemCategory" value="其他" maxlength="30"></label><button class="primary-button">添加到采购清单</button></form></div>
+  </div>
+
+  <div class="modal" id="momentModal" role="dialog" aria-modal="true" aria-labelledby="momentModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SAVE THIS MOMENT</span><h2 id="momentModalTitle">记录这一刻</h2>
+      <label class="field"><span>标题</span><input id="momentTitle" maxlength="200" required placeholder="给这段回忆一个名字"></label>
+      <label class="field"><span>想说的话</span><textarea id="momentNote" maxlength="5000" placeholder="此刻的心情、声音、气味……"></textarea></label>
+      <div class="two-fields"><label class="field"><span>发生时间</span><input id="momentOccurredAt" type="datetime-local" required></label><label class="field"><span>地点（可选）</span><input id="momentLocation" maxlength="200" placeholder="例如：杭州西湖"></label></div>
+      <label class="field"><span>心情（可选）</span><input id="momentMood" maxlength="50" placeholder="例如：开心、想念、感动"></label>
+      <label class="field" id="momentMediaField"><span>照片、语音或短视频（可选）</span><input id="momentMedia" type="file" accept="image/jpeg,image/png,image/gif,image/webp,audio/*,video/mp4,video/webm,video/quicktime"></label>
+      <div class="privacy-options"><button class="active" data-privacy="双方可见">双方可见</button><button data-privacy="仅自己">仅自己</button><button data-privacy="延时公开">延时公开</button></div>
+      <label class="field" id="revealField" hidden><span>公开时间</span><input id="momentRevealAt" type="datetime-local"></label>
+      <button class="primary-button" id="momentSubmitButton" data-action="save-moment">保存到我们的时光</button>
+    </div>
+  </div>
+
+  <div class="modal" id="statusModal" role="dialog" aria-modal="true" aria-labelledby="statusModalTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">OUR LITTLE SIGNAL</span><h2 id="statusModalTitle">分享我的此刻</h2>
+      <form id="statusForm">
+        <label class="field"><span>状态</span><select id="statusCode"><option value="miss_you">♡ 想你了</option><option value="busy">◷ 忙碌中</option><option value="moving">↗ 在路上</option><option value="home">⌂ 已到家</option><option value="happy">☺ 心情不错</option><option value="quiet">☁ 想安静一下</option><option value="custom">✦ 自定义</option></select></label>
+        <label class="field"><span>补充一句（可选）</span><input id="statusText" maxlength="60" placeholder="让 TA 知道你现在怎么样"></label>
+        <label class="field"><span>保留时间</span><select id="statusDuration"><option value="2">2 小时</option><option value="8">8 小时</option><option value="24">24 小时</option><option value="0">一直保留</option></select></label>
+        <button class="primary-button">同步给 TA</button>
+      </form>
+      <button class="secondary-button" data-action="clear-status">清除我的状态</button>
+      <button class="secondary-button" data-action="edit-location">设置我的城市与时区</button>
+    </div>
+  </div>
+
+  <div class="modal" id="locationModal" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">LOCAL TIME & WEATHER</span><h2 id="locationModalTitle">我的常驻城市</h2>
+      <form id="locationForm">
+        <label class="field"><span>城市</span><input id="locationCity" list="cityOptions" maxlength="80" placeholder="例如：上海" required><datalist id="cityOptions"><option value="北京"><option value="上海"><option value="广州"><option value="深圳"><option value="杭州"><option value="成都"><option value="重庆"><option value="南京"><option value="武汉"><option value="西安"><option value="香港"><option value="东京"><option value="伦敦"><option value="纽约"></datalist></label>
+        <label class="field"><span>时区</span><input id="locationTimezone" value="Asia/Shanghai" placeholder="Asia/Shanghai" required></label>
+        <button class="primary-button">保存城市</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="weeklyModal" role="dialog" aria-modal="true" aria-labelledby="weeklyModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">OUR WEEK TOGETHER</span><h2 id="weeklyModalTitle">这一周的我们</h2>
+      <div id="weeklySummary"></div>
+      <form id="weeklyForm">
+        <label class="field"><span>本周最喜欢的一刻</span><textarea id="weeklyFavorite" maxlength="500" required></textarea></label>
+        <label class="field"><span>最想感谢 TA 的一件事</span><textarea id="weeklyGratitude" maxlength="500" required></textarea></label>
+        <label class="field"><span>下周想一起完成什么</span><textarea id="weeklyNext" maxlength="500" required></textarea></label>
+        <button class="primary-button">保存并等待一起揭晓</button>
+      </form>
+      <button class="secondary-button" id="weeklyConfirm" data-action="confirm-weekly">确认本周回顾</button>
+    </div>
+  </div>
+
+  <div class="modal" id="dateModal" role="dialog" aria-modal="true" aria-labelledby="dateModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PLAN OUR DATE</span><h2 id="dateModalTitle">计划下一次约会</h2>
+      <form id="dateForm">
+        <label class="field"><span>约会标题</span><input id="dateTitle" value="我们的下一次约会" maxlength="100" required></label>
+        <div class="two-fields"><label class="field"><span>日期</span><input id="dateDay" type="date" required></label><label class="field"><span>城市</span><input id="dateCity" placeholder="输入约会城市" required></label></div>
+        <div class="two-fields"><label class="field"><span>开始</span><input id="dateStart" type="time" value="14:00" required></label><label class="field"><span>结束</span><input id="dateEnd" type="time" value="21:00" required></label></div>
+        <label class="field"><span>总预算（元）</span><input id="dateBudget" type="number" min="0" max="100000" value="500" required></label>
+        <label class="field"><span>偏好</span><select id="datePreference"><option value="不限">都可以</option><option value="室内">室内为主</option><option value="室外">室外为主</option><option value="美食">美食</option><option value="展览">展览</option><option value="运动">运动</option></select></label>
+        <button class="primary-button">生成五套约会方案</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="editModal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SMART REVISION</span><h2 id="editModalTitle">调整第一天</h2>
+      <form id="tripItemEditForm">
+        <label class="field"><span>地点 / 活动</span><input id="editItemTitle" maxlength="160" required></label>
+        <label class="field"><span>开始时间</span><input id="editItemTime" type="time" required></label>
+        <label class="field"><span>备注</span><textarea id="editItemNote" maxlength="1000"></textarea></label>
+        <button class="secondary-button">检查这次改动的影响</button>
+      </form>
+      <div class="change-preview" id="revisionPreview" hidden><span>你的改动</span><strong id="revisionAfter"></strong><p id="revisionWarnings"></p></div>
+      <button class="primary-button" id="applyRevisionButton" data-action="apply-revision" hidden disabled>确认并保存这次改动</button>
+      <button class="secondary-button" data-action="close-modal">保留我的改动，不更新</button>
+    </div>
+  </div>
+
+  <div class="modal" id="answerModal" role="dialog" aria-modal="true" aria-labelledby="answerModalTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">DAILY QUESTION</span><h2 id="answerModalTitle">写下我的答案</h2>
+      <form id="answerForm">
+        <label class="field"><span>只有双方回答后才会互相解锁</span><textarea id="dailyAnswer" maxlength="1000" placeholder="认真告诉 TA，你现在最想去哪里……" required></textarea></label>
+        <button class="primary-button" id="answerSubmit">提交答案</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="smartConfirmModal" role="dialog" aria-modal="true" aria-labelledby="smartConfirmTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button>
+      <span class="eyebrow ink">REVIEW BEFORE APPLY</span><h2 id="smartConfirmTitle">确认智能建议</h2>
+      <div class="change-preview" id="smartActionPreview"></div>
+      <button class="primary-button" data-action="confirm-smart-action">确认执行</button>
+      <button class="secondary-button" data-action="cancel-smart-action">放弃这个建议</button>
+    </div>
+  </div>
+
+  <div class="modal" id="tripModal" role="dialog" aria-modal="true" aria-labelledby="tripModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PLAN A NEW ESCAPE</span><h2 id="tripModalTitle">创建一段新旅行</h2>
+      <form id="tripForm">
+        <div class="two-fields"><label class="field"><span>从哪里出发</span><input id="tripDepartureCity" maxlength="80" placeholder="例如：杭州" required></label><label class="field"><span>到达城市 / 枢纽</span><input id="tripArrivalCity" maxlength="80" placeholder="例如：上海、东京"></label></div>
+        <div class="destination-search-block">
+          <label class="field destination-search-field"><span>想去哪里</span><div class="destination-input-wrap"><i aria-hidden="true">⌕</i><input id="tripDestination" maxlength="120" placeholder="输入景区、商圈、酒店或车站" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="tripDestinationCandidates" aria-expanded="false" required><small id="tripDestinationSearchState">输入两个字，高德会自动推荐具体地点</small></div></label>
+          <div id="tripDestinationCandidates" class="destination-candidates" role="listbox" aria-label="地点搜索建议" hidden></div>
+        </div>
+        <label class="field destination-region-field"><span>优先搜索的城市或国家 <small>选填，用于区分同名地点</small></span><input id="tripDestinationRegion" maxlength="120" placeholder="例如：上海、东京、法国巴黎"></label>
+        <div class="destination-resolver-actions"><button type="button" class="destination-more-search" data-action="search-destination">没找到合适的？搜索国内外更多地点</button></div>
+        <p class="form-note destination-privacy-note">⌖ 候选来自高德或全球地图。只有你点选的地点才会保存，系统不会擅自采用第一项。</p>
+        <div id="tripDestinationSelection" class="destination-selection" role="status"></div>
+        <div class="two-fields"><label class="field"><span>出发日期</span><input id="tripStart" type="date" required></label><label class="field"><span>返程日期</span><input id="tripEnd" type="date" required></label></div>
+        <div class="two-fields"><label class="field"><span>预计去程时间</span><input id="tripOutboundTime" type="time"></label><label class="field"><span>预计返程时间</span><input id="tripReturnTime" type="time"></label></div>
+        <label class="field"><span>总预算（元）</span><input id="tripBudget" type="number" min="0" max="1000000" value="4000" required></label>
+        <div class="two-fields"><label class="field"><span>出行人数</span><input id="tripTravelers" type="number" min="1" max="20" value="2" required></label><label class="field"><span>房间数</span><input id="tripRooms" type="number" min="1" max="10" value="1" required></label></div>
+        <label class="field"><span>酒店预算（元，可选）</span><input id="tripHotelBudget" type="number" min="0" max="1000000" value="0"></label>
+        <div class="two-fields"><label class="field"><span>旅行节奏</span><select id="tripPace"><option>松弛</option><option>适中</option><option>充实</option></select></label><label class="field"><span>交通偏好</span><select id="tripTransport"><option>公共交通</option><option>自驾</option><option>步行为主</option></select></label></div>
+        <label class="field"><span>兴趣</span><input id="tripInterests" placeholder="摄影、美食、人文、自然"></label>
+        <label class="field"><span>饮食禁忌</span><input id="tripDiet" placeholder="例如：不吃香菜"></label>
+        <label class="field"><span>酒店偏好</span><input id="tripHotel" placeholder="安静、大床房、近地铁"></label>
+        <label class="field"><span>必去地点</span><textarea id="tripMustVisits" placeholder="多个地点可用逗号分隔"></textarea></label>
+        <button class="primary-button">生成五套旅行方案</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="chatImportModal" role="dialog" aria-modal="true" aria-labelledby="chatImportTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">IMPORT & REVIEW</span><h2 id="chatImportTitle">导入外部聊天</h2>
+      <form id="chatImportForm">
+        <label class="field"><span>聊天截图（可选）</span><input id="chatImportImage" type="file" accept="image/jpeg,image/png,image/webp"></label>
+        <label class="field"><span>粘贴或补充聊天文字</span><textarea id="chatImportText" placeholder="12:30 我：到家啦&#10;12:31 对方：路上小心"></textarea></label>
+        <p class="form-note">没有配置 OCR 时会生成明确标识的演示草稿；未经你逐条确认，不会进入共同空间。</p>
+        <button class="primary-button">生成可编辑草稿</button>
+      </form>
+      <div id="chatImportDraft" hidden></div>
+    </div>
+  </div>
+
+  <div class="modal" id="calendarModal" role="dialog" aria-modal="true" aria-labelledby="calendarModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">LIFE TOGETHER</span><h2 id="calendarModalTitle">添加共同事项</h2>
+      <form id="calendarForm">
+        <label class="field"><span>类型</span><select id="calendarType"><option value="event">日历事件</option><option value="anniversary">纪念日</option><option value="todo">双人待办</option></select></label>
+        <label class="field"><span>标题</span><input id="calendarTitle" maxlength="160" required></label>
+        <label class="field"><span>日期</span><input id="calendarStart" type="date" required></label>
+        <label class="field"><span>重复</span><select id="calendarRecurrence"><option value="none">不重复</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
+        <label class="field"><span>地点与备注</span><input id="calendarLocation" placeholder="地点（可选）"><textarea id="calendarNote" placeholder="想一起记住的细节"></textarea></label>
+        <button class="primary-button">保存到共同生活</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="wishlistModal" role="dialog" aria-modal="true" aria-labelledby="wishlistModalTitle" aria-hidden="true">
+    <div class="sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">OUR WISHES</span><h2 id="wishlistModalTitle">添加共同愿望</h2>
+      <form id="wishlistForm">
+        <label class="field"><span>想一起完成什么</span><input id="wishlistText" maxlength="300" required></label>
+        <label class="field"><span>备注</span><textarea id="wishlistNote" maxlength="1000" placeholder="时间、地点或想记住的细节"></textarea></label>
+        <button class="primary-button">保存共同愿望</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="preferenceModal" role="dialog" aria-modal="true" aria-labelledby="preferenceModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">KNOW YOU BETTER</span><h2 id="preferenceModalTitle">记录一条偏好</h2>
+      <form id="preferenceForm">
+        <label class="field"><span>记录谁的偏好</span><select id="preferenceSubject"></select></label>
+        <label class="field"><span>分类</span><select id="preferenceCategory"><option>口味</option><option>尺码</option><option>过敏</option><option>礼物</option><option>习惯</option><option>其他</option></select></label>
+        <label class="field"><span>名称</span><input id="preferenceLabel" placeholder="例如：奶茶甜度" required></label>
+        <label class="field"><span>内容</span><input id="preferenceValue" placeholder="例如：三分糖" required></label>
+        <label class="field"><span>备注</span><textarea id="preferenceNote"></textarea></label>
+        <button class="primary-button">保存偏好</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="accountModal" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet">
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PRIVACY & DEVICES</span><h2 id="accountModalTitle">账号与共同空间</h2>
+      <div id="accountIdentityCard" class="account-identity-card" aria-live="polite"></div>
+      <p class="form-note account-session-note">同一浏览器的普通标签页会共享登录账号；切换账号后，其他标签页会自动同步刷新。需要两人同时登录时，请使用两台设备，或一个普通窗口加一个无痕窗口。</p>
+      <div id="deviceList" class="device-list"></div>
+      <section class="push-settings" aria-labelledby="pushSettingsTitle">
+        <h3 id="pushSettingsTitle">消息与来电提醒</h3>
+        <p id="pushStatus" class="push-status">正在检查当前设备…</p>
+        <div class="push-settings-actions">
+          <button class="secondary-button" id="pushEnableButton" data-action="enable-notifications">开启提醒</button>
+          <button class="secondary-button" id="pushTestButton" data-action="test-notification" hidden>发送测试通知</button>
+          <button class="secondary-button danger-text" id="pushDisableButton" data-action="disable-notifications" hidden>关闭此设备提醒</button>
+        </div>
+        <p class="form-note">iPhone/iPad 需 iOS/iPadOS 16.4 以上、先添加到主屏幕并使用 HTTPS。聊天、共同留言和来电只显示通用隐私文案，点击后进入对应页面；来电不是系统全屏 CallKit。</p>
+      </section>
+      <form id="changePasswordForm" class="account-password-form">
+        <h3>更换登录密码</h3>
+        <label class="field"><span>当前密码</span><input id="currentPassword" type="password" autocomplete="current-password" required></label>
+        <label class="field"><span>新密码</span><input id="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+        <label class="field"><span>再次输入新密码</span><input id="confirmNewPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+        <button class="secondary-button">保存新密码</button>
+        <p class="form-note">更换成功后，除当前设备外的登录会自动失效。</p>
+      </form>
+      <section class="account-media-section" aria-labelledby="accountMediaTitle">
+        <h3 id="accountMediaTitle">私有媒体库</h3>
+        <p class="form-note">原图和缩略图都需要登录及情侣权限。只能清理自己上传且未被消息、瞬间使用的文件。</p>
+        <div id="accountMediaList" class="account-media-list"></div>
+        <details class="account-media-trash"><summary>图片回收站</summary><div id="accountMediaTrash" class="account-media-list"></div></details>
+      </section>
+      <a class="admin-entry" href="/admin"><span>◇</span><div><strong>自用后台与异常检测</strong><small>管理员账号可查看运行、备份、设备和安全状态</small></div><b>›</b></a>
+      <button class="primary-button" data-action="export-account">下载完整 ZIP 数据</button>
+      <p class="form-note">导出包含你有权访问的 JSON 与媒体，不包含密码、会话令牌或对方的私密内容。</p>
+      <button class="secondary-button danger-text" data-action="unlink-couple">解除情侣关系</button>
+      <button class="secondary-button danger-text" data-action="delete-account">注销我的账号</button>
+    </div>
+  </div>
+
+  <div class="call-screen" id="callScreen" role="dialog" aria-modal="true" aria-labelledby="callTitle" aria-hidden="true">
+    <div class="call-glow"></div><span class="eyebrow">LOVE CALL</span><div class="avatar avatar-b call-avatar">♡</div><h2 id="callTitle">伴侣</h2><p id="callStatus">正在连接安全通话…</p><strong id="callTimer">00:00</strong>
+    <audio id="remoteCallAudio" autoplay playsinline></audio>
+    <div class="call-controls incoming-call-controls" id="incomingCallControls" hidden><button class="accept-call" data-action="accept-call">✓<small>接听</small></button><button class="hangup" data-action="decline-call">×<small>拒绝</small></button></div>
+    <div class="call-controls" id="activeCallControls"><button data-action="mute">⌁<small>静音</small></button><button data-action="speaker">◖<small>扬声器</small></button><button class="hangup" data-action="end-call">×<small>挂断</small></button></div>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/vendor/agora-rtc-sdk-ng-4.24.8.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

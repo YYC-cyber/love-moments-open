@@ -1,0 +1,128 @@
+name: Love Moments CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: love-moments-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend, data contracts and docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Reject private files and likely credentials
+        run: python scripts/check_repo_safety.py
+      - name: Compile Python sources
+        run: python -m compileall -q main.py love_moments scripts tests
+      - name: Run backend tests
+        run: python -m unittest discover -s tests -v
+      - name: Audit recipe catalog
+        run: python scripts/audit_recipe_catalog.py
+      - name: Verify documentation links
+        run: python scripts/check_docs.py
+
+  frontend:
+    name: Web and mobile type safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check all TypeScript workspaces
+        run: pnpm typecheck
+      - name: Build React Web
+        run: pnpm build:web
+      - name: Check browser JavaScript syntax
+        run: node --check static/app.js && node --check static/admin.js && node --check sw.js
+      - name: Test Web Push service worker
+        run: pnpm test:push
+
+  browser:
+    name: Isolated two-account browser flow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [backend, frontend]
+    env:
+      PYTHON_BINARY: python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+      - name: Run clean two-account end-to-end flow
+        run: pnpm test:browser
+
+  live-rtc:
+    name: Optional Shengwang live RTC
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [backend, frontend]
+    env:
+      PYTHON_BINARY: python
+      RTC_PROVIDER: shengwang
+      SHENGWANG_APP_ID: ${{ secrets.SHENGWANG_APP_ID }}
+      SHENGWANG_APP_CERTIFICATE: ${{ secrets.SHENGWANG_APP_CERTIFICATE }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Skip when RTC secrets are not configured
+        if: ${{ env.SHENGWANG_APP_ID == '' || env.SHENGWANG_APP_CERTIFICATE == '' }}
+        run: echo "RTC repository secrets are not configured; live audio test skipped safely."
+      - name: Install live RTC dependencies
+        if: ${{ env.SHENGWANG_APP_ID != '' && env.SHENGWANG_APP_CERTIFICATE != '' }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+      - name: Run two-browser live RTC audit
+        if: ${{ env.SHENGWANG_APP_ID != '' && env.SHENGWANG_APP_CERTIFICATE != '' }}
+        run: pnpm test:rtc

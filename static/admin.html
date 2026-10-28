@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#6f2637">
+  <meta name="color-scheme" content="light">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="format-detection" content="telephone=no">
+  <title>恋屿 · 自用后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%237d2638'/%3E%3Cpath d='M18 15v34h29v-8H27V15z' fill='%23fff8f2'/%3E%3C/svg%3E">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/love-moments-icon-180.png">
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="返回恋屿"><span>L</span><div><strong>恋屿后台</strong><small>PRIVATE SELF-HOSTED CONSOLE</small></div></a>
+    <div class="top-actions"><button id="refreshButton">重新体检</button><button class="primary" id="backupButton">立即备份</button></div>
+  </header>
+
+  <main class="dashboard" id="dashboard" aria-live="polite">
+    <section class="hero-panel">
+      <div><span class="eyebrow">SYSTEM OVERVIEW</span><h1>两个人的小岛，<br>也要被好好照看。</h1><p id="privacyNotice">后台只展示运行状态，不读取你们的私密内容。</p></div>
+      <div class="overall" id="overallStatus"><i></i><strong>正在检查</strong><small>请稍候…</small></div>
+    </section>
+
+    <section class="check-grid" id="checkGrid" aria-label="健康检查"></section>
+
+    <section class="metric-grid" id="metricGrid" aria-label="运行统计"></section>
+
+    <div class="two-column">
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">STORAGE GOVERNANCE</span><h2>媒体容量与完整性</h2></div><span class="soft-badge" id="storageGrowth">正在计算</span></div>
+        <div id="storageUsage" class="stack-list"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">MAINTENANCE</span><h2>守护与每日维护</h2></div><span class="soft-badge">本机免费能力</span></div>
+        <div id="maintenanceState" class="stack-list"></div>
+      </section>
+    </div>
+
+    <div class="two-column">
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">CONFIGURATION</span><h2>能力状态</h2></div><span class="soft-badge">不显示密钥</span></div>
+        <div class="config-grid" id="configGrid"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">BACKUPS</span><h2>安全备份</h2></div><span class="soft-badge" id="backupCount">0 份</span></div>
+        <div id="backupList" class="stack-list"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-title"><div><span class="eyebrow">FREE QUOTA GUARD</span><h2>外部接口安全额度</h2></div><span class="soft-badge">80% 预警 · 100% 自动停止</span></div>
+      <p class="panel-note">只统计由这台恋屿服务器发出的真实请求；缓存和模拟数据不扣次数。若同一密钥还在别处使用，请把这里的上限设置得更低。</p>
+      <div id="quotaUsage" class="quota-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><div><span class="eyebrow">ANOMALIES</span><h2>异常与提醒</h2></div><span class="soft-badge" id="eventCount">0 项待处理</span></div>
+      <div id="eventList" class="stack-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><div><span class="eyebrow">RESTORE GUIDE</span><h2>安全恢复说明</h2></div><span class="soft-badge">恢复前必须停服</span></div>
+      <ol id="restoreInstructions" class="restore-steps"></ol>
+    </section>
+
+    <div class="two-column">
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">ACCOUNTS</span><h2>账号概览</h2></div><span class="soft-badge">仅元数据</span></div>
+        <div id="userList" class="stack-list"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><div><span class="eyebrow">DEVICES</span><h2>设备会话</h2></div><span class="soft-badge">最多 50 条</span></div>
+        <div id="sessionList" class="stack-list"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-title"><div><span class="eyebrow">AUDIT TRAIL</span><h2>最近操作记录</h2></div><span class="soft-badge">不含正文</span></div>
+      <div id="auditList" class="audit-grid"></div>
+    </section>
+
+    <section class="mobile-guide panel">
+      <div><span class="eyebrow">MOBILE READY</span><h2>手机与平板使用</h2></div>
+      <div class="guide-grid">
+        <article><b>Android / 电脑</b><p>使用 Chrome 或 Edge 打开 HTTPS 地址，菜单中选择“安装应用”或“添加到主屏幕”。</p></article>
+        <article><b>iPhone / iPad</b><p>使用 Safari 打开 HTTPS 地址，点击“共享”→“添加到主屏幕”，再到恋屿账号页开启提醒。锁屏可收到消息、共同留言和普通来电提醒；点击后进入对应页面，来电不是 CallKit 全屏界面。</p></article>
+        <article><b>异地访问</b><p>保持服务器电脑和穿透服务在线，关闭电脑自动休眠，并确保后台的“手机安全连接”为正常。</p></article>
+      </div>
+    </section>
+  </main>
+
+  <section class="access-state" id="accessState" hidden>
+    <div><span class="access-icon">◇</span><h1 id="accessTitle">无法打开后台</h1><p id="accessMessage">请先登录管理员账号。</p><a href="/">返回恋屿登录</a></div>
+  </section>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/admin.js" defer></script>
+</body>
+</html>
