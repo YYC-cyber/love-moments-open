@@ -157,14 +157,25 @@
       <div class="content chat-content">
         <div class="page-title-row">
           <div><span class="eyebrow ink">JUST BETWEEN US</span><h1>伴侣</h1><small class="presence">○ 正在读取连接状态</small></div>
-          <div class="header-actions"><button data-action="import-chat" aria-label="导入聊天">⇩</button><button data-action="start-call" aria-label="语音通话">☎</button></div>
+          <div class="header-actions"><button data-action="toggle-chat-search" aria-label="搜索聊天记录">⌕</button><button data-action="import-chat" aria-label="导入聊天">⇩</button><button data-action="start-call" aria-label="语音通话">☎</button></div>
         </div>
+        <section class="chat-search-panel" id="chatSearchPanel" hidden aria-label="搜索聊天记录">
+          <form id="chatSearchForm">
+            <input id="chatSearchInput" type="search" maxlength="100" autocomplete="off" placeholder="搜索聊天关键词" aria-label="聊天关键词">
+            <button type="submit">搜索</button>
+            <button type="button" data-action="close-chat-search" aria-label="关闭搜索">×</button>
+          </form>
+          <div class="chat-search-results" id="chatSearchResults" aria-live="polite"></div>
+        </section>
         <details class="smart-disclosure">
           <summary><span><b>问恋屿</b><small>整理对话、收藏回忆或生成共同事项</small></span></summary>
           <section class="smart-panel" data-smart="chat" aria-label="消息智能编排"></section>
         </details>
-        <div class="messages" id="messages">
-          <div class="message system">正在读取你们的真实消息…</div>
+        <div class="chat-message-stage">
+          <div class="messages" id="messages" tabindex="0" aria-label="聊天记录">
+            <div class="message system">正在读取你们的真实消息…</div>
+          </div>
+          <button class="chat-new-messages" id="chatNewMessages" data-action="jump-latest-messages" hidden>有新消息 ↓</button>
         </div>
         <div class="chat-compose-dock" aria-label="消息输入区">
           <div class="chat-suggestions">

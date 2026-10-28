@@ -1255,6 +1255,23 @@ class HttpApiTests(unittest.TestCase):
             items = json.load(response)["items"]
         self.assertEqual(sum(item["content"].startswith(marker) for item in items), 12)
 
+    def test_message_history_search_and_context_http_contract(self) -> None:
+        opener = self.opener()
+        self.post(opener, "/auth/login", {"username": "test", "password": "test123"})
+        marker = f"聊天搜索-{uuid.uuid4().hex}"
+        created = self.post(opener, "/messages", {"type": "text", "content": marker, "idempotency_key": f"search:{uuid.uuid4().hex}"})
+        with opener.open(self.base + "/messages?q=" + urllib.parse.quote(marker) + "&limit=10") as response:
+            search = json.load(response)
+        self.assertEqual(search["mode"], "search")
+        self.assertEqual([item["id"] for item in search["items"]], [created["id"]])
+        with opener.open(self.base + "/messages?around=" + urllib.parse.quote(created["id"]) + "&limit=5") as response:
+            context = json.load(response)
+        self.assertEqual(context["mode"], "around")
+        self.assertIn(created["id"], [item["id"] for item in context["items"]])
+        with self.assertRaises(urllib.error.HTTPError) as invalid_limit:
+            opener.open(self.base + "/messages?limit=not-a-number")
+        self.assertEqual(invalid_limit.exception.code, 400)
+
     def test_shared_detail_comments_are_readable_by_both_accounts(self) -> None:
         first = self.opener()
         second = self.opener()

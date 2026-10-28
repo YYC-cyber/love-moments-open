@@ -206,6 +206,11 @@ const state = {
   datePlaceSearchSequence: 0,
   installPrompt: null,
   chatImport: null,
+  chatHistory: {
+    initialized: false, hasMore: true, loadingOlder: false,
+    searchOpen: false, searchResults: [], searchQuery: "",
+    newCount: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0,
+  },
   longPressTimer: null,
   accountAutoOpened: false,
   smartDeepLinked: false,
@@ -710,6 +715,7 @@ function escapeHtml(value) {
 }
 
 function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
+  if (state.screen === "chat" && screen !== "chat") state.chatHistory.savedScrollTop = document.getElementById("messages")?.scrollTop ?? null;
   state.screen = screen;
   privateStorage().setItem("love-screen", screen);
   document.querySelectorAll(".screen").forEach(el => el.classList.toggle("active", el.dataset.screen === screen));
@@ -722,7 +728,14 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
     if (!state.memoryCompletionLoaded) loadMemoryCompletion().catch(error => toast(error.message));
     loadFutureLetters({ quiet: true });
   }
-  document.querySelector(".phone-shell").scrollTo({ top: 0, behavior: "smooth" });
+  if (screen !== "chat") document.querySelector(".phone-shell").scrollTo({ top: 0, behavior: "smooth" });
+  else requestAnimationFrame(() => {
+    const viewport = document.getElementById("messages");
+    if (!viewport) return;
+    if (state.chatHistory.savedScrollTop !== null) viewport.scrollTop = state.chatHistory.savedScrollTop;
+    else if (!state.chatHistory.initialized) scrollChatToLatest({ behavior: "auto" });
+    state.chatHistory.initialized = true;
+  });
   if (state.data) loadSmartSurface(screen, { quiet: true });
   if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).catch(() => {});
 }
@@ -2297,8 +2310,39 @@ async function openSmartNode(type) {
   navigate(state.screen || "home");
 }
 
-function renderMessages() {
+function chatViewportNearBottom(viewport = document.getElementById("messages")) {
+  return !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 72;
+}
+
+function scrollChatToLatest({ behavior = "smooth" } = {}) {
+  const viewport = document.getElementById("messages");
+  if (!viewport) return;
+  viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+  state.chatHistory.newCount = 0;
+  const button = document.getElementById("chatNewMessages");
+  if (button) button.hidden = true;
+}
+
+function mergeChatMessages(existing = [], incoming = []) {
+  const byId = new Map(existing.map(item => [item.id, item]));
+  incoming.forEach(item => byId.set(item.id, item));
+  return [...byId.values()].sort((left, right) => String(left.sent_at).localeCompare(String(right.sent_at)) || String(left.id).localeCompare(String(right.id)));
+}
+
+function updateChatNewMessageButton() {
+  const button = document.getElementById("chatNewMessages");
+  if (!button) return;
+  button.hidden = state.chatHistory.newCount < 1;
+  button.textContent = state.chatHistory.newCount > 1 ? `${state.chatHistory.newCount} 条新消息 ↓` : "有新消息 ↓";
+}
+
+function renderMessages({ preserveScroll = state.chatHistory.initialized, preservePrepend = false, stickToBottom = false, highlightId = "" } = {}) {
   if (!state.data) return;
+  const viewport = document.getElementById("messages");
+  if (!viewport) return;
+  const oldHeight = viewport.scrollHeight;
+  const oldTop = viewport.scrollTop;
+  const wasNearBottom = chatViewportNearBottom(viewport);
   let previousDay = "";
   const today = new Date();
   const yesterday = new Date(Date.now() - 86400000);
@@ -2336,7 +2380,66 @@ function renderMessages() {
       ? `<button class="message-save" data-action="expression-help" data-message-id="${escapeHtml(message.id)}">帮我表达</button>` : "";
     return `${divider}<div class="message ${message.mine ? "mine" : "theirs"}${groupClasses}" data-message-id="${escapeHtml(message.id)}" title="长按收藏为瞬间">${media}<p>${escapeHtml(message.content)}</p><time>${timeLabel(message.sent_at)}${status}</time>${expression}<button class="message-save" data-action="save-message" data-message-id="${escapeHtml(message.id)}">收藏为瞬间</button></div>`;
   }).join("");
-  document.getElementById("messages").innerHTML = html || `<div class="empty-view"><p>还没有消息，发一句“想你了”开始聊天吧。</p></div>`;
+  const historyControl = state.chatHistory.loadingOlder
+    ? `<div class="chat-history-status">正在读取更早消息…</div>`
+    : state.chatHistory.hasMore
+      ? `<button class="chat-history-load" data-action="load-older-messages">查看更早消息</button>`
+      : `<div class="chat-history-status">已经到最早一条了</div>`;
+  viewport.innerHTML = `${historyControl}${html || `<div class="empty-view"><p>还没有消息，发一句“想你了”开始聊天吧。</p></div>`}`;
+  if (stickToBottom || (!state.chatHistory.initialized && state.screen === "chat")) viewport.scrollTop = viewport.scrollHeight;
+  else if (preserveScroll) viewport.scrollTop = preservePrepend ? oldTop + Math.max(0, viewport.scrollHeight - oldHeight) : oldTop;
+  else if (wasNearBottom) viewport.scrollTop = viewport.scrollHeight;
+  state.chatHistory.initialized = true;
+  const activeHighlightId = highlightId || (state.chatHistory.highlightUntil > Date.now() ? state.chatHistory.highlightId : "");
+  if (activeHighlightId) requestAnimationFrame(() => {
+    const target = [...viewport.querySelectorAll(".message[data-message-id]")].find(item => item.dataset.messageId === activeHighlightId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("chat-message-highlight");
+    window.setTimeout(() => {
+      target.classList.remove("chat-message-highlight");
+      if (state.chatHistory.highlightId === activeHighlightId) { state.chatHistory.highlightId = ""; state.chatHistory.highlightUntil = 0; }
+    }, 1900);
+  });
+  updateChatNewMessageButton();
+}
+
+async function loadOlderMessages() {
+  if (!state.data || state.chatHistory.loadingOlder || !state.chatHistory.hasMore) return;
+  const oldest = state.data.messages?.[0];
+  if (!oldest) { state.chatHistory.hasMore = false; renderMessages({ preserveScroll: true }); return; }
+  state.chatHistory.loadingOlder = true;
+  renderMessages({ preserveScroll: true });
+  try {
+    const page = await api(`/api/v1/messages?before=${encodeURIComponent(oldest.id)}&limit=50`);
+    state.data.messages = mergeChatMessages(page.items, state.data.messages);
+    state.chatHistory.hasMore = Boolean(page.has_more);
+  } catch (error) { toast(error.message); }
+  finally { state.chatHistory.loadingOlder = false; renderMessages({ preserveScroll: true, preservePrepend: true }); }
+}
+
+function renderChatSearchResults() {
+  const panel = document.getElementById("chatSearchResults");
+  if (!panel) return;
+  const items = state.chatHistory.searchResults || [];
+  if (!state.chatHistory.searchQuery) { panel.innerHTML = `<p class="form-note">输入双方聊过的关键词。</p>`; return; }
+  panel.innerHTML = items.length ? items.map(item => `<button type="button" class="chat-search-result" data-action="open-chat-search-result" data-message-id="${escapeHtml(item.id)}"><small>${escapeHtml(item.sender_name)} · ${new Date(item.sent_at).toLocaleString("zh-CN")}</small><span>${escapeHtml(item.content)}</span></button>`).join("") : `<p class="form-note">没有找到“${escapeHtml(state.chatHistory.searchQuery)}”。</p>`;
+}
+
+function setChatSearchOpen(open) {
+  state.chatHistory.searchOpen = Boolean(open);
+  const panel = document.getElementById("chatSearchPanel");
+  if (panel) panel.hidden = !state.chatHistory.searchOpen;
+  if (open) { renderChatSearchResults(); requestAnimationFrame(() => document.getElementById("chatSearchInput")?.focus()); }
+}
+
+async function openChatSearchResult(messageId) {
+  const page = await api(`/api/v1/messages?around=${encodeURIComponent(messageId)}&limit=41`);
+  state.data.messages = mergeChatMessages(state.data.messages, page.items);
+  state.chatHistory.highlightId = messageId;
+  state.chatHistory.highlightUntil = Date.now() + 1900;
+  setChatSearchOpen(false);
+  renderMessages({ preserveScroll: false, highlightId: messageId });
 }
 
 function renderIdentity() {
@@ -4352,12 +4455,20 @@ async function openInAppNotification(notificationId) {
 async function loadBootstrap({ quiet = false } = {}) {
   try {
     const previousUserId = state.data?.user?.id || state.tripLive.ownerUserId;
+    const previousMessages = state.data?.messages || [];
+    const knownMessageIds = new Set(previousMessages.map(item => item.id));
+    const chatWasNearBottom = chatViewportNearBottom();
     const bootstrap = await api("/api/v1/bootstrap");
     await bindCachePartition(bootstrap);
     if (previousUserId && bootstrap.user?.id !== previousUserId) {
       resetTripLive();
       resetMemoryDiscovery();
     }
+    const newPartnerMessages = previousUserId && bootstrap.user?.id === previousUserId
+      ? (bootstrap.messages || []).filter(item => !knownMessageIds.has(item.id) && !item.mine)
+      : [];
+    if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
+    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
     state.data = bootstrap;
     state.online = true;
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
@@ -4372,7 +4483,8 @@ async function loadBootstrap({ quiet = false } = {}) {
     if (!availableStyles.includes(state.plan)) state.plan = state.data.trip?.active_variant || availableStyles[0] || "slow";
     privateStorage().setItem("love-offline-trip", JSON.stringify({ user: state.data.user, partner: state.data.partner, couple: state.data.couple, permission_version: state.data.permission_version, trip: state.data.trip, coupleContext: state.data.coupleContext, weeklyReview: state.data.weeklyReview, datePlans: state.data.datePlans }));
     hideAuth();
-    renderIdentity(); renderMessages(); renderPlan(); renderHotel(); renderWishlist(); renderDailyQuestion(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderDecisions(); renderLifeData();
+    if (state.screen === "chat" && newPartnerMessages.length && !chatWasNearBottom) state.chatHistory.newCount += newPartnerMessages.length;
+    renderIdentity(); renderMessages({ preserveScroll: state.screen === "chat" && !chatWasNearBottom, stickToBottom: state.screen === "chat" && chatWasNearBottom }); renderPlan(); renderHotel(); renderWishlist(); renderDailyQuestion(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderDecisions(); renderLifeData();
     await Promise.all([loadMeals({ quiet: true }), loadLifeAssistant({ quiet: true })]);
     // Reapply the user's active sub-page after any background/SSE refresh. This
     // keeps the visible panel and its primary action in sync while the DOM is
@@ -4715,8 +4827,7 @@ async function sendMessage(text) {
     return { status: "queued" };
   }
   state.data.messages.push(message);
-  renderMessages();
-  document.getElementById("messages").lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" });
+  renderMessages({ preserveScroll: false, stickToBottom: true });
   return { status: "sent", message };
 }
 
@@ -4756,7 +4867,7 @@ async function sendMediaMessage(file) {
   const label = kind === "image" ? "分享了一张照片" : kind === "voice" ? "分享了一段语音" : "分享了一段短视频";
   const message = await api("/api/v1/messages", { method: "POST", body: JSON.stringify({ type: kind, content: label, metadata: { mediaId: media.id, originalName: media.original_name }, idempotency_key: clientKey("media-message") }) });
   state.data.messages.push(message);
-  renderMessages();
+  renderMessages({ preserveScroll: false, stickToBottom: true });
   toast("媒体已保存并发送");
 }
 
@@ -5489,6 +5600,15 @@ document.addEventListener("click", async event => {
   // writes must not open prompts, mutate UI state, store draft fingerprints or
   // issue requests while offline.
   if (!guardOnlineUiAction(action)) return;
+  if (action === "toggle-chat-search") { setChatSearchOpen(!state.chatHistory.searchOpen); return; }
+  if (action === "close-chat-search") { setChatSearchOpen(false); return; }
+  if (action === "load-older-messages") { await loadOlderMessages(); return; }
+  if (action === "jump-latest-messages") { scrollChatToLatest(); return; }
+  if (action === "open-chat-search-result") {
+    try { await openChatSearchResult(actionEl.dataset.messageId); }
+    catch (error) { toast(error.message); }
+    return;
+  }
   if (action === "open-cooking") {
     try { await startCookingFromElement(actionEl); }
     catch (error) { toast(error.status === 409 ? "菜单已被对方更新，请刷新后再开始" : error.message); }
@@ -7628,6 +7748,29 @@ document.getElementById("chatForm").addEventListener("submit", async event => {
   } catch (error) { input.value = text; toast(error.message); }
 });
 
+document.getElementById("chatSearchForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.getElementById("chatSearchInput");
+  const query = input.value.trim();
+  state.chatHistory.searchQuery = query;
+  if (!query) { state.chatHistory.searchResults = []; renderChatSearchResults(); return; }
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await api(`/api/v1/messages?q=${encodeURIComponent(query)}&limit=50`);
+    state.chatHistory.searchResults = result.items || [];
+    renderChatSearchResults();
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
+document.getElementById("messages").addEventListener("scroll", event => {
+  const viewport = event.currentTarget;
+  state.chatHistory.savedScrollTop = viewport.scrollTop;
+  if (chatViewportNearBottom(viewport)) { state.chatHistory.newCount = 0; updateChatNewMessageButton(); }
+  if (viewport.scrollTop < 36 && state.chatHistory.hasMore && !state.chatHistory.loadingOlder) loadOlderMessages();
+}, { passive: true });
+
 document.getElementById("authForm").addEventListener("submit", async event => {
   event.preventDefault();
   const payload = {
@@ -8082,10 +8225,15 @@ initializeAuth();
 setInterval(async () => {
   if (document.hidden || !state.data || state.screen !== "chat") return;
   try {
-    const result = await api("/api/v1/messages");
-    if (result.items.length !== state.data.messages.length) {
-      state.data.messages = result.items;
-      renderMessages();
+    const viewport = document.getElementById("messages");
+    const stayAtBottom = chatViewportNearBottom(viewport);
+    const knownIds = new Set((state.data.messages || []).map(item => item.id));
+    const result = await api("/api/v1/messages?limit=100");
+    const additions = (result.items || []).filter(item => !knownIds.has(item.id));
+    if (additions.length) {
+      state.data.messages = mergeChatMessages(state.data.messages, result.items);
+      if (!stayAtBottom) state.chatHistory.newCount += additions.filter(item => !item.mine).length;
+      renderMessages({ preserveScroll: !stayAtBottom, stickToBottom: stayAtBottom });
     }
   } catch (_) {
     // Preserve the last usable local view during transient network failures.

@@ -117,15 +117,19 @@ class RomanticCompactProductionTests(unittest.TestCase):
                     f"{element_id} 尚未移动到更多生活动态",
                 )
 
-    def test_chat_has_fixed_compose_dock_and_compact_grouped_bubbles(self):
+    def test_chat_has_fixed_viewport_scrollable_history_and_compact_grouped_bubbles(self):
         ancestors = self.contract.id_ancestors["chatForm"]
         self.assertTrue(self.contract.has_ancestor_class(ancestors, "chat-compose-dock"))
         compact_css = re.sub(r"\s+", " ", self.css)
-        self.assertRegex(compact_css, r"\.chat-compose-dock\s*\{[^}]*position:\s*fixed")
-        self.assertRegex(compact_css, r"\.chat-content\s*\{[^}]*padding-bottom:\s*(?:1[4-9]\d|[2-9]\d\d)px")
+        self.assertRegex(compact_css, r"\.screen\[data-screen=\"chat\"\]\.active\s*\{[^}]*overflow:\s*hidden")
+        self.assertRegex(compact_css, r"\.chat-message-stage \.messages\s*\{[^}]*overflow-y:\s*auto")
+        self.assertRegex(compact_css, r"\.chat-compose-dock\s*\{[^}]*position:\s*static")
         self.assertRegex(compact_css, r"\.message\s*\{[^}]*max-width:\s*76%")
         self.assertIn("message-group-start", self.js)
         self.assertIn("message-group-end", self.js)
+        self.assertIn("loadOlderMessages", self.js)
+        self.assertIn("openChatSearchResult", self.js)
+        self.assertNotIn('document.getElementById("messages").lastElementChild?.scrollIntoView', self.js)
 
     def test_home_keeps_a_compact_hero_and_only_three_priorities(self):
         compact_css = re.sub(r"\s+", " ", self.css)

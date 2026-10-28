@@ -235,6 +235,26 @@ class LoveMomentsStoreTests(unittest.TestCase):
         events = self.store.list_realtime_events()
         self.assertTrue(any(item["event_type"] == "message.created" and item["resource_id"] == first["id"] for item in events["items"]))
 
+    def test_message_history_search_and_exact_context_are_couple_scoped(self) -> None:
+        first = self.store.register("history_first", "first-pass-123", "小满")
+        second = self.store.register("history_second", "second-pass-123", "小安")
+        invite = self.store.create_user_invite(first["id"])
+        self.store.accept_user_invite(second["id"], invite["code"], "2024-01-01")
+        created = [self.store.create_message({"type": "text", "content": f"周末旅行安排 {number}"}, user_id=first["id"]) for number in range(7)]
+        latest = self.store.message_history_page(user_id=first["id"], limit=3)
+        self.assertEqual([item["id"] for item in latest["items"]], [item["id"] for item in created[-3:]])
+        self.assertTrue(latest["has_more"])
+        older = self.store.message_history_page(user_id=second["id"], limit=3, before_id=latest["items"][0]["id"])
+        self.assertEqual([item["id"] for item in older["items"]], [item["id"] for item in created[-6:-3]])
+        matches = self.store.message_history_page(user_id=second["id"], query="安排 4")
+        self.assertEqual([item["id"] for item in matches["items"]], [created[4]["id"]])
+        context = self.store.message_history_page(user_id=first["id"], limit=5, around_id=created[3]["id"])
+        self.assertIn(created[3]["id"], [item["id"] for item in context["items"]])
+        with self.assertRaises(KeyError):
+            self.store.message_history_page(user_id=first["id"], around_id=self.store.list_messages()[0]["id"])
+        with self.assertRaises(ValueError):
+            self.store.message_history_page(user_id=first["id"], query="字" * 101)
+
     def test_status_location_and_private_media_are_scoped(self) -> None:
         status = self.store.set_status({"status_code": "want_chat", "text": "早点见面", "duration_minutes": 120})
         self.assertEqual(status["text"], "早点见面")

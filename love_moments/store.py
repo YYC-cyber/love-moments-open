@@ -2732,6 +2732,94 @@ class LoveMomentsStore(
             self._event(db, couple["id"], user_id, "moment.created", moment_id, {"type": "date"})
         return self.get_date_plan(date_plan_id, user_id)
 
+    @staticmethod
+    def _message_items(rows: list, user_id: str) -> list[dict]:
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["metadata"] = parse_json(item["metadata"], {})
+            item["mine"] = item["sender_id"] == user_id
+            item["delivery_status"] = "read" if item["read_at"] else ("delivered" if item["mine"] else "received")
+        return items
+
+    def message_history_page(
+        self,
+        user_id: str = DEMO_USER,
+        limit: int = 50,
+        before_id: str | None = None,
+        around_id: str | None = None,
+        query: str | None = None,
+    ) -> dict:
+        """Return a privacy-scoped message page for history, search or exact jumps."""
+        limit = max(1, min(int(limit), 100))
+        search = str(query or "").strip()
+        if len(search) > 100:
+            raise ValueError("搜索关键词不能超过 100 个字符")
+        before_id = str(before_id or "").strip() or None
+        around_id = str(around_id or "").strip() or None
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            if around_id:
+                target = db.execute(
+                    "SELECT sent_at,id FROM messages WHERE id=? AND couple_id=?",
+                    (around_id, couple["id"]),
+                ).fetchone()
+                if not target:
+                    raise KeyError("消息不存在")
+                older_count = max(0, (limit - 1) // 2)
+                newer_count = max(0, limit - older_count - 1)
+                older = db.execute(
+                    "SELECT * FROM (SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.couple_id=? AND (m.sent_at<? OR (m.sent_at=? AND m.id<?)) ORDER BY m.sent_at DESC,m.id DESC LIMIT ?) ORDER BY sent_at ASC,id ASC",
+                    (couple["id"], target["sent_at"], target["sent_at"], target["id"], older_count),
+                ).fetchall()
+                center = db.execute(
+                    "SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.couple_id=? AND m.id=?",
+                    (couple["id"], around_id),
+                ).fetchall()
+                newer = db.execute(
+                    "SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.couple_id=? AND (m.sent_at>? OR (m.sent_at=? AND m.id>?)) ORDER BY m.sent_at ASC,m.id ASC LIMIT ?",
+                    (couple["id"], target["sent_at"], target["sent_at"], target["id"], newer_count),
+                ).fetchall()
+                rows = [*older, *center, *newer]
+                mode = "around"
+            elif search:
+                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                rows = db.execute(
+                    "SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.couple_id=? AND m.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY m.sent_at DESC,m.id DESC LIMIT ?",
+                    (couple["id"], f"%{escaped}%", limit),
+                ).fetchall()
+                mode = "search"
+            else:
+                params: list = [couple["id"]]
+                cursor_sql = ""
+                if before_id:
+                    cursor = db.execute(
+                        "SELECT sent_at,id FROM messages WHERE id=? AND couple_id=?",
+                        (before_id, couple["id"]),
+                    ).fetchone()
+                    if not cursor:
+                        raise KeyError("历史消息游标不存在")
+                    cursor_sql = " AND (m.sent_at<? OR (m.sent_at=? AND m.id<?))"
+                    params.extend([cursor["sent_at"], cursor["sent_at"], cursor["id"]])
+                params.append(limit + 1)
+                rows = db.execute(
+                    f"SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.couple_id=?{cursor_sql} ORDER BY m.sent_at DESC,m.id DESC LIMIT ?",
+                    params,
+                ).fetchall()
+                mode = "history"
+
+        has_more = mode == "history" and len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        if mode == "history":
+            rows = list(reversed(rows))
+        items = self._message_items(rows, user_id)
+        return {
+            "items": items,
+            "has_more": has_more,
+            "next_before_id": items[0]["id"] if has_more and items else None,
+            "mode": mode,
+        }
+
     def list_messages(self, limit: int = 100, user_id: str = DEMO_USER) -> list[dict]:
         limit = max(1, min(int(limit), 500))
         with self.connection() as db:
@@ -2740,12 +2828,7 @@ class LoveMomentsStore(
                 "SELECT * FROM (SELECT m.*,u.nickname AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE couple_id=? ORDER BY sent_at DESC,m.id DESC LIMIT ?) ORDER BY sent_at ASC,id ASC",
                 (couple["id"], limit),
             ).fetchall()
-        items = [dict(row) for row in rows]
-        for item in items:
-            item["metadata"] = parse_json(item["metadata"], {})
-            item["mine"] = item["sender_id"] == user_id
-            item["delivery_status"] = "read" if item["read_at"] else ("delivered" if item["mine"] else "received")
-        return items
+        return self._message_items(rows, user_id)
 
     def create_message(self, payload: dict, user_id: str = DEMO_USER) -> dict:
         content = str(payload.get("content", "")).strip()
@@ -2753,7 +2836,10 @@ class LoveMomentsStore(
             raise ValueError("消息内容不能为空")
         if len(content) > 4000:
             raise ValueError("消息内容不能超过 4000 个字符")
-        message_id, sent_at = new_id("msg"), utc_now()
+        # Messages can be sent several times within one second. Preserve their
+        # true order instead of falling back to the random UUID tie-breaker.
+        message_id = new_id("msg")
+        sent_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         message_type = str(payload.get("type", "text"))
         if message_type not in {"text", "image", "voice", "video", "location", "trip"}:
             raise ValueError("不支持的消息类型")

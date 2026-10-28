@@ -874,7 +874,18 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             return
         elif path == "/api/v1/messages":
             user = self._require_user()
-            self._send_json({"items": STORE.list_messages(user_id=user["id"])})
+            raw_limit = query.get("limit", ["50"])[0]
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError):
+                raise ValueError("消息数量必须是整数")
+            self._send_json(STORE.message_history_page(
+                user_id=user["id"],
+                limit=limit,
+                before_id=query.get("before", [None])[0],
+                around_id=query.get("around", [None])[0],
+                query=query.get("q", [None])[0],
+            ))
             return
         elif path == "/api/v1/assistant/today":
             user = self._require_user()
