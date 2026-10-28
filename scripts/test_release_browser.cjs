@@ -76,6 +76,14 @@ async function checkSurface(page, surface, viewport) {
   assert(layout.unnamed === 0, `${surface} 存在 ${layout.unnamed} 个无可访问名称按钮`);
 }
 
+function shouldIgnoreConsoleError(message) {
+  const text = message.text();
+  // Chromium's generic 404 console line omits the requested URL. The response
+  // listeners record that failure with the exact URL instead.
+  return text.includes("favicon.ico")
+    || text.includes("Failed to load resource: the server responded with a status of 404");
+}
+
 (async () => {
   const launchOptions = {
     headless: true,
@@ -93,8 +101,11 @@ async function checkSurface(page, surface, viewport) {
     const pageB = await contextB.newPage();
     for (const [label, page] of [["test", pageA], ["test1", pageB]]) {
       page.on("pageerror", error => errors.push(`${label} pageerror: ${error.message}`));
+      page.on("response", response => {
+        if (response.status() === 404) errors.push(`${label} response 404: ${response.url()}`);
+      });
       page.on("console", message => {
-        if (message.type() === "error" && !message.text().includes("favicon.ico")) errors.push(`${label} console: ${message.text()}`);
+        if (message.type() === "error" && !shouldIgnoreConsoleError(message)) errors.push(`${label} console: ${message.text()}`);
       });
     }
 
@@ -818,8 +829,11 @@ async function checkSurface(page, surface, viewport) {
 
     const adminPage = await contextA.newPage();
     adminPage.on("pageerror", error => errors.push(`admin pageerror: ${error.message}`));
+    adminPage.on("response", response => {
+      if (response.status() === 404) errors.push(`admin response 404: ${response.url()}`);
+    });
     adminPage.on("console", message => {
-      if (message.type() === "error" && !message.text().includes("favicon.ico")) errors.push(`admin console: ${message.text()}`);
+      if (message.type() === "error" && !shouldIgnoreConsoleError(message)) errors.push(`admin console: ${message.text()}`);
     });
     await adminPage.goto(`${originA}/admin`, { waitUntil: "domcontentloaded" });
     await adminPage.locator("#checkGrid .check-card").first().waitFor();
@@ -844,6 +858,9 @@ async function checkSurface(page, surface, viewport) {
     const offlineContext = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "allow" });
     const offlinePage = await offlineContext.newPage();
     offlinePage.on("pageerror", error => errors.push(`offline pageerror: ${error.message}`));
+    offlinePage.on("response", response => {
+      if (response.status() === 404) errors.push(`offline response 404: ${response.url()}`);
+    });
     await login(offlinePage, originA, "test", "test123");
     await offlinePage.waitForFunction(() => navigator.serviceWorker?.controller, null, { timeout: 10_000 }).catch(async () => {
       await offlinePage.reload({ waitUntil: "domcontentloaded" });
