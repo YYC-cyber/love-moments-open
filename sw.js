@@ -1,4 +1,4 @@
-const CACHE = "love-moments-v51";
+const CACHE = "love-moments-open-v52";
 const ASSETS = [
   "/",
   "/static/index.html",

@@ -20,6 +20,7 @@ FORBIDDEN_TOP_LEVEL = {
     ".planning",
 }
 ALLOWED_RUNTIME_FILES = {"data/.gitkeep"}
+FORBIDDEN_PERSONAL_SCRIPTS = {"prepare_personal_release.py", "test_remote_production.cjs"}
 FORBIDDEN_DATA_PREFIXES = ("data/media/", "data/logs/", "data/maintenance/")
 FORBIDDEN_SUFFIXES = (
     ".db",
@@ -61,6 +62,8 @@ def tracked_files() -> list[str]:
 
 def forbidden_path(path: str) -> str | None:
     pure = PurePosixPath(path)
+    if pure.name in FORBIDDEN_PERSONAL_SCRIPTS:
+        return "personal deployment script"
     if path.startswith("data/") and path not in ALLOWED_RUNTIME_FILES:
         return "runtime data"
     if pure.parts and pure.parts[0] in FORBIDDEN_TOP_LEVEL:
@@ -78,6 +81,8 @@ def forbidden_path(path: str) -> str | None:
 
 def scan_text(path: str) -> list[str]:
     file_path = ROOT / path
+    if file_path.is_symlink():
+        return ["symlink outside the reviewed source boundary"]
     if not file_path.is_file() or file_path.stat().st_size > 5_000_000:
         return []
     try:
@@ -89,12 +94,11 @@ def scan_text(path: str) -> list[str]:
     for label, pattern in SECRET_PATTERNS:
         if pattern.search(text):
             findings.append(label)
-    if path != ".env.example":
-        for match in ASSIGNMENT.finditer(text):
-            value = match.group(2).lower()
-            if not any(part in value for part in PLACEHOLDER_PARTS):
-                findings.append(f"non-empty {match.group(1)} assignment")
-                break
+    for match in ASSIGNMENT.finditer(text):
+        value = match.group(2).lower()
+        if not any(part in value for part in PLACEHOLDER_PARTS):
+            findings.append(f"non-empty {match.group(1)} assignment")
+            break
     return findings
 
 

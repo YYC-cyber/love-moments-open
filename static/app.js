@@ -310,13 +310,23 @@ window.addEventListener("offline", () => renderTripExpenses());
 
 async function api(path, options = {}) {
   const requestPartition = localStorage.getItem("love-active-scope");
+  const assertNotCancelled = () => {
+    if (options.signal?.aborted) throw Object.assign(new Error("请求已取消"), { name: "AbortError" });
+  };
+  assertNotCancelled();
   const response = await fetch(path, {
     ...options,
     cache: "no-store",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
-  const body = await response.json().catch(() => ({}));
+  assertNotCancelled();
+  const body = await response.json().catch(error => {
+    if (error?.name === "AbortError") throw error;
+    assertNotCancelled();
+    return {};
+  });
+  assertNotCancelled();
   if (requestPartition !== localStorage.getItem("love-active-scope")) throw Object.assign(new Error("账号或权限已变化，请重新加载"), { status: 409 });
   if (!response.ok) {
     const error = new Error(body.error || `请求失败 (${response.status})`);
@@ -1242,7 +1252,8 @@ function renderSmartSurface(surface, manifest, message = "") {
 async function loadSmartSurface(surface, { quiet = false } = {}) {
   if (!smartExamples[surface]) return;
   if (quiet && (surfaceHasDraftIntent(surface) || state.composingSmartSurfaces.has(surface) || (state.pinnedSmartSurfaces.has(surface) && manifestHasPendingWrite(state.manifests[surface])))) {
-    renderSmartSurface(surface, state.manifests[surface]);
+    // Preserve the input node, focus and selection during background refreshes.
+    if (!document.querySelector(`[data-smart-form="${surface}"]`)) renderSmartSurface(surface, state.manifests[surface]);
     return;
   }
   const cacheKey = smartCacheKey(surface);
@@ -1260,7 +1271,7 @@ async function loadSmartSurface(surface, { quiet = false } = {}) {
     // let that older response overwrite the newer draft that the user still
     // needs to preview and confirm.
     if (quiet && (surfaceHasDraftIntent(surface) || state.composingSmartSurfaces.has(surface) || (state.pinnedSmartSurfaces.has(surface) && manifestHasPendingWrite(state.manifests[surface])))) {
-      renderSmartSurface(surface, state.manifests[surface]);
+      if (!document.querySelector(`[data-smart-form="${surface}"]`)) renderSmartSurface(surface, state.manifests[surface]);
       return;
     }
     state.pinnedSmartSurfaces.delete(surface);
@@ -4582,14 +4593,37 @@ function loadOfflineSnapshot() {
   return true;
 }
 
+let realtimeGeneration = 0;
+let realtimeStart = null;
+
 async function startRealtime() {
-  if (!state.data || state.realtime) return;
-  const snapshot = await api(`/api/v1/realtime/events?after=${state.realtimeCursor}`);
+  const userId = state.data?.user?.id;
+  if (!userId || state.realtime) return;
+  if (realtimeStart?.userId === userId) return realtimeStart.promise;
+  if (realtimeStart) stopRealtime();
+  const pending = { userId, controller: new AbortController(), promise: null };
+  realtimeStart = pending;
+  pending.promise = initializeRealtime(userId, realtimeGeneration, pending.controller.signal)
+    .finally(() => { if (realtimeStart === pending) realtimeStart = null; });
+  return pending.promise;
+}
+
+async function initializeRealtime(userId, generation, signal) {
+  let snapshot;
+  try {
+    snapshot = await api(`/api/v1/realtime/events?after=${state.realtimeCursor}`, { signal });
+  } catch (error) {
+    if (signal.aborted && error?.name === "AbortError" && !error.status) return;
+    throw error;
+  }
+  if (signal.aborted || generation !== realtimeGeneration || state.data?.user?.id !== userId) return;
   state.realtimeCursor = Math.max(state.realtimeCursor, Number(snapshot.latest_sequence || 0));
   const source = new EventSource(`/api/v1/realtime/stream?after=${state.realtimeCursor}`, { withCredentials: true });
   state.realtime = source;
+  const isCurrent = () => generation === realtimeGeneration && state.data?.user?.id === userId && state.realtime === source;
   const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
   const receive = event => {
+    if (!isCurrent()) return;
     let realtimeEvent = null;
     try { realtimeEvent = JSON.parse(event.data); state.realtimeCursor = Math.max(state.realtimeCursor, Number(realtimeEvent.sequence || event.lastEventId || 0)); } catch (_) {}
     if (document.hidden && realtimeEvent?.actor_id !== state.data?.user?.id && "Notification" in window && Notification.permission === "granted") {
@@ -4613,14 +4647,17 @@ async function startRealtime() {
     }
     if (realtimeEvent?.event_type === "future_letter.delivered") loadFutureLetters({ quiet: true }).catch(() => {});
     clearTimeout(state.realtimeRefresh);
-    state.realtimeRefresh = setTimeout(() => loadBootstrap({ quiet: true }), 180);
+    state.realtimeRefresh = setTimeout(() => { if (isCurrent()) loadBootstrap({ quiet: true }); }, 180);
   };
   eventNames.forEach(name => source.addEventListener(name, receive));
-  source.addEventListener("open", () => { state.online = true; document.querySelector(".presence").textContent = "● 实时连接 · 只属于你们的对话"; });
-  source.addEventListener("error", () => { state.online = false; document.querySelector(".presence").textContent = "○ 正在重连 · 内容已保留"; });
+  source.addEventListener("open", () => { if (!isCurrent()) return; state.online = true; document.querySelector(".presence").textContent = "● 实时连接 · 只属于你们的对话"; });
+  source.addEventListener("error", () => { if (!isCurrent()) return; state.online = false; document.querySelector(".presence").textContent = "○ 正在重连 · 内容已保留"; });
 }
 
 function stopRealtime() {
+  realtimeGeneration += 1;
+  realtimeStart?.controller.abort();
+  realtimeStart = null;
   state.realtime?.close();
   state.realtime = null;
   clearTimeout(state.realtimeRefresh);
