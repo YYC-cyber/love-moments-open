@@ -647,6 +647,33 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             raise PermissionError("当前账号没有后台管理权限")
         return user
 
+    def _require_theme_asset_user(self) -> dict:
+        user = self._require_user()
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            scheme = "https" if self._public_https_request() else "http"
+            expected = f"{scheme}://{self.headers.get('Host', '').strip()}"
+            if origin.lower() != expected.lower():
+                raise PermissionError("主题插画仅可在当前恋屿页面中使用")
+        if self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+            raise PermissionError("主题插画仅可在当前恋屿页面中使用")
+        return user
+
+    def _send_theme_asset(self, filename: str) -> None:
+        path = _private_theme_asset(filename)
+        if path is None:
+            raise KeyError("主题插画尚未安装")
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise KeyError("主题插画暂不可用") from error
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(content)
+
     def _session_cookie(self, token: str, clear: bool = False) -> str:
         cookie_mode = os.getenv("COOKIE_SECURE", "false").strip().lower()
         secure_cookie = cookie_mode in {"1", "true", "yes", "on"} or (
@@ -851,6 +878,20 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 "registration_enabled": registration_mode() == "open",
                 "entry": runtime_entry_status(),
             })
+            return
+        elif path == "/api/v1/theme-assets":
+            self._require_theme_asset_user()
+            self._send_json({
+                "assets": {
+                    theme: f"/api/v1/theme-assets/{filename}"
+                    for theme, filename in PRIVATE_THEME_FILES.items()
+                    if _private_theme_asset(filename) is not None
+                },
+            })
+            return
+        elif path.startswith("/api/v1/theme-assets/"):
+            self._require_theme_asset_user()
+            self._send_theme_asset(path.removeprefix("/api/v1/theme-assets/"))
             return
         elif path == "/api/v1/admin/overview":
             self._require_admin()
@@ -2032,7 +2073,9 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.append_media_upload(match.group(1), data, self.headers.get("X-Upload-Offset", ""), user["id"]))
                 return
             payload = self._read_json()
-            if path == "/api/v1/me/status":
+            if path == "/api/v1/account/profile":
+                self._send_json(STORE.update_my_profile(payload, user["id"]))
+            elif path == "/api/v1/me/status":
                 self._send_json(STORE.set_status(payload, user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/memories/(moment|trip)/([^/]+)/descriptions/me", path):
                 self._send_json(STORE.save_memory_description(match.group(1), match.group(2), payload, user["id"]))
@@ -2202,13 +2245,17 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         # and ``headers`` exist when a tunnel probe sends a malformed or
         # incomplete request line.  Security headers must not turn that normal
         # 400 response into a second exception.
-        request_path = urlparse(getattr(self, "path", "")).path
+        request_path = posixpath.normpath(unquote(urlparse(getattr(self, "path", "")).path))
+        private_theme = request_path == "/api/v1/theme-assets" or request_path.startswith("/api/v1/theme-assets/")
         cors_origin = self._allowed_cors_origin() if hasattr(self, "headers") else None
-        if cors_origin:
+        if cors_origin and not private_theme:
             self.send_header("Access-Control-Allow-Origin", cors_origin)
             self.send_header("Access-Control-Allow-Credentials", "true")
             self.send_header("Vary", "Origin")
-        self.send_header("Cache-Control", "no-store" if request_path.startswith("/api/") else "no-cache")
+        self.send_header("Cache-Control", "private, no-store" if private_theme else "no-store" if request_path.startswith("/api/") else "no-cache")
+        if private_theme:
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header("Vary", "Cookie, Authorization")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
