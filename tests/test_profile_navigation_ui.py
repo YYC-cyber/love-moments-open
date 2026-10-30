@@ -89,6 +89,8 @@ class PublicProfileUiContractTests(unittest.TestCase):
         self.assertIn('scrollChatToLatest({ behavior: "auto" })', js)
         self.assertIn('if (action === "jump-new-messages") { scrollChatToLatest(); return; }', js)
         self.assertIn('点击回到最新消息', js)
+        self.assertIn('state.chatHistory.latestLockUntil = screen === "chat" ? Date.now() + 3000 : 0', js)
+        self.assertIn('const lockToLatest = state.screen === "chat" && state.chatHistory.latestLockUntil > Date.now()', js)
         self.assertNotIn('function scrollChatToFirstUnread', js)
         self.assertIn('"private, no-cache" if private_theme', (ROOT / "main.py").read_text(encoding="utf-8"))
         self.assertIn(".avatar > img", css)

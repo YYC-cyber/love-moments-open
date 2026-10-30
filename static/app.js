@@ -357,7 +357,7 @@ const state = {
   chatHistory: {
     initialized: false, hasMore: true, loadingOlder: false,
     searchOpen: false, searchResults: [], searchQuery: "",
-    newCount: 0, unreadMessageIds: new Set(),
+    newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0,
     savedScrollTop: null, highlightId: "", highlightUntil: 0,
   },
   longPressTimer: null,
@@ -914,6 +914,7 @@ function escapeHtml(value) {
 
 function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
   if (state.screen === "chat" && screen !== "chat") state.chatHistory.savedScrollTop = null;
+  state.chatHistory.latestLockUntil = screen === "chat" ? Date.now() + 3000 : 0;
   state.screen = screen;
   privateStorage().setItem("love-screen", screen);
   document.querySelectorAll(".screen").forEach(el => el.classList.toggle("active", el.dataset.screen === screen));
@@ -2594,7 +2595,8 @@ function renderMessages({ preserveScroll = state.chatHistory.initialized, preser
       ? `<button class="chat-history-load" data-action="load-older-messages">查看更早消息</button>`
       : `<div class="chat-history-status">已经到最早一条了</div>`;
   viewport.innerHTML = `${historyControl}${html || `<div class="empty-view"><p>还没有消息，发一句“想你了”开始聊天吧。</p></div>`}`;
-  if (stickToBottom || (!state.chatHistory.initialized && state.screen === "chat")) viewport.scrollTop = viewport.scrollHeight;
+  const lockToLatest = state.screen === "chat" && state.chatHistory.latestLockUntil > Date.now();
+  if (lockToLatest || stickToBottom || (!state.chatHistory.initialized && state.screen === "chat")) viewport.scrollTop = viewport.scrollHeight;
   else if (preserveScroll) viewport.scrollTop = preservePrepend ? oldTop + Math.max(0, viewport.scrollHeight - oldHeight) : oldTop;
   else if (wasNearBottom) viewport.scrollTop = viewport.scrollHeight;
   state.chatHistory.initialized = true;
@@ -4734,7 +4736,7 @@ async function loadBootstrap({ quiet = false } = {}) {
       ? (bootstrap.messages || []).filter(item => !knownMessageIds.has(item.id) && !item.mine)
       : [];
     if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
-    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), savedScrollTop: null, highlightId: "", highlightUntil: 0 };
+    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
     state.data = bootstrap;
     state.online = true;
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
@@ -8138,7 +8140,7 @@ document.getElementById("messages").addEventListener("scroll", event => {
     state.chatHistory.unreadMessageIds.clear();
     updateChatNewMessageButton();
   }
-  if (viewport.scrollTop < 36 && state.chatHistory.hasMore && !state.chatHistory.loadingOlder) loadOlderMessages();
+  if (viewport.scrollTop < 36 && state.chatHistory.latestLockUntil <= Date.now() && state.chatHistory.hasMore && !state.chatHistory.loadingOlder) loadOlderMessages();
 }, { passive: true });
 
 document.getElementById("authForm").addEventListener("submit", async event => {
