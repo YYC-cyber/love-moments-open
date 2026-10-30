@@ -70,11 +70,27 @@ jobs:
       - name: Test Web Push service worker
         run: pnpm test:push
 
+  container:
+    name: Production container build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the same image used by the cloud server
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: love-moments:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   browser:
     name: Isolated two-account browser flow
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    needs: [backend, frontend]
+    needs: [backend, frontend, container]
     env:
       PYTHON_BINARY: python
     steps:

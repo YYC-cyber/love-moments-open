@@ -35,6 +35,23 @@ class LoveMomentsStoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(data["messages"]), 3)
         trip_message = next(message for message in data["messages"] if message["type"] == "trip")
         self.assertEqual(trip_message["metadata"]["subtitle"], "湖景房 · ¥ 568 / 晚")
+        self.assertIn("unread_count", data["messageReadState"])
+
+    def test_message_read_state_is_shared_across_devices(self) -> None:
+        self.store.mark_messages_read(DEMO_USER)
+        created = self.store.create_message({"type": "text", "content": "跨设备未读测试"}, DEMO_PARTNER)
+        first = self.store.message_read_state(DEMO_USER)
+        self.assertGreaterEqual(first["unread_count"], 1)
+        self.assertEqual(first["first_unread_message_id"], created["id"])
+        marked = self.store.mark_messages_read(DEMO_USER)
+        self.assertGreaterEqual(marked["updated"], 1)
+        self.assertEqual(marked["unread_count"], 0)
+        self.assertIsNone(self.store.bootstrap(DEMO_USER)["messageReadState"]["first_unread_message_id"])
+
+    def test_push_diagnostics_does_not_expose_subscription_secret(self) -> None:
+        diagnostics = self.store.push_diagnostics(DEMO_USER)
+        self.assertIn("active_device_count", diagnostics)
+        self.assertNotIn("subscription_ciphertext", str(diagnostics))
 
     def test_both_partners_can_bootstrap_before_weekly_review_exists(self) -> None:
         with self.store.connection() as db:

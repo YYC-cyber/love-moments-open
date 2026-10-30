@@ -875,7 +875,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         elif path in {"/admin", "/admin/"}:
             self.path = "/static/admin.html"
         elif path == "/api/health":
-            self._send_json({"status": "ok", "name": "Love Moments", "mode": "full-stack", **STORE.stats()})
+            release = os.getenv("APP_RELEASE_SHA", "development").strip() or "development"
+            self._send_json({"status": "ok", "name": "Love Moments", "mode": "full-stack", "release": release[:40], **STORE.stats()})
             return
         elif path == "/api/v1/auth/me":
             user = self._current_user()
@@ -958,6 +959,17 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 "privacy": "锁屏只显示通用提醒，不包含聊天、留言或私密正文",
             })
             return
+        elif path == "/api/v1/push/diagnostics":
+            user = self._require_user()
+            status = STORE.push_diagnostics(user["id"])
+            self._send_json({
+                **status,
+                "enabled": PUSH.enabled,
+                "reason": PUSH.reason,
+                "secure_context": self._request_secure_context(),
+                "public_base_url_configured": bool(os.getenv("PUBLIC_BASE_URL", "").strip()),
+            })
+            return
         elif path == "/api/v1/calls/active":
             user = self._require_user()
             self._send_json({"call": STORE.get_active_call(user_id=user["id"])})
@@ -980,6 +992,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 around_id=query.get("around", [None])[0],
                 query=query.get("q", [None])[0],
             ))
+            return
+        elif path == "/api/v1/messages/read-state":
+            user = self._require_user()
+            self._send_json(STORE.message_read_state(user["id"]))
             return
         elif path == "/api/v1/assistant/today":
             user = self._require_user()

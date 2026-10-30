@@ -15,8 +15,7 @@ RUN groupadd --gid 10001 love-moments \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin love-moments
 
 COPY requirements.txt ./
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --requirement requirements.txt
+RUN python -m pip install --requirement requirements.txt
 
 # Release identity changes on every deploy. Keep it after dependency layers so
 # a new commit does not invalidate the slow package-download cache.

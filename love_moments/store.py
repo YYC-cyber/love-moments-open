@@ -1640,6 +1640,30 @@ class LoveMomentsStore(
                 ).fetchone())
         return {"subscribed": current, "active_device_count": count}
 
+    def push_diagnostics(self, user_id: str) -> dict:
+        """Return privacy-safe delivery health for the signed-in user's devices."""
+        status = self.push_subscription_status(user_id)
+        with self.connection() as db:
+            subscriptions = db.execute(
+                """
+                SELECT device_name,active,failure_count,last_success_at,updated_at
+                FROM push_subscriptions WHERE user_id=? ORDER BY updated_at DESC LIMIT 10
+                """,
+                (user_id,),
+            ).fetchall()
+            latest = db.execute(
+                """
+                SELECT status,attempt_count,updated_at,sent_at
+                FROM push_outbox WHERE user_id=? ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        return {
+            **status,
+            "devices": [dict(row) for row in subscriptions],
+            "latest_delivery": dict(latest) if latest else None,
+        }
+
     def active_push_subscriptions(self, user_id: str, endpoint_hash: str | None = None) -> list[dict]:
         now = utc_now()
         parameters: list[object] = [user_id, now]
@@ -1947,6 +1971,7 @@ class LoveMomentsStore(
             "permission_version": couple["version"],
             "needs_pairing": False,
             "messages": self.list_messages(user_id=user_id),
+            "messageReadState": self.message_read_state(user_id=user_id),
             "moments": self.list_moments(user_id=user_id),
             "trip": self.get_trip(trip_row["id"], user_id=user_id) if trip_row else None,
             "wishlist": self.get_wishlist(user_id=user_id),
@@ -3004,6 +3029,37 @@ class LoveMomentsStore(
             ).fetchall()
         return self._message_items(rows, user_id)
 
+    def message_read_state(self, user_id: str = DEMO_USER) -> dict:
+        """Expose the server-authoritative unread anchor shared by every device."""
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            unread = db.execute(
+                """
+                SELECT COUNT(*) AS unread_count,MIN(sent_at) AS first_unread_at
+                FROM messages WHERE couple_id=? AND sender_id<>? AND read_at IS NULL
+                """,
+                (couple["id"], user_id),
+            ).fetchone()
+            first = db.execute(
+                """
+                SELECT id FROM messages
+                WHERE couple_id=? AND sender_id<>? AND read_at IS NULL
+                ORDER BY sent_at,id LIMIT 1
+                """,
+                (couple["id"], user_id),
+            ).fetchone()
+            latest = db.execute(
+                "SELECT id,sent_at FROM messages WHERE couple_id=? ORDER BY sent_at DESC,id DESC LIMIT 1",
+                (couple["id"],),
+            ).fetchone()
+        return {
+            "unread_count": int(unread["unread_count"] or 0),
+            "first_unread_message_id": first["id"] if first else None,
+            "first_unread_at": unread["first_unread_at"],
+            "latest_message_id": latest["id"] if latest else None,
+            "latest_message_at": latest["sent_at"] if latest else None,
+        }
+
     def create_message(self, payload: dict, user_id: str = DEMO_USER) -> dict:
         content = str(payload.get("content", "")).strip()
         if not content:
@@ -3096,7 +3152,7 @@ class LoveMomentsStore(
                     (now, couple["id"], user_id, *ids),
                 )
                 self._event(db, couple["id"], user_id, "message.read", ids[-1], {"messageIds": ids, "readAt": now})
-        return {"updated": len(ids), "read_at": now}
+        return {"updated": len(ids), "read_at": now, **self.message_read_state(user_id)}
 
     def suggest_expression(
         self,

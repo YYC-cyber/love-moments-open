@@ -64,6 +64,9 @@ button { color: inherit; cursor: pointer; }
 .push-status.warning { color: var(--wine); }
 .push-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
 .push-settings-actions .secondary-button { width: auto; flex: 1 1 120px; margin: 0; }
+.push-diagnostics { display: grid; gap: 6px; margin-top: 10px; }
+.push-diagnostic-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px dashed var(--line); padding-top: 6px; color: var(--muted); font-size: 9px; }
+.push-diagnostic-row strong { color: var(--ink); text-align: right; }
 .account-media-section { margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.45); }
 .account-media-section h3 { margin: 0 0 4px; font-size: 14px; }
 .account-media-list { display: grid; gap: 8px; margin-top: 10px; }
@@ -219,7 +222,8 @@ h1, h2, h3 { font-family: "Noto Serif SC", serif; }
 .bottom-nav small { font-size: 9px; }
 .bottom-nav button.active { color: var(--wine); }
 .bottom-nav button.active span { transform: translateY(-1px); }
-.nav-dot { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #bd475a; top: 0; right: 23px; }
+.nav-dot { position: absolute; min-width: 17px; height: 17px; display: grid; place-items: center; border-radius: 999px; padding: 0 4px; background: #bd475a; color: #fff; top: -3px; right: 13px; font: 700 8px/1 system-ui,sans-serif; box-shadow: 0 2px 7px rgba(125,38,56,.24); }
+.nav-dot[hidden] { display: none; }
 
 .chat-content, .trip-content, .timeline-content, .life-content { padding-top: 90px; }
 .screen:not([data-screen="home"]) + * { color: inherit; }

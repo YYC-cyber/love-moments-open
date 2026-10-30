@@ -1074,6 +1074,11 @@ class HttpApiTests(unittest.TestCase):
         registered = self.post(callee, "/push/subscriptions", {"subscription": subscription})
         self.assertTrue(registered["subscribed"])
         self.assertEqual(registered["active_device_count"], 1)
+        with callee.open(self.base + "/push/diagnostics") as response_stream:
+            diagnostics = json.load(response_stream)
+        self.assertTrue(diagnostics["enabled"])
+        self.assertEqual(diagnostics["active_device_count"], 1)
+        self.assertNotIn("subscription_ciphertext", json.dumps(diagnostics))
         with main.STORE.connection() as db:
             stored = db.execute("SELECT subscription_ciphertext FROM push_subscriptions WHERE endpoint_hash=?", (main.PUSH.endpoint_hash(subscription),)).fetchone()[0]
         self.assertNotIn("web.push.apple.com", stored)
@@ -1109,6 +1114,23 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(pending_status, "cancelled")
         removed = self.delete(callee, "/push/subscriptions", {"subscription": subscription})
         self.assertTrue(removed["removed"])
+
+    def test_message_read_state_is_consistent_between_http_sessions(self) -> None:
+        sender, first_device, second_device = self.opener(), self.opener(), self.opener()
+        self.post(sender, "/auth/login", {"username": "test1", "password": "test123"})
+        self.post(first_device, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(second_device, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(first_device, "/messages/read", {})
+        created = self.post(sender, "/messages", {"type": "text", "content": "跨设备同步", "idempotency_key": uuid.uuid4().hex})
+        with second_device.open(self.base + "/messages/read-state") as response:
+            unread = json.load(response)
+        self.assertEqual(unread["unread_count"], 1)
+        self.assertEqual(unread["first_unread_message_id"], created["id"])
+        marked = self.post(first_device, "/messages/read", {})
+        self.assertEqual(marked["unread_count"], 0)
+        with second_device.open(self.base + "/messages/read-state") as response:
+            synced = json.load(response)
+        self.assertEqual(synced["unread_count"], 0)
 
     def test_chat_message_queues_privacy_safe_push_only_for_the_partner(self) -> None:
         sender, recipient = self.opener(), self.opener()

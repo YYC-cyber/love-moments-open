@@ -367,6 +367,7 @@ const state = {
   pushSubscribed: false,
   pushSynced: false,
   pushConfig: null,
+  messageReadState: { unread_count: 0, first_unread_message_id: null, latest_message_id: null },
   serviceWorkerRegistration: null,
   serviceWorkerUpdate: null,
   serviceWorkerUpdateApplying: false,
@@ -451,6 +452,7 @@ window.addEventListener("storage", event => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !state.data?.user) return;
+  refreshMessageReadState().catch(() => {});
   api("/api/v1/auth/me").then(result => {
     if (result.user?.id && result.user.id !== state.data?.user?.id) window.location.reload();
   }).catch(() => {});
@@ -696,6 +698,24 @@ async function refreshPushStatus({ resync = false } = {}) {
   return state.pushSubscribed;
 }
 
+async function refreshPushDiagnostics() {
+  const host = document.getElementById("pushDiagnostics");
+  if (!host) return;
+  host.innerHTML = `<p class="form-note">正在检查真实推送状态…</p>`;
+  const result = await api("/api/v1/push/diagnostics");
+  const permission = "Notification" in window ? Notification.permission : "不支持";
+  const delivery = result.latest_delivery || {};
+  const rows = [
+    ["安全连接", window.isSecureContext ? "正常" : "需要 HTTPS"],
+    ["主屏幕模式", isStandaloneApp() ? "已安装" : "浏览器打开"],
+    ["系统通知权限", permission],
+    ["服务器推送", result.enabled ? "已启用" : (result.reason || "未启用")],
+    ["有效设备", `${Number(result.active_device_count || 0)} 台`],
+    ["最近发送", delivery.status ? `${delivery.status} · 尝试 ${Number(delivery.attempt_count || 0)} 次` : "暂无记录"],
+  ];
+  host.innerHTML = rows.map(([label, value]) => `<div class="push-diagnostic-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
 async function enablePushNotifications() {
   if (!("Notification" in window) || !("PushManager" in window) || !("serviceWorker" in navigator)) throw new Error("当前浏览器不支持锁屏 Web Push");
   if (!window.isSecureContext) throw new Error("请使用 HTTPS 地址打开恋屿后再开启提醒");
@@ -912,10 +932,26 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
 
+function renderMessageReadState() {
+  const badge = document.getElementById("chatUnreadBadge");
+  if (!badge) return;
+  const count = state.screen === "chat" ? 0 : Math.max(0, Number(state.messageReadState?.unread_count || 0));
+  badge.hidden = count === 0;
+  badge.textContent = count > 99 ? "99+" : String(count);
+  badge.setAttribute("aria-label", `${count} 条未读消息`);
+}
+
+async function refreshMessageReadState() {
+  if (!state.data?.user) return;
+  state.messageReadState = await api("/api/v1/messages/read-state");
+  renderMessageReadState();
+}
+
 function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
   if (state.screen === "chat" && screen !== "chat") state.chatHistory.savedScrollTop = null;
   state.chatHistory.latestLockUntil = screen === "chat" ? Date.now() + 3000 : 0;
   state.screen = screen;
+  renderMessageReadState();
   privateStorage().setItem("love-screen", screen);
   document.querySelectorAll(".screen").forEach(el => el.classList.toggle("active", el.dataset.screen === screen));
   document.querySelectorAll(".bottom-nav [data-nav]").forEach(el => el.classList.toggle("active", el.dataset.nav === screen));
@@ -934,7 +970,7 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
     state.chatHistory.initialized = true;
   });
   if (state.data) loadSmartSurface(screen, { quiet: true });
-  if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).catch(() => {});
+  if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).then(result => { state.messageReadState = result; renderMessageReadState(); }).catch(() => {});
 }
 
 const smartExamples = {
@@ -4510,6 +4546,10 @@ async function loadAccountCenter() {
   renderOfflineSyncStatus(offlineQueue);
   openModal("accountModal");
   refreshPushStatus({ resync: true }).catch(error => renderPushStatus(error.message, "warning"));
+  refreshPushDiagnostics().catch(error => {
+    const host = document.getElementById("pushDiagnostics");
+    if (host) host.innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`;
+  });
 }
 
 function lifeAssistantCountLabel(key) {
@@ -4738,6 +4778,15 @@ async function loadBootstrap({ quiet = false } = {}) {
     if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
     else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
     state.data = bootstrap;
+    state.messageReadState = bootstrap.messageReadState || state.messageReadState;
+    if (state.screen === "chat" && newPartnerMessages.length && chatWasNearBottom) {
+      try { state.messageReadState = await api("/api/v1/messages/read", { method: "POST", body: "{}" }); }
+      catch (_) { /* The next sync retries the read state. */ }
+    }
+    if (state.screen === "chat" && !chatWasNearBottom) {
+      state.chatHistory.newCount = Math.max(state.chatHistory.newCount, Number(state.messageReadState?.unread_count || 0));
+    }
+    renderMessageReadState();
     state.online = true;
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
     const requestedTripId = new URLSearchParams(location.search).get("trip_id");
@@ -7144,6 +7193,12 @@ document.addEventListener("click", async event => {
     catch (error) { toast(error.message); }
     finally { actionEl.disabled = false; }
   }
+  if (action === "refresh-push-diagnostics") {
+    actionEl.disabled = true;
+    try { await refreshPushDiagnostics(); }
+    catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
+  }
   if (action === "new-moment") {
     openMomentComposer(actionEl.dataset.type || "回忆");
   }
@@ -8134,8 +8189,11 @@ document.getElementById("chatSearchForm").addEventListener("submit", async event
 
 document.getElementById("messages").addEventListener("scroll", event => {
   const viewport = event.currentTarget;
+  const previousScrollTop = Number.isFinite(state.chatHistory.savedScrollTop) ? state.chatHistory.savedScrollTop : viewport.scrollTop;
+  const movedTowardLatest = viewport.scrollTop > previousScrollTop + 1;
   state.chatHistory.savedScrollTop = viewport.scrollTop;
-  if (chatViewportNearBottom(viewport)) {
+  if (!chatViewportNearBottom(viewport)) state.chatHistory.latestLockUntil = 0;
+  if (chatViewportNearBottom(viewport) && (movedTowardLatest || state.chatHistory.newCount < 1)) {
     state.chatHistory.newCount = 0;
     state.chatHistory.unreadMessageIds.clear();
     updateChatNewMessageButton();

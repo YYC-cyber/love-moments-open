@@ -498,7 +498,7 @@
 
     <nav class="bottom-nav" aria-label="主导航">
       <button class="active" data-nav="home"><span>⌂</span><small>首页</small></button>
-      <button data-nav="chat"><span>◌</span><small>消息</small><i class="nav-dot"></i></button>
+      <button data-nav="chat"><span>◌</span><small>消息</small><i class="nav-dot" id="chatUnreadBadge" hidden>0</i></button>
       <button data-nav="trip"><span>⌁</span><small>旅行</small></button>
       <button data-nav="timeline"><span>◇</span><small>时光</small></button>
       <button data-nav="life"><span>♡</span><small>我们</small></button>
@@ -954,7 +954,9 @@
           <button class="secondary-button" id="pushEnableButton" data-action="enable-notifications">开启提醒</button>
           <button class="secondary-button" id="pushTestButton" data-action="test-notification" hidden>发送测试通知</button>
           <button class="secondary-button danger-text" id="pushDisableButton" data-action="disable-notifications" hidden>关闭此设备提醒</button>
+          <button class="secondary-button" data-action="refresh-push-diagnostics">检查提醒状态</button>
         </div>
+        <div id="pushDiagnostics" class="push-diagnostics" aria-live="polite"></div>
         <p class="form-note">iPhone/iPad 需 iOS/iPadOS 16.4 以上、先添加到主屏幕并使用 HTTPS。聊天、共同留言和来电只显示通用隐私文案，点击后进入对应页面；来电不是系统全屏 CallKit。</p>
       </section>
       <section class="push-settings" aria-labelledby="privacyUsageTitle">
