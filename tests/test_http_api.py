@@ -1031,6 +1031,32 @@ class HttpApiTests(unittest.TestCase):
         logged_in = self.post(opener, "/auth/login", {"username": "password_user", "password": "new-password-456"})
         self.assertEqual(logged_in["user"]["username"], "password_user")
 
+    def test_authenticated_user_can_update_only_their_avatar_label(self) -> None:
+        opener = self.opener()
+        username = f"avatar_{uuid.uuid4().hex[:10]}"
+        registered = self.post(opener, "/auth/register", {
+            "username": username,
+            "password": "avatar-password-123",
+            "nickname": "头像测试",
+        })
+        updated = self.put(opener, "/account/profile", {"avatar_label": "🌙"})
+        self.assertEqual(updated["user"]["id"], registered["user"]["id"])
+        self.assertEqual(updated["user"]["avatar_label"], "🌙")
+        with opener.open(self.base + "/auth/me") as response:
+            current = json.load(response)
+        self.assertEqual(current["user"]["avatar_label"], "🌙")
+        themed = self.put(opener, "/account/profile", {"ui_theme": "daniel"})
+        self.assertEqual(themed["user"]["ui_theme"], "daniel")
+        display = self.put(opener, "/account/profile", {
+            "ui_text_size": "large", "ui_sticker_density": "minimal",
+        })
+        self.assertEqual(display["user"]["ui_text_size"], "large")
+        self.assertEqual(display["user"]["ui_sticker_density"], "minimal")
+        with opener.open(self.base + "/auth/me") as response:
+            current = json.load(response)
+        self.assertEqual(current["user"]["ui_text_size"], "large")
+        self.assertEqual(current["user"]["ui_sticker_density"], "minimal")
+
     def test_web_push_subscription_test_and_call_dispatch(self) -> None:
         caller, callee = self.opener(), self.opener()
         self.post(caller, "/auth/login", {"username": "test", "password": "test123"})
@@ -1947,7 +1973,8 @@ class HttpApiTests(unittest.TestCase):
 
     def test_external_provider_alerts_only_after_three_consecutive_failures(self) -> None:
         tracker = main.ProviderFailureTracker()
-        with patch.object(main.ADMIN, "record_event") as record:
+        with patch.object(main.ADMIN, "record_event") as record, \
+             patch.object(main.ADMIN, "resolve_event_condition") as resolve:
             tracker.failure("ocr", "OCR 服务", RuntimeError("first"))
             tracker.failure("ocr", "OCR 服务", RuntimeError("second"))
             record.assert_not_called()
@@ -1956,6 +1983,11 @@ class HttpApiTests(unittest.TestCase):
             self.assertEqual(record.call_args.args[0], "provider:ocr:consecutive-failure")
             self.assertEqual(record.call_args.args[4]["consecutive_failures"], 3)
             tracker.success("ocr")
+            resolve.assert_called_once_with(
+                "provider:ocr:consecutive-failure",
+                kind="provider_success",
+                message="外部服务随后已真实调用成功",
+            )
             tracker.failure("ocr", "OCR 服务", RuntimeError("new-first"))
             tracker.failure("ocr", "OCR 服务", RuntimeError("new-second"))
             self.assertEqual(record.call_count, 1)

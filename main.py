@@ -72,6 +72,36 @@ PUBLIC_FILES = {
     "/sw.js",
 }
 RECIPE_COVER_PATH = re.compile(r"/static/assets/recipe-covers/[A-Za-z0-9_-]+\.jpg")
+PRIVATE_THEME_FILES = {
+    "kitty": "kitty-stickers-v1.png",
+    "daniel": "daniel-stickers-v1.png",
+    "kitty_pages": "kitty-page-stickers-v2.png",
+    "daniel_pages": "daniel-page-stickers-v2.png",
+}
+
+
+def _private_theme_asset(filename: str) -> Path | None:
+    """Only installed character artwork, never arbitrary files beside the DB.
+
+    Artwork is separately provisioned in persistent storage, not bundled into
+    the public static directory or repository. Missing art is optional: users
+    still have the same usable colour themes without it.
+    """
+    if filename not in PRIVATE_THEME_FILES.values():
+        return None
+    directory = Path(STORE.db_path).parent / "theme-assets"
+    path = directory / filename
+    if directory.is_symlink() or path.is_symlink():
+        return None
+    try:
+        if not path.is_file() or not 8 <= path.stat().st_size <= 10 * 1024 * 1024:
+            return None
+        with path.open("rb") as stream:
+            if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+                return None
+    except OSError:
+        return None
+    return path
 
 
 def _is_public_file(path: str) -> bool:
@@ -113,6 +143,11 @@ class ProviderFailureTracker:
     def success(self, provider: str) -> None:
         with self._lock:
             self._failures[provider] = 0
+        ADMIN.resolve_event_condition(
+            f"provider:{provider}:consecutive-failure",
+            kind="provider_success",
+            message="外部服务随后已真实调用成功",
+        )
 
     def failure(self, provider: str, label: str, error: Exception) -> None:
         with self._lock:

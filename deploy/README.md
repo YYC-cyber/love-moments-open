@@ -47,7 +47,9 @@ Docker 只把 `127.0.0.1:52013` 暴露给服务器本机。Nginx 是唯一公网
      --non-interactive --agree-tos --register-unsafely-without-email
    ```
 
-7. 构建并启动 `deploy/docker-compose.production.yml`，安装并启用 `deploy/systemd` 中的服务和定时器。若使用 IP 证书，必须同时启用 `love-moments-cert-renew.timer`。
+7. 构建并启动 `deploy/docker-compose.production.yml`，构建时用
+   `APP_RELEASE_SHA="$(git rev-parse HEAD)" docker compose -f deploy/docker-compose.production.yml build`
+   写入不可变版本号，再安装并启用 `deploy/systemd` 中的服务和定时器。若使用 IP 证书，必须同时启用 `love-moments-cert-renew.timer`。
 
 ## 验收
 

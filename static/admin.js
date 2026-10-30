@@ -77,6 +77,7 @@ function render(data) {
   document.getElementById("checkGrid").innerHTML = data.checks.map(item => `<article class="check-card ${escapeHtml(item.status)}"><header><strong>${escapeHtml(item.label)}</strong><i></i></header><small>${escapeHtml(item.message)}</small></article>`).join("");
   const metrics = [
     ["运行时间", uptime(data.runtime.uptime_seconds), `Python ${data.runtime.python}`],
+    ["部署版本", data.runtime.release?.deployed_sha === "unknown" ? "开发模式" : data.runtime.release.deployed_sha.slice(0, 8), data.runtime.release?.latest_sha ? `GitHub ${data.runtime.release.latest_sha.slice(0, 8)}` : "尚未取得远程版本"],
     ["数据库", bytes(data.storage.database_bytes), `Schema ${data.runtime.schema_version}`],
     ["媒体文件", String(data.storage.media_files), bytes(data.storage.media_bytes)],
     ["磁盘可用", bytes(data.storage.disk_free_bytes), `总计 ${bytes(data.storage.disk_total_bytes)}`],

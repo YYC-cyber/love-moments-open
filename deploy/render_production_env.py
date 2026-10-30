@@ -55,6 +55,7 @@ def render(source: Path, output: Path, domain: str, public_ipv4: str) -> list[st
         "LOG_ROOT": "/srv/love-moments/logs",
         "LOCAL_ADMIN_NOTIFICATIONS": "false",
         "WATCHDOG_AUTO_RESTART": "false",
+        "RELEASE_CHECK_ENABLED": "true",
         "WEB_PUSH_VAPID_SUBJECT": public_url,
         "TENCENT_CLOUD_DEPLOYMENT_STATUS": "deployed",
         "TENCENT_CLOUD_REGION": "ap-shanghai",

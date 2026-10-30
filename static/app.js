@@ -2,6 +2,154 @@ const PWA_SHORTCUT_INTENTS = Object.freeze({ message: "message", moment: "moment
 const PWA_SHORTCUT_STORAGE_KEY = "love-pending-shortcut";
 const OFFLINE_QUEUE_ACTIONS = new Set(["send_text_message", "check_shopping_item"]);
 const COOKING_RESTORE_TERMINAL_STATUSES = new Set([403, 404, 409]);
+const UI_THEMES = Object.freeze({
+  classic: { color: "#7d2638" },
+  kitty: { color: "#d13f61" },
+  daniel: { color: "#2f67a4" },
+});
+
+function normalizeUiTheme(value) {
+  return Object.prototype.hasOwnProperty.call(UI_THEMES, value) ? value : "classic";
+}
+
+function applyUiTheme(value, { remember = true } = {}) {
+  const theme = normalizeUiTheme(value);
+  document.body.dataset.uiTheme = theme;
+  document.getElementById("themeColorMeta")?.setAttribute("content", UI_THEMES[theme].color);
+  if (remember) {
+    try { localStorage.setItem("love-ui-theme", theme); } catch (_) {}
+  }
+  return theme;
+}
+
+function normalizeUiTextSize(value) {
+  return value === "large" ? "large" : "standard";
+}
+
+function normalizeStickerDensity(value) {
+  return ["minimal", "cute", "full"].includes(value) ? value : "cute";
+}
+
+function applyUiDisplayPreferences(user = {}, { remember = true } = {}) {
+  const textSize = normalizeUiTextSize(user.ui_text_size);
+  const stickerDensity = normalizeStickerDensity(user.ui_sticker_density);
+  document.body.dataset.uiTextSize = textSize;
+  document.body.dataset.stickerDensity = stickerDensity;
+  if (remember) {
+    try {
+      localStorage.setItem("love-ui-text-size", textSize);
+      localStorage.setItem("love-sticker-density", stickerDensity);
+    } catch (_) {}
+  }
+}
+
+try {
+  applyUiTheme(localStorage.getItem("love-ui-theme") || "classic", { remember: false });
+  applyUiDisplayPreferences({
+    ui_text_size: localStorage.getItem("love-ui-text-size") || "standard",
+    ui_sticker_density: localStorage.getItem("love-sticker-density") || "cute",
+  }, { remember: false });
+} catch (_) {}
+
+// Artwork is private deployment data, never a public/static or offline-cache
+// asset. Only the authenticated manifest can enable it. A missing manifest is
+// cosmetic: the full app continues with the selected colour palette.
+let themeArtworkOwner = null;
+let themeArtworkGeneration = 0;
+function clearThemeArtwork() {
+  themeArtworkOwner = null;
+  themeArtworkGeneration += 1;
+  delete document.body.dataset.themeArtReady;
+  for (const name of ["kitty", "daniel"]) {
+    document.body.style.removeProperty(`--${name}-sticker-sheet`);
+    document.body.style.removeProperty(`--${name}-page-sticker-sheet`);
+  }
+}
+
+async function loadThemeArtwork(userId) {
+  if (!userId || themeArtworkOwner === userId) return;
+  clearThemeArtwork();
+  themeArtworkOwner = userId;
+  const generation = themeArtworkGeneration;
+  try {
+    const manifest = await api("/api/v1/theme-assets");
+    if (generation !== themeArtworkGeneration || state.data?.user?.id !== userId) return;
+    const available = [];
+    for (const name of ["kitty", "daniel"]) {
+      const expected = `/api/v1/theme-assets/${name}-stickers-v1.png`;
+      // Do not turn model text, third-party URLs or arbitrary API paths into CSS.
+      if (manifest.assets?.[name] !== expected) continue;
+      document.body.style.setProperty(`--${name}-sticker-sheet`, `url("${expected}")`);
+      const pageExpected = `/api/v1/theme-assets/${name}-page-stickers-v2.png`;
+      if (manifest.assets?.[`${name}_pages`] === pageExpected) {
+        document.body.style.setProperty(`--${name}-page-sticker-sheet`, `url("${pageExpected}")`);
+      }
+      available.push(name);
+    }
+    document.body.dataset.themeArtReady = available.join(" ");
+  } catch (_) {
+    if (generation === themeArtworkGeneration) themeArtworkOwner = null;
+  }
+}
+
+function installThemeDecorations() {
+  const sticker = pose => {
+    const node = document.createElement("span");
+    node.className = `theme-sticker theme-sticker--${pose}`;
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  };
+  document.querySelector(".home-hero")?.appendChild(sticker("hero"));
+  for (const [surface, caption, pose] of [
+    ["chat", "把想念，慢慢说给你听", "chat"],
+    ["trip", "下一站，也要一起去", "map"],
+    ["timeline", "认真收藏我们的每一天", "album"],
+    ["life", "和你一起，把日子过可爱", "gift"],
+  ]) {
+    const title = document.querySelector(`[data-screen="${surface}"] .page-title-row`);
+    if (!title) continue;
+    const ribbon = document.createElement("div");
+    ribbon.className = "theme-page-ribbon";
+    ribbon.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = caption;
+    const pageSticker = sticker(pose);
+    pageSticker.classList.add("theme-content-sticker");
+    ribbon.append(text, pageSticker);
+    title.before(ribbon);
+  }
+  for (const sheet of document.querySelectorAll(".modal .sheet")) {
+    const ledge = document.createElement("div");
+    ledge.className = "theme-window-decoration";
+    ledge.setAttribute("aria-hidden", "true");
+    ledge.append(sticker("peek"));
+    sheet.prepend(ledge);
+  }
+  document.querySelector(".question-card .card-top")?.appendChild(sticker("letter"));
+  const assistantMascot = sticker("assistant");
+  document.querySelector(".life-assistant-heading")?.appendChild(assistantMascot);
+  const coupleSeal = document.createElement("div");
+  coupleSeal.className = "theme-couple-seal";
+  coupleSeal.setAttribute("aria-hidden", "true");
+  const sealText = document.createElement("span");
+  sealText.textContent = "♡ 两个人的小小日常 ♡";
+  coupleSeal.append(sticker("letter"), sealText);
+  document.querySelector(".couple-card")?.appendChild(coupleSeal);
+
+  // Rich mode adds small, contextual helpers to real content sections. They
+  // live in reserved layout space and never cover controls or user content.
+  for (const [selector, pose] of [
+    ["#mealWorkspace", "chef"],
+    ["#lifeRecordsPanel", "calendar"],
+    [".wishlist[data-life-panel]", "gift"],
+  ]) {
+    const host = document.querySelector(selector);
+    if (!host) continue;
+    const extra = sticker(pose);
+    extra.classList.add("theme-content-sticker", "theme-context-sticker");
+    host.prepend(extra);
+  }
+}
 const ONLINE_ONLY_UI_ACTIONS = Object.freeze({
   "assistant-replan-today": ["trip_replan", "智能重排行程"],
   "assistant-recap-edit": ["shared_confirm", "旅行回忆草稿"],
@@ -2465,6 +2613,8 @@ function renderIdentity() {
   document.querySelector(".couple-card p").textContent = `相遇于 ${couple.anniversary} · 属于你们的共同空间`;
   document.querySelector("#callScreen h2").textContent = partner.nickname;
   document.getElementById("partnerMomentLabel").textContent = `${partner.nickname}的此刻 · 当前账号：${user.nickname}`;
+  applyUiTheme(user.ui_theme || "classic");
+  applyUiDisplayPreferences(user);
   const anniversary = new Date(`${couple.anniversary}T00:00:00`);
   const days = Math.max(0, Math.floor((Date.now() - anniversary.getTime()) / 86400000));
   document.getElementById("togetherDays").textContent = days.toLocaleString("zh-CN");
@@ -4244,6 +4394,13 @@ async function loadAccountCenter() {
   const identityCard = document.getElementById("accountIdentityCard");
   if (identityCard && user && partner) {
     identityCard.innerHTML = `<span class="avatar" data-avatar-theme="${avatarTheme(user)}" aria-label="当前账号：${escapeHtml(user.nickname)}">${escapeHtml(user.avatar_label)}</span><div><small>当前登录账号</small><strong>${escapeHtml(user.nickname)}（${escapeHtml(user.username)}）</strong><span>伴侣：${escapeHtml(partner.nickname)}（${escapeHtml(partner.username)}）</span></div>`;
+    document.getElementById("avatarLabelInput").value = user.avatar_label || user.nickname?.slice(0, 1) || "♡";
+    const themeInput = document.querySelector(`#themeProfileForm input[name="uiTheme"][value="${normalizeUiTheme(user.ui_theme)}"]`);
+    if (themeInput) themeInput.checked = true;
+    const textInput = document.querySelector(`#themeProfileForm input[name="uiTextSize"][value="${normalizeUiTextSize(user.ui_text_size)}"]`);
+    if (textInput) textInput.checked = true;
+    const densityInput = document.querySelector(`#themeProfileForm input[name="stickerDensity"][value="${normalizeStickerDensity(user.ui_sticker_density)}"]`);
+    if (densityInput) densityInput.checked = true;
   }
   document.getElementById("deviceList").innerHTML = result.items.map(item => `<article class="device-row"><div class="grow"><strong>${escapeHtml(item.device_name)}</strong><small>${item.current ? "当前设备 · " : ""}${new Date(item.last_seen_at).toLocaleString("zh-CN")} · ${escapeHtml(item.ip_address || "未知地址")}</small></div>${!item.current && item.active ? `<button data-action="revoke-device" data-id="${item.id}">撤销</button>` : `<span class="mock-badge">${item.active ? "当前" : "已失效"}</span>`}</article>`).join("");
   const mediaRow = item => `<article class="account-media-row">${["image", "video"].includes(item.kind) ? `<span class="media-preview-wrap"><img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy">${item.kind === "video" ? `<i aria-hidden="true">▶</i>` : ""}</span>` : `<span class="media-kind">♫</span>`}<div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${item.visibility === "private" ? "仅自己" : item.visibility === "delayed" ? "延时公开" : "双方可见"} · ${(Number(item.size_bytes) / 1024 / 1024).toFixed(1)} MB${item.metadata_stripped ? " · 隐私信息已清理" : ""}</small></div>${item.owner_id === state.data?.user?.id ? `<button data-action="trash-media" data-id="${item.id}">清理</button>` : ""}</article>`;
@@ -7841,6 +7998,53 @@ document.getElementById("changePasswordForm").addEventListener("submit", async e
     event.target.reset();
     await loadAccountCenter();
     toast(`密码已更换，已退出其他 ${result.revoked_sessions || 0} 个会话`);
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
+document.getElementById("avatarProfileForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.submitter;
+  const avatarLabel = document.getElementById("avatarLabelInput").value.trim();
+  if (!avatarLabel || Array.from(avatarLabel).length > 4) {
+    toast("头像标识请填写 1 个汉字或表情（最多 4 个字符）");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api("/api/v1/account/profile", {
+      method: "PUT", body: JSON.stringify({ avatar_label: avatarLabel }),
+    });
+    state.data.user = result.user;
+    renderIdentity();
+    await loadAccountCenter();
+    toast("你的头像已经更新，对方刷新后也会看到");
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
+document.getElementById("themeProfileForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.submitter;
+  const selected = document.querySelector('#themeProfileForm input[name="uiTheme"]:checked')?.value;
+  const textSize = document.querySelector('#themeProfileForm input[name="uiTextSize"]:checked')?.value;
+  const stickerDensity = document.querySelector('#themeProfileForm input[name="stickerDensity"]:checked')?.value;
+  if (!selected) { toast("请选择一种界面风格"); return; }
+  if (!textSize || !stickerDensity) { toast("请选择文字大小和贴纸数量"); return; }
+  button.disabled = true;
+  try {
+    const result = await api("/api/v1/account/profile", {
+      method: "PUT", body: JSON.stringify({
+        ui_theme: normalizeUiTheme(selected),
+        ui_text_size: normalizeUiTextSize(textSize),
+        ui_sticker_density: normalizeStickerDensity(stickerDensity),
+      }),
+    });
+    state.data.user = result.user;
+    applyUiTheme(result.user.ui_theme);
+    applyUiDisplayPreferences(result.user);
+    await loadAccountCenter();
+    toast("显示偏好已经保存，只影响你的账号");
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });

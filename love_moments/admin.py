@@ -14,6 +14,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -67,6 +69,9 @@ class AdminService:
         self._store_getter = store_getter
         self.root = root
         self.started_at = datetime.now(timezone.utc)
+        self._release_cache: dict[str, Any] | None = None
+        self._release_cache_until = datetime.min.replace(tzinfo=timezone.utc)
+        self._release_lock = threading.Lock()
 
     @property
     def store(self) -> LoveMomentsStore:
@@ -177,6 +182,32 @@ class AdminService:
         except Exception:
             return
 
+    def resolve_event_condition(
+        self,
+        event_key: str,
+        *,
+        kind: str,
+        message: str,
+        verified_at: str | None = None,
+    ) -> None:
+        """Resolve a condition only with explicit, persisted recovery evidence."""
+        try:
+            with self.store.connection() as db:
+                event = db.execute(
+                    "SELECT * FROM system_events WHERE event_key=? AND resolved_at IS NULL",
+                    (str(event_key)[:180],),
+                ).fetchone()
+                if event:
+                    self._resolve_with_evidence(
+                        db,
+                        event,
+                        kind=kind,
+                        message=message,
+                        verified_at=verified_at or utc_now(),
+                    )
+        except Exception:
+            return
+
     @staticmethod
     def _recovery_detail(detail_json: str, kind: str, message: str, verified_at: str) -> str:
         detail = parse_json(detail_json, {})
@@ -237,6 +268,19 @@ class AdminService:
                     event,
                     kind="quiet_period",
                     message="连续 24 小时没有再次出现相同账号登录失败",
+                    verified_at=now.isoformat(),
+                )
+                continue
+            if (
+                event["category"] == "security"
+                and event["event_key"].startswith(("origin:blocked:", "origin:preflight:"))
+                and event["last_seen_at"] <= quiet_before
+            ):
+                self._resolve_with_evidence(
+                    db,
+                    event,
+                    kind="quiet_period",
+                    message="连续 24 小时没有再次出现相同未授权来源请求，拦截记录已保留",
                     verified_at=now.isoformat(),
                 )
                 continue
@@ -311,6 +355,50 @@ class AdminService:
                     )
         except Exception:
             return
+
+    def _release_status(self) -> dict[str, Any]:
+        """Compare the immutable image revision with GitHub, without blocking health."""
+        deployed = os.getenv("APP_RELEASE_SHA", "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{7,40}", deployed):
+            deployed = "unknown"
+        enabled = os.getenv("RELEASE_CHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        repository = "https://github.com/YYC-cyber/love-moments-open"
+        base = {
+            "deployed_sha": deployed,
+            "latest_sha": None,
+            "status": "disabled" if not enabled else "unknown",
+            "checked_at": None,
+            "repository": repository,
+        }
+        if not enabled or deployed == "unknown":
+            return base
+        now = datetime.now(timezone.utc)
+        with self._release_lock:
+            if self._release_cache is not None and now < self._release_cache_until:
+                return dict(self._release_cache)
+            checked_at = now.replace(microsecond=0).isoformat()
+            try:
+                request = urllib.request.Request(
+                    "https://api.github.com/repos/YYC-cyber/love-moments-open/commits/main",
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "love-moments-release-check"},
+                )
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    payload = json.load(response)
+                latest = str(payload.get("sha", "")).strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", latest):
+                    raise ValueError("GitHub 返回的版本号无效")
+                result = {
+                    **base,
+                    "latest_sha": latest,
+                    "status": "current" if latest.startswith(deployed) or deployed.startswith(latest) else "behind",
+                    "checked_at": checked_at,
+                }
+                self._release_cache_until = now + timedelta(minutes=15)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                result = {**base, "status": "unavailable", "checked_at": checked_at}
+                self._release_cache_until = now + timedelta(minutes=5)
+            self._release_cache = result
+            return dict(result)
 
     def revoke_session(self, session_id: str, current_token: str | None, admin_user_id: str) -> dict:
         current_hash = hashlib.sha256(current_token.encode()).hexdigest() if current_token else ""
@@ -608,6 +696,7 @@ class AdminService:
         media_files, media_bytes = _folder_metrics(media_root)
         disk = shutil.disk_usage(database.parent)
         backups = self._backup_summary()
+        release = self._release_status()
         export_policy = account_export_policy_status()
         maintenance = self._maintenance_state()
         free_ratio = disk.free / disk.total if disk.total else 0
@@ -764,6 +853,19 @@ class AdminService:
                 "status": "critical" if exhausted_quotas else "warning" if warning_quotas else "ok",
                 "message": f"{len(exhausted_quotas)} 个接口已停止真实请求" if exhausted_quotas else f"{len(warning_quotas)} 个接口已超过 80%" if warning_quotas else f"{len(active_quotas)} 个已配置接口均在安全线内",
             },
+            {
+                "id": "release", "label": "服务器版本",
+                "status": "warning" if release["status"] in {"behind", "unavailable"} else "ok",
+                "message": (
+                    "已与 GitHub main 同步"
+                    if release["status"] == "current"
+                    else "服务器版本落后于 GitHub main，建议安排更新"
+                    if release["status"] == "behind"
+                    else "暂时无法读取 GitHub 最新版本，现有服务不受影响"
+                    if release["status"] == "unavailable"
+                    else "本地开发模式未启用远程版本核对"
+                ),
+            },
         ]
         if integrity != "ok" or foreign_key_violations or not schema_health["ok"]:
             self.record_event(
@@ -787,8 +889,20 @@ class AdminService:
             self.record_event("disk:warning", "warning", "storage", "服务器磁盘空间即将不足", {"free_bytes": disk.free, "free_ratio": round(free_ratio, 4)})
         if backups["latest_age_hours"] is None or backups["latest_age_hours"] > 48:
             self.record_event("backup:stale", "warning", "backup", "超过 48 小时没有成功备份", {"age_hours": backups["latest_age_hours"]})
-        elif backups["latest"] and not backups["latest"].get("verification_ok"):
-            self.record_event("backup:unverified", "warning", "backup", "最新备份尚未通过恢复验证", {"backup": backups["latest"]["name"]})
+        else:
+            self.resolve_event_condition(
+                "backup:stale",
+                kind="recent_backup",
+                message=f"已确认最近备份 {backups['latest']['name']} 距今不超过 48 小时",
+            )
+            if backups["latest"] and not backups["latest"].get("verification_ok"):
+                self.record_event("backup:unverified", "warning", "backup", "最新备份尚未通过恢复验证", {"backup": backups["latest"]["name"]})
+            elif backups["latest"]:
+                self.resolve_event_condition(
+                    "backup:unverified",
+                    kind="verified_backup",
+                    message=f"最近备份 {backups['latest']['name']} 已通过恢复验证",
+                )
         if media_integrity["missing_files"]:
             self.record_event("media:missing", "critical", "storage", "媒体数据库引用存在缺失文件", media_integrity)
         else:
@@ -817,6 +931,7 @@ class AdminService:
                 "schema_inventory": schema_health,
                 "database": "sqlite",
                 "media_storage": store.storage.name,
+                "release": release,
             },
             "checks": checks,
             "storage": {

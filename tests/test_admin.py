@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import sqlite3
 import tempfile
@@ -271,6 +272,67 @@ class AdminServiceTests(unittest.TestCase):
             other = db.execute("SELECT resolved_at FROM system_events WHERE event_key='auth:login:failed:other'").fetchone()
         self.assertIsNotNone(resolved["resolved_at"])
         self.assertIsNone(other["resolved_at"])
+
+    def test_provider_success_resolves_matching_failure_with_evidence(self) -> None:
+        key = "provider:booking:consecutive-failure"
+        self.admin.record_event(key, "warning", "external-service", "酒店查询连续调用失败")
+        self.admin.resolve_event_condition(
+            key,
+            kind="provider_success",
+            message="酒店查询随后已真实调用成功",
+        )
+        with self.store.connection() as db:
+            event = db.execute("SELECT * FROM system_events WHERE event_key=?", (key,)).fetchone()
+        self.assertIsNotNone(event["resolved_at"])
+        self.assertEqual(json.loads(event["detail_json"])["recovery"]["kind"], "provider_success")
+
+    def test_fresh_verified_backup_resolves_stale_and_unverified_events(self) -> None:
+        self.admin.record_event("backup:stale", "warning", "backup", "超过 48 小时没有成功备份")
+        self.admin.record_event("backup:unverified", "warning", "backup", "最新备份尚未通过恢复验证")
+        created = self.admin.create_backup(DEMO_USER)
+        self.admin.verify_backup(created["backup"], DEMO_USER)
+        self.admin.overview(True)
+        with self.store.connection() as db:
+            events = {
+                row["event_key"]: row
+                for row in db.execute(
+                    "SELECT * FROM system_events WHERE event_key IN ('backup:stale','backup:unverified')"
+                ).fetchall()
+            }
+        self.assertEqual(json.loads(events["backup:stale"]["detail_json"])["recovery"]["kind"], "recent_backup")
+        self.assertEqual(json.loads(events["backup:unverified"]["detail_json"])["recovery"]["kind"], "verified_backup")
+
+    def test_old_blocked_origin_is_kept_but_no_longer_actionable(self) -> None:
+        key = "origin:preflight:historical"
+        self.admin.record_event(key, "warning", "security", "已拦截未授权网页来源的跨域预检")
+        old = (datetime.now(timezone.utc) - timedelta(hours=25)).replace(microsecond=0).isoformat()
+        with self.store.connection() as db:
+            db.execute("UPDATE system_events SET first_seen_at=?,last_seen_at=? WHERE event_key=?", (old, old, key))
+        self.admin.overview(True)
+        with self.store.connection() as db:
+            event = db.execute("SELECT * FROM system_events WHERE event_key=?", (key,)).fetchone()
+        self.assertIsNotNone(event["resolved_at"])
+        self.assertEqual(json.loads(event["detail_json"])["recovery"]["kind"], "quiet_period")
+
+    def test_release_check_reports_current_and_behind_and_caches_result(self) -> None:
+        deployed = "a" * 40
+        current_response = io.BytesIO(json.dumps({"sha": deployed}).encode())
+        with patch.dict(os.environ, {"APP_RELEASE_SHA": deployed, "RELEASE_CHECK_ENABLED": "true"}, clear=False), \
+             patch("love_moments.admin.urllib.request.urlopen", return_value=current_response) as fetch:
+            first = self.admin.overview(True)
+            second = self.admin.overview(True)
+        self.assertEqual(first["runtime"]["release"]["status"], "current")
+        self.assertEqual(second["runtime"]["release"]["status"], "current")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(next(item for item in first["checks"] if item["id"] == "release")["status"], "ok")
+
+        other_admin = AdminService(lambda: self.store, self.root)
+        behind_response = io.BytesIO(json.dumps({"sha": "b" * 40}).encode())
+        with patch.dict(os.environ, {"APP_RELEASE_SHA": deployed, "RELEASE_CHECK_ENABLED": "true"}, clear=False), \
+             patch("love_moments.admin.urllib.request.urlopen", return_value=behind_response):
+            behind = other_admin.overview(True)
+        self.assertEqual(behind["runtime"]["release"]["status"], "behind")
+        self.assertEqual(next(item for item in behind["checks"] if item["id"] == "release")["status"], "warning")
 
     def test_admin_can_revoke_another_session_but_not_current(self) -> None:
         current = self.store.create_session(DEMO_USER, "当前设备")

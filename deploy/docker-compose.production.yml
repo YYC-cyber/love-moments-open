@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
+        APP_RELEASE_SHA: ${APP_RELEASE_SHA:-unknown}
     image: love-moments:production
     container_name: love-moments-app
     restart: unless-stopped

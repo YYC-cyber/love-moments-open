@@ -508,6 +508,12 @@ class LoveMomentsStore(
                 db.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
             if "deleted_at" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN deleted_at TEXT")
+            if "ui_theme" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN ui_theme TEXT NOT NULL DEFAULT 'classic'")
+            if "ui_text_size" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN ui_text_size TEXT NOT NULL DEFAULT 'standard'")
+            if "ui_sticker_density" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN ui_sticker_density TEXT NOT NULL DEFAULT 'cute'")
             session_columns = {row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
             for name, definition in {
                 "device_name": "TEXT NOT NULL DEFAULT '未知设备'",
@@ -1226,7 +1232,10 @@ class LoveMomentsStore(
         if row is None:
             raise KeyError("用户不存在")
         value = dict(row)
-        return {key: value.get(key) for key in ("id", "username", "nickname", "avatar_label", "locale", "timezone", "created_at")}
+        return {key: value.get(key) for key in (
+            "id", "username", "nickname", "avatar_label", "ui_theme",
+            "ui_text_size", "ui_sticker_density", "locale", "timezone", "created_at",
+        )}
 
     def register(self, username: str, password: str, nickname: str) -> dict:
         username = username.strip().lower()
@@ -1253,6 +1262,86 @@ class LoveMomentsStore(
         if not row:
             raise KeyError("用户不存在")
         return self.public_user(row)
+
+    def update_my_profile(self, payload: dict, user_id: str) -> dict:
+        """Update the small, user-owned part of an account profile.
+
+        ``avatar_label`` deliberately remains a compact symbol instead of an
+        unrestricted image URL. Theme, text size and sticker density are
+        allowlisted presentation preferences owned by this account. None of
+        these fields touches shared data.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("账号资料格式不正确")
+        unsupported = set(payload) - {
+            "avatar_label", "ui_theme", "ui_text_size", "ui_sticker_density",
+        }
+        if unsupported:
+            raise ValueError("账号资料包含不支持的字段")
+        changed_fields: list[str] = []
+        updates: dict[str, str] = {}
+        if "avatar_label" in payload:
+            label = str(payload.get("avatar_label") or "").strip()
+            if not label or len(label) > 4 or any(ord(character) < 32 for character in label):
+                raise ValueError("头像标识请填写 1 个汉字或表情（最多 4 个字符）")
+            updates["avatar_label"] = label
+            changed_fields.append("avatar_label")
+        if "ui_theme" in payload:
+            theme = str(payload.get("ui_theme") or "").strip().lower()
+            if theme not in {"classic", "kitty", "daniel"}:
+                raise ValueError("请选择有效的界面主题")
+            updates["ui_theme"] = theme
+            changed_fields.append("ui_theme")
+        if "ui_text_size" in payload:
+            text_size = str(payload.get("ui_text_size") or "").strip().lower()
+            if text_size not in {"standard", "large"}:
+                raise ValueError("请选择有效的文字大小")
+            updates["ui_text_size"] = text_size
+            changed_fields.append("ui_text_size")
+        if "ui_sticker_density" in payload:
+            sticker_density = str(payload.get("ui_sticker_density") or "").strip().lower()
+            if sticker_density not in {"minimal", "cute", "full"}:
+                raise ValueError("请选择有效的贴纸数量")
+            updates["ui_sticker_density"] = sticker_density
+            changed_fields.append("ui_sticker_density")
+        if not changed_fields:
+            raise ValueError("没有需要更新的账号资料")
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT id FROM users WHERE id=? AND deleted_at IS NULL",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError("用户不存在")
+            if "avatar_label" in updates:
+                db.execute("UPDATE users SET avatar_label=? WHERE id=?", (updates["avatar_label"], user_id))
+            if "ui_theme" in updates:
+                db.execute("UPDATE users SET ui_theme=? WHERE id=?", (updates["ui_theme"], user_id))
+            if "ui_text_size" in updates:
+                db.execute(
+                    "UPDATE users SET ui_text_size=? WHERE id=?",
+                    (updates["ui_text_size"], user_id),
+                )
+            if "ui_sticker_density" in updates:
+                db.execute(
+                    "UPDATE users SET ui_sticker_density=? WHERE id=?",
+                    (updates["ui_sticker_density"], user_id),
+                )
+            self._audit(
+                db, "account.profile_updated", "user", user_id,
+                {"changed_fields": changed_fields}, actor_id=user_id,
+            )
+            try:
+                couple, _partner_id = self._couple_context(db, user_id)
+            except ValueError:
+                couple = None
+            if couple:
+                self._event(
+                    db, str(couple["id"]), user_id, "profile.updated", user_id,
+                    {"resource": "user", "changed_fields": changed_fields},
+                )
+            updated = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return {"user": self.public_user(updated)}
 
     def authenticate(self, username: str, password: str) -> dict:
         with self.connection() as db:

@@ -901,6 +901,32 @@
     <div class="sheet scroll-sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PRIVACY & DEVICES</span><h2 id="accountModalTitle">账号与共同空间</h2>
       <div id="accountIdentityCard" class="account-identity-card" aria-live="polite"></div>
+      <form id="avatarProfileForm" class="avatar-profile-form">
+        <label class="field"><span>我的头像标识</span><input id="avatarLabelInput" maxlength="4" autocomplete="off" aria-describedby="avatarProfileHelp" placeholder="例如：超、🌙、🐰" required></label>
+        <button class="secondary-button">保存我的头像</button>
+        <p id="avatarProfileHelp" class="form-note">只会修改你自己的圆形头像标识，不会改变伴侣头像，也不会改动聊天、回忆或其他共同内容。</p>
+      </form>
+      <form id="themeProfileForm" class="theme-profile-form">
+        <fieldset>
+          <legend>我的界面风格</legend>
+          <label class="theme-choice theme-choice-kitty"><input type="radio" name="uiTheme" value="kitty"><span class="theme-swatch" aria-hidden="true">🎀</span><b>甜心手账</b><small>Hello Kitty · 草莓粉与蝴蝶结</small></label>
+          <label class="theme-choice theme-choice-daniel"><input type="radio" name="uiTheme" value="daniel"><span class="theme-swatch" aria-hidden="true">★</span><b>晴空来信</b><small>Dear Daniel · 雾蓝格纹与星星</small></label>
+          <label class="theme-choice theme-choice-classic"><input type="radio" name="uiTheme" value="classic"><span class="theme-swatch" aria-hidden="true">L</span><b>经典恋屿</b><small>原来的酒红杂志风</small></label>
+        </fieldset>
+        <fieldset class="display-preference-options">
+          <legend>文字大小</legend>
+          <label><input type="radio" name="uiTextSize" value="standard"><span><b>标准</b><small>信息更紧凑</small></span></label>
+          <label><input type="radio" name="uiTextSize" value="large"><span><b>大字</b><small>说明和时间更清楚</small></span></label>
+        </fieldset>
+        <fieldset class="display-preference-options">
+          <legend>贴纸数量</legend>
+          <label><input type="radio" name="stickerDensity" value="minimal"><span><b>简洁</b><small>只保留重点装饰</small></span></label>
+          <label><input type="radio" name="stickerDensity" value="cute"><span><b>可爱</b><small>每页一枚情景贴纸</small></span></label>
+          <label><input type="radio" name="stickerDensity" value="full"><span><b>丰富</b><small>做饭、日历和心愿也有贴纸</small></span></label>
+        </fieldset>
+        <button class="secondary-button">保存显示偏好</button>
+        <p class="form-note">全部偏好只影响自己的界面，不影响伴侣或共同记录。角色插画为新制作的非官方私人贴纸；未安装贴纸时仍可使用主题配色。</p>
+      </form>
       <p class="form-note account-session-note">同一浏览器的普通标签页会共享登录账号；切换账号后，其他标签页会自动同步刷新。需要两人同时登录时，请使用两台设备，或一个普通窗口加一个无痕窗口。</p>
       <div id="deviceList" class="device-list"></div>
       <section class="push-settings" aria-labelledby="pushSettingsTitle">

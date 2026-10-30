@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT,
     nickname TEXT NOT NULL,
     avatar_label TEXT NOT NULL,
+    ui_theme TEXT NOT NULL DEFAULT 'classic'
+        CHECK(ui_theme IN ('classic','kitty','daniel')),
+    ui_text_size TEXT NOT NULL DEFAULT 'standard'
+        CHECK(ui_text_size IN ('standard','large')),
+    ui_sticker_density TEXT NOT NULL DEFAULT 'cute'
+        CHECK(ui_sticker_density IN ('minimal','cute','full')),
     locale TEXT NOT NULL DEFAULT 'zh-CN',
     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
