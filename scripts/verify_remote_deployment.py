@@ -10,6 +10,11 @@ import sys
 from http.cookiejar import CookieJar
 from urllib import request
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover - system trust remains the fallback
+    certifi = None
+
 
 def fetch(opener, url: str, *, payload: dict | None = None) -> dict:
     data = json.dumps(payload).encode() if payload is not None else None
@@ -40,7 +45,7 @@ def main() -> None:
     accounts = json.loads(os.environ.get("LOVE_VERIFY_ACCOUNTS_JSON", "[]"))
     if not base.startswith("https://") or not accounts:
         raise SystemExit("请通过 LOVE_VERIFY_BASE_URL 和 LOVE_VERIFY_ACCOUNTS_JSON 提供验收参数")
-    context = ssl.create_default_context()
+    context = ssl.create_default_context(cafile=certifi.where() if certifi else None)
     health = fetch(request.build_opener(request.HTTPSHandler(context=context)), base + "/api/health")
     if health.get("status") != "ok":
         raise RuntimeError("健康检查未通过")
