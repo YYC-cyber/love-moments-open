@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT,
     nickname TEXT NOT NULL,
     avatar_label TEXT NOT NULL,
+    avatar_media_id TEXT REFERENCES media_assets(id),
     ui_theme TEXT NOT NULL DEFAULT 'classic'
         CHECK(ui_theme IN ('classic','kitty','daniel')),
     ui_text_size TEXT NOT NULL DEFAULT 'standard'
@@ -1902,6 +1903,7 @@ def account_export_policy_status() -> dict[str, object]:
 
 
 V34_REQUIRED_COLUMNS = {
+    "users": frozenset({"avatar_media_id"}),
     "ai_context_grants": frozenset(
         {"revoked_at", "last_used_at", "resource_version", "usage_scope", "request_id", "version"}
     ),

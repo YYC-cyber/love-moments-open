@@ -514,6 +514,8 @@ class LoveMomentsStore(
                 db.execute("ALTER TABLE users ADD COLUMN ui_text_size TEXT NOT NULL DEFAULT 'standard'")
             if "ui_sticker_density" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN ui_sticker_density TEXT NOT NULL DEFAULT 'cute'")
+            if "avatar_media_id" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN avatar_media_id TEXT REFERENCES media_assets(id)")
             session_columns = {row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
             for name, definition in {
                 "device_name": "TEXT NOT NULL DEFAULT '未知设备'",
@@ -1232,10 +1234,15 @@ class LoveMomentsStore(
         if row is None:
             raise KeyError("用户不存在")
         value = dict(row)
-        return {key: value.get(key) for key in (
+        result = {key: value.get(key) for key in (
             "id", "username", "nickname", "avatar_label", "ui_theme",
-            "ui_text_size", "ui_sticker_density", "locale", "timezone", "created_at",
+            "avatar_media_id", "ui_text_size", "ui_sticker_density", "locale", "timezone", "created_at",
         )}
+        result["avatar_url"] = (
+            f"/api/v1/media/{value['avatar_media_id']}?thumbnail=1"
+            if value.get("avatar_media_id") else None
+        )
+        return result
 
     def register(self, username: str, password: str, nickname: str) -> dict:
         username = username.strip().lower()
@@ -1266,26 +1273,36 @@ class LoveMomentsStore(
     def update_my_profile(self, payload: dict, user_id: str) -> dict:
         """Update the small, user-owned part of an account profile.
 
-        ``avatar_label`` deliberately remains a compact symbol instead of an
-        unrestricted image URL. Theme, text size and sticker density are
+        Avatar photos must already exist in the protected media store and be
+        owned by the current user. Theme, text size and sticker density are
         allowlisted presentation preferences owned by this account. None of
-        these fields touches shared data.
+        these fields touches shared content.
         """
         if not isinstance(payload, dict):
             raise ValueError("账号资料格式不正确")
         unsupported = set(payload) - {
-            "avatar_label", "ui_theme", "ui_text_size", "ui_sticker_density",
+            "nickname", "avatar_label", "avatar_media_id", "ui_theme", "ui_text_size", "ui_sticker_density",
         }
         if unsupported:
             raise ValueError("账号资料包含不支持的字段")
         changed_fields: list[str] = []
         updates: dict[str, str] = {}
+        if "nickname" in payload:
+            nickname = str(payload.get("nickname") or "").strip()
+            if not nickname or len(nickname) > 30 or any(ord(character) < 32 for character in nickname):
+                raise ValueError("昵称长度需为 1–30 位，且不能包含控制字符")
+            updates["nickname"] = nickname
+            changed_fields.append("nickname")
         if "avatar_label" in payload:
             label = str(payload.get("avatar_label") or "").strip()
             if not label or len(label) > 4 or any(ord(character) < 32 for character in label):
                 raise ValueError("头像标识请填写 1 个汉字或表情（最多 4 个字符）")
             updates["avatar_label"] = label
             changed_fields.append("avatar_label")
+        if "avatar_media_id" in payload:
+            media_id = str(payload.get("avatar_media_id") or "").strip()
+            updates["avatar_media_id"] = media_id
+            changed_fields.append("avatar_media_id")
         if "ui_theme" in payload:
             theme = str(payload.get("ui_theme") or "").strip().lower()
             if theme not in {"classic", "kitty", "daniel"}:
@@ -1308,13 +1325,37 @@ class LoveMomentsStore(
             raise ValueError("没有需要更新的账号资料")
         with self.connection() as db:
             row = db.execute(
-                "SELECT id FROM users WHERE id=? AND deleted_at IS NULL",
+                "SELECT * FROM users WHERE id=? AND deleted_at IS NULL",
                 (user_id,),
             ).fetchone()
             if not row:
                 raise KeyError("用户不存在")
+            for field in list(updates):
+                current = str(row[field] or "")
+                if current == updates[field]:
+                    updates.pop(field)
+                    changed_fields.remove(field)
+            if not changed_fields:
+                raise ValueError("个人资料没有发生变化")
+            if "nickname" in updates:
+                db.execute("UPDATE users SET nickname=? WHERE id=?", (updates["nickname"], user_id))
             if "avatar_label" in updates:
                 db.execute("UPDATE users SET avatar_label=? WHERE id=?", (updates["avatar_label"], user_id))
+            if "avatar_media_id" in updates:
+                previous_media_id = str(row["avatar_media_id"] or "")
+                media_id = updates["avatar_media_id"]
+                if media_id:
+                    media = db.execute(
+                        "SELECT id FROM media_assets WHERE id=? AND owner_id=? AND kind='image' AND status='ready' AND purged_at IS NULL",
+                        (media_id, user_id),
+                    ).fetchone()
+                    if not media:
+                        raise ValueError("请选择自己上传且仍然可用的图片作为头像")
+                db.execute("UPDATE users SET avatar_media_id=? WHERE id=?", (media_id or None, user_id))
+                if previous_media_id and previous_media_id != media_id:
+                    self._sync_media_visibility(db, previous_media_id)
+                if media_id:
+                    self._sync_media_visibility(db, media_id)
             if "ui_theme" in updates:
                 db.execute("UPDATE users SET ui_theme=? WHERE id=?", (updates["ui_theme"], user_id))
             if "ui_text_size" in updates:
@@ -1341,7 +1382,51 @@ class LoveMomentsStore(
                     {"resource": "user", "changed_fields": changed_fields},
                 )
             updated = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-        return {"user": self.public_user(updated)}
+            partner_nickname = None
+            if couple:
+                partner_id = couple["member_b"] if couple["member_a"] == user_id else couple["member_a"]
+                partner = db.execute("SELECT nickname FROM users WHERE id=? AND deleted_at IS NULL", (partner_id,)).fetchone()
+                partner_nickname = str(partner["nickname"]) if partner else None
+        public = self.public_user(updated)
+        return {
+            "user": public,
+            "nickname_matches_partner": bool(partner_nickname and public["nickname"] == partner_nickname),
+        }
+
+    def list_profile_history(self, user_id: str, limit: object = 30) -> dict:
+        """Return a privacy-safe couple-visible history of profile field changes."""
+        try:
+            safe_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("资料记录数量必须是整数") from exc
+        labels = {
+            "nickname": "昵称", "avatar_label": "头像标识", "avatar_media_id": "头像照片",
+            "ui_theme": "界面主题", "ui_text_size": "文字大小", "ui_sticker_density": "贴纸数量",
+        }
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            rows = db.execute(
+                """
+                SELECT a.id,a.actor_id,a.target_id,a.detail,a.created_at,
+                       actor.nickname AS actor_name,actor.avatar_label AS actor_avatar_label
+                FROM audit_events a
+                JOIN users actor ON actor.id=a.actor_id
+                WHERE a.couple_id=? AND a.action='account.profile_updated'
+                  AND a.target_type='user' AND a.target_id IN (?,?)
+                ORDER BY a.created_at DESC,a.id DESC LIMIT ?
+                """,
+                (couple["id"], couple["member_a"], couple["member_b"], safe_limit),
+            ).fetchall()
+        items = []
+        for row in rows:
+            detail = parse_json(row["detail"], {})
+            fields = [labels[field] for field in detail.get("changed_fields", []) if field in labels]
+            items.append({
+                "id": row["id"], "actor_id": row["actor_id"], "actor_name": row["actor_name"],
+                "actor_avatar_label": row["actor_avatar_label"], "mine": row["actor_id"] == user_id,
+                "changed_fields": fields, "created_at": row["created_at"],
+            })
+        return {"items": items}
 
     def authenticate(self, username: str, password: str) -> dict:
         with self.connection() as db:
@@ -3960,6 +4045,8 @@ class LoveMomentsStore(
 
     def _media_reference_labels(self, db: sqlite3.Connection, media_id: str) -> list[str]:
         labels: list[str] = []
+        if db.execute("SELECT 1 FROM users WHERE avatar_media_id=? AND deleted_at IS NULL LIMIT 1", (media_id,)).fetchone():
+            labels.append("个人头像")
         if db.execute("SELECT 1 FROM moments WHERE media_id=? AND purged_at IS NULL LIMIT 1", (media_id,)).fetchone():
             labels.append("恋爱瞬间")
         if db.execute("SELECT 1 FROM voice_transcripts WHERE media_id=? LIMIT 1", (media_id,)).fetchone():
@@ -3994,6 +4081,13 @@ class LoveMomentsStore(
         """Reconcile one object against every active message and moment using it."""
         media = db.execute("SELECT * FROM media_assets WHERE id=? AND status='ready'", (media_id,)).fetchone()
         if not media:
+            return
+        if db.execute(
+            "SELECT 1 FROM users u JOIN couples c ON u.id IN (c.member_a,c.member_b) "
+            "WHERE u.avatar_media_id=? AND u.deleted_at IS NULL AND c.status='active' LIMIT 1",
+            (media_id,),
+        ).fetchone():
+            db.execute("UPDATE media_assets SET visibility='shared',reveal_at=NULL,version=version+1 WHERE id=? AND visibility!='shared'", (media_id,))
             return
         if db.execute("SELECT 1 FROM recipe_media m JOIN recipes r ON r.id=m.recipe_id WHERE m.url=? AND r.deleted_at IS NULL AND r.visibility='couple' LIMIT 1", (f"/api/v1/media/{media_id}",)).fetchone():
             db.execute("UPDATE media_assets SET visibility='shared',reveal_at=NULL,version=version+1 WHERE id=? AND visibility!='shared'", (media_id,))

@@ -74,7 +74,7 @@
         <span><strong>恋屿</strong><small>LOVE MOMENTS</small></span>
       </button>
       <button class="avatar-pair" data-action="open-profile" aria-label="查看情侣空间">
-        <span class="avatar avatar-a">♡</span><span class="avatar avatar-b">♡</span>
+        <span class="avatar-wrap avatar-wrap-me"><span class="avatar avatar-a">♡</span><small>我</small></span><span class="avatar-wrap avatar-wrap-partner"><span class="avatar avatar-b">♡</span><small>TA</small></span>
       </button>
     </header>
 
@@ -118,7 +118,7 @@
         </details>
 
         <div class="status-card card" data-action="edit-status" role="button" tabindex="0">
-          <div class="status-person"><span class="avatar avatar-b large">♡</span><span class="online-dot"></span></div>
+          <div class="status-person"><span class="avatar avatar-b large">♡</span><span class="online-dot"></span><small class="avatar-role">伴侣</small></div>
           <div class="grow"><small id="partnerMomentLabel">对方的此刻</small><strong id="partnerStatusText">还没有分享状态</strong><span id="partnerContextText">点这里也分享你的状态</span></div>
           <button class="icon-button" data-action="send-heart" aria-label="发送爱心">♡</button>
         </div>
@@ -182,7 +182,7 @@
           <div class="messages" id="messages" tabindex="0" aria-label="聊天记录">
             <div class="message system">正在读取你们的真实消息…</div>
           </div>
-          <button class="chat-new-messages" id="chatNewMessages" data-action="jump-latest-messages" hidden>有新消息 ↓</button>
+          <button class="chat-new-messages" id="chatNewMessages" data-action="jump-new-messages" aria-live="polite" hidden>新消息（0）↓</button>
         </div>
         <div class="chat-compose-dock" aria-label="消息输入区">
           <div class="chat-suggestions">
@@ -909,10 +909,21 @@
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PRIVACY & DEVICES</span><h2 id="accountModalTitle">账号与共同空间</h2>
       <div id="accountIdentityCard" class="account-identity-card" aria-live="polite"></div>
       <form id="avatarProfileForm" class="avatar-profile-form">
-        <label class="field"><span>我的头像标识</span><input id="avatarLabelInput" maxlength="4" autocomplete="off" aria-describedby="avatarProfileHelp" placeholder="例如：超、🌙、🐰" required></label>
-        <button class="secondary-button">保存我的头像</button>
-        <p id="avatarProfileHelp" class="form-note">只会修改你自己的圆形头像标识，不会改变伴侣头像，也不会改动聊天、回忆或其他共同内容。</p>
+        <div class="profile-preview" aria-live="polite">
+          <span class="avatar xl" id="profilePreviewAvatar">♡</span>
+          <div><strong id="profilePreviewNickname">我的昵称</strong><small>保存前预览</small></div>
+        </div>
+        <label class="field"><span>我的昵称</span><input id="nicknameInput" maxlength="30" autocomplete="nickname" aria-describedby="avatarProfileHelp" placeholder="希望对方怎样称呼你" required></label>
+        <label class="field"><span>我的头像标识</span><input id="avatarLabelInput" maxlength="4" autocomplete="off" aria-describedby="avatarProfileHelp" placeholder="例如：昵称首字、🌙、🐰" required></label>
+        <label class="field profile-photo-field"><span>我的头像照片（可选）</span><input id="avatarImageInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp"><small>上传后只有你和伴侣能够查看；图片会自动压缩并清理定位信息。</small></label>
+        <div class="profile-photo-actions"><button type="button" class="secondary-button" data-action="remove-avatar-photo">移除头像照片</button><span id="nicknameMatchWarning" class="form-warning" hidden>你们的昵称相同，消息和评论中可能不易区分。</span></div>
+        <button class="secondary-button">保存个人资料</button>
+        <p id="avatarProfileHelp" class="form-note">只会修改你自己的昵称和头像，不会改变伴侣资料，也不会删除聊天、回忆或其他共同内容。未保存就关闭时会再次提醒。</p>
       </form>
+      <section class="profile-history-section" aria-labelledby="profileHistoryTitle">
+        <h3 id="profileHistoryTitle">资料修改记录</h3>
+        <div id="profileHistoryList" class="device-list"><p class="form-note">正在读取双方的资料修改记录…</p></div>
+      </section>
       <form id="themeProfileForm" class="theme-profile-form">
         <fieldset>
           <legend>我的界面风格</legend>
@@ -995,6 +1006,11 @@
     <div class="call-controls incoming-call-controls" id="incomingCallControls" hidden><button class="accept-call" data-action="accept-call">✓<small>接听</small></button><button class="hangup" data-action="decline-call">×<small>拒绝</small></button></div>
     <div class="call-controls" id="activeCallControls"><button data-action="mute">⌁<small>静音</small></button><button data-action="speaker">◖<small>扬声器</small></button><button class="hangup" data-action="end-call">×<small>挂断</small></button></div>
   </div>
+  <aside class="app-update-banner" id="appUpdateBanner" role="status" aria-live="polite" hidden>
+    <div><strong>恋屿有新版本</strong><span>点击更新后会重新打开页面，尚未提交的表单不会自动保存。</span></div>
+    <button class="primary-button" data-action="apply-app-update">立即更新</button>
+    <button class="sheet-close" data-action="dismiss-app-update" aria-label="稍后更新">×</button>
+  </aside>
   <div class="toast" id="toast" role="status"></div>
   <script src="../../static/app.js"></script>
 </body>

@@ -1,4 +1,4 @@
-const CACHE = "love-moments-open-v56";
+const CACHE = "love-moments-open-v57";
 const ASSETS = [
   "/",
   "/static/index.html",
@@ -15,7 +15,10 @@ const CACHEABLE_PATHS = new Set(ASSETS);
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
-  self.skipWaiting();
+});
+
+self.addEventListener("message", event => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", event => {

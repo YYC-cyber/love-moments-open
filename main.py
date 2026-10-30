@@ -667,10 +667,17 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             content = path.read_bytes()
         except OSError as error:
             raise KeyError("主题插画暂不可用") from error
+        etag = f'"{hashlib.sha256(content).hexdigest()}"'
+        if self.headers.get("If-None-Match", "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+        self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(content)
 
@@ -1036,6 +1043,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         elif path == "/api/v1/media/usage":
             user = self._require_user()
             self._send_json(STORE.media_usage(user_id=user["id"]))
+            return
+        elif path == "/api/v1/account/profile-history":
+            user = self._require_user()
+            self._send_json(STORE.list_profile_history(user["id"], query.get("limit", [30])[0]))
             return
         elif path == "/api/v1/media/trash":
             user = self._require_user()
@@ -2252,7 +2263,7 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", cors_origin)
             self.send_header("Access-Control-Allow-Credentials", "true")
             self.send_header("Vary", "Origin")
-        self.send_header("Cache-Control", "private, no-store" if private_theme else "no-store" if request_path.startswith("/api/") else "no-cache")
+        self.send_header("Cache-Control", "private, no-cache" if private_theme else "no-store" if request_path.startswith("/api/") else "no-cache")
         if private_theme:
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             self.send_header("Vary", "Cookie, Authorization")

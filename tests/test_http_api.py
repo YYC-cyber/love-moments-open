@@ -1614,6 +1614,7 @@ class HttpApiTests(unittest.TestCase):
         ticket = self.post(owner, f"/media/{media['id']}/access", {"thumbnail": True, "ttl_seconds": 120})
         with owner.open(self.base.removesuffix("/api/v1") + ticket["url"]) as response:
             self.assertTrue(response.read().startswith(b"\xff\xd8\xff"))
+
         try:
             urllib.request.urlopen(self.base.removesuffix("/api/v1") + ticket["url"])
         except urllib.error.HTTPError as error:
@@ -1640,6 +1641,34 @@ class HttpApiTests(unittest.TestCase):
             error.close()
         else:
             self.fail("伪造图片必须被拒绝")
+
+    def test_profile_avatar_and_couple_visible_history_http_flow(self) -> None:
+        owner, partner = self.opener(), self.opener()
+        self.post(owner, "/auth/login", {"username": "test", "password": "test123"})
+        self.post(partner, "/auth/login", {"username": "test1", "password": "test123"})
+        upload = urllib.request.Request(
+            self.base + "/media", data=VALID_PNG,
+            headers={"Content-Type": "image/png", "X-Filename": "avatar-http.png", "X-Media-Visibility": "private"},
+            method="POST",
+        )
+        with owner.open(upload) as response:
+            media = json.load(response)
+
+        updated = self.put(owner, "/account/profile", {"avatar_media_id": media["id"]})
+        self.assertIn(media["id"], updated["user"]["avatar_url"])
+        with partner.open(self.base.removesuffix("/api/v1") + updated["user"]["avatar_url"]) as response:
+            self.assertTrue(response.read().startswith(b"\xff\xd8\xff"))
+        with partner.open(self.base + "/account/profile-history?limit=5") as response:
+            history = json.load(response)
+        self.assertEqual(history["items"][0]["changed_fields"], ["头像照片"])
+        self.assertNotIn("detail", history["items"][0])
+
+        removed = self.put(owner, "/account/profile", {"avatar_media_id": ""})
+        self.assertIsNone(removed["user"]["avatar_url"])
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            partner.open(self.base + f"/media/{media['id']}")
+        self.assertEqual(context.exception.code, 403)
+        context.exception.close()
 
     def test_resumable_video_upload_http_flow_with_real_thumbnail(self) -> None:
         owner, partner = self.opener(), self.opener()

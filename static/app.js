@@ -357,7 +357,8 @@ const state = {
   chatHistory: {
     initialized: false, hasMore: true, loadingOlder: false,
     searchOpen: false, searchResults: [], searchQuery: "",
-    newCount: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0,
+    newCount: 0, unreadMessageIds: new Set(), firstUnreadMessageId: "", firstUnreadSentAt: "",
+    savedScrollTop: null, highlightId: "", highlightUntil: 0,
   },
   longPressTimer: null,
   accountAutoOpened: false,
@@ -367,6 +368,9 @@ const state = {
   pushSynced: false,
   pushConfig: null,
   serviceWorkerRegistration: null,
+  serviceWorkerUpdate: null,
+  serviceWorkerUpdateApplying: false,
+  profileDraft: { baseline: "", avatarFile: null, previewUrl: "", removePhoto: false },
   cooking: { session: null, tick: null, wakeLock: null, deepLinked: false, restoreChecked: false, serverOffsetMs: 0, capabilityNotice: "", pantryReceipts: [] },
   destinationCandidates: [],
   destinationCandidateId: null,
@@ -423,11 +427,18 @@ function avatarTheme(member) {
 
 function applyAvatarIdentity(selector, member, roleLabel) {
   document.querySelectorAll(selector).forEach(element => {
-    element.textContent = member?.avatar_label || member?.nickname?.slice(0, 1) || "♡";
+    element.innerHTML = avatarIdentityHtml(member);
     element.dataset.avatarTheme = avatarTheme(member);
     element.title = `${roleLabel}：${member?.nickname || "未命名"}`;
     element.setAttribute("aria-label", `${roleLabel}：${member?.nickname || "未命名"}`);
   });
+}
+
+function avatarIdentityHtml(member) {
+  if (member?.avatar_url) {
+    return `<img src="${escapeHtml(member.avatar_url)}" alt="" loading="lazy" decoding="async">`;
+  }
+  return escapeHtml(member?.avatar_label || member?.nickname?.slice(0, 1) || "♡");
 }
 
 function broadcastAuthChange(action, username = "") {
@@ -448,6 +459,11 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("beforeinstallprompt", event => {
   event.preventDefault();
   state.installPrompt = event;
+});
+window.addEventListener("beforeunload", event => {
+  if (!profileDraftIsDirty()) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 window.addEventListener("online", () => {
   flushMealMutations().then(() => loadMeals({ quiet: true })).catch(() => {});
@@ -598,8 +614,32 @@ async function serviceWorkerRegistration() {
   if (!state.serviceWorkerRegistration) {
     state.serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js");
     await navigator.serviceWorker.ready;
+    watchServiceWorkerUpdates(state.serviceWorkerRegistration);
+    state.serviceWorkerRegistration.update().catch(() => {});
   }
   return state.serviceWorkerRegistration;
+}
+
+function offerServiceWorkerUpdate(worker) {
+  if (!worker || !navigator.serviceWorker.controller) return;
+  state.serviceWorkerUpdate = worker;
+  const banner = document.getElementById("appUpdateBanner");
+  if (banner) banner.hidden = false;
+}
+
+function watchServiceWorkerUpdates(registration) {
+  if (registration.datasetUpdateWatched) return;
+  registration.datasetUpdateWatched = "1";
+  if (registration.waiting) offerServiceWorkerUpdate(registration.waiting);
+  registration.addEventListener("updatefound", () => {
+    const worker = registration.installing;
+    worker?.addEventListener("statechange", () => {
+      if (worker.state === "installed") offerServiceWorkerUpdate(registration.waiting || worker);
+    });
+  });
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (state.serviceWorkerUpdateApplying) window.location.reload();
+  }, { once: true });
 }
 
 function renderPushStatus(message, status = "") {
@@ -873,7 +913,7 @@ function escapeHtml(value) {
 }
 
 function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
-  if (state.screen === "chat" && screen !== "chat") state.chatHistory.savedScrollTop = document.getElementById("messages")?.scrollTop ?? null;
+  if (state.screen === "chat" && screen !== "chat") state.chatHistory.savedScrollTop = null;
   state.screen = screen;
   privateStorage().setItem("love-screen", screen);
   document.querySelectorAll(".screen").forEach(el => el.classList.toggle("active", el.dataset.screen === screen));
@@ -888,10 +928,8 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
   }
   if (screen !== "chat") document.querySelector(".phone-shell").scrollTo({ top: 0, behavior: "smooth" });
   else requestAnimationFrame(() => {
-    const viewport = document.getElementById("messages");
-    if (!viewport) return;
-    if (state.chatHistory.savedScrollTop !== null) viewport.scrollTop = state.chatHistory.savedScrollTop;
-    else if (!state.chatHistory.initialized) scrollChatToLatest({ behavior: "auto" });
+    scrollChatToLatest({ behavior: "auto" });
+    state.chatHistory.savedScrollTop = null;
     state.chatHistory.initialized = true;
   });
   if (state.data) loadSmartSurface(screen, { quiet: true });
@@ -2476,10 +2514,45 @@ function chatViewportNearBottom(viewport = document.getElementById("messages")) 
 function scrollChatToLatest({ behavior = "smooth" } = {}) {
   const viewport = document.getElementById("messages");
   if (!viewport) return;
+  delete viewport.dataset.lastUnreadJump;
   viewport.scrollTo({ top: viewport.scrollHeight, behavior });
   state.chatHistory.newCount = 0;
+  state.chatHistory.unreadMessageIds.clear();
+  state.chatHistory.firstUnreadMessageId = "";
+  state.chatHistory.firstUnreadSentAt = "";
   const button = document.getElementById("chatNewMessages");
   if (button) button.hidden = true;
+}
+
+function registerUnreadChatMessages(messages = []) {
+  const unread = messages.filter(message => !message.mine && message.id);
+  if (!unread.length) return;
+  if (!(state.chatHistory.unreadMessageIds instanceof Set)) state.chatHistory.unreadMessageIds = new Set();
+  unread.forEach(message => state.chatHistory.unreadMessageIds.add(message.id));
+  state.chatHistory.newCount = state.chatHistory.unreadMessageIds.size;
+  const candidate = unread.slice().sort((left, right) => String(left.sent_at).localeCompare(String(right.sent_at)))[0];
+  if (!state.chatHistory.firstUnreadSentAt || String(candidate.sent_at).localeCompare(state.chatHistory.firstUnreadSentAt) < 0) {
+    state.chatHistory.firstUnreadMessageId = candidate.id;
+    state.chatHistory.firstUnreadSentAt = String(candidate.sent_at);
+  }
+}
+
+function scrollChatToFirstUnread({ behavior = "smooth" } = {}) {
+  const viewport = document.getElementById("messages");
+  const unreadId = state.chatHistory.firstUnreadMessageId;
+  const target = unreadId
+    ? [...(viewport?.querySelectorAll(".message[data-message-id]") || [])].find(item => item.dataset.messageId === unreadId)
+    : null;
+  state.chatHistory.newCount = 0;
+  state.chatHistory.unreadMessageIds.clear();
+  state.chatHistory.firstUnreadMessageId = "";
+  state.chatHistory.firstUnreadSentAt = "";
+  updateChatNewMessageButton();
+  if (!target) { scrollChatToLatest({ behavior }); return; }
+  viewport.dataset.lastUnreadJump = unreadId;
+  target.scrollIntoView({ behavior, block: "start" });
+  target.classList.add("chat-message-highlight");
+  window.setTimeout(() => target.classList.remove("chat-message-highlight"), 1900);
 }
 
 function mergeChatMessages(existing = [], incoming = []) {
@@ -2492,7 +2565,8 @@ function updateChatNewMessageButton() {
   const button = document.getElementById("chatNewMessages");
   if (!button) return;
   button.hidden = state.chatHistory.newCount < 1;
-  button.textContent = state.chatHistory.newCount > 1 ? `${state.chatHistory.newCount} 条新消息 ↓` : "有新消息 ↓";
+  button.textContent = `新消息（${state.chatHistory.newCount}）↓`;
+  button.setAttribute("aria-label", `有 ${state.chatHistory.newCount} 条新消息，点击跳转到第一条未读消息`);
 }
 
 function renderMessages({ preserveScroll = state.chatHistory.initialized, preservePrepend = false, stickToBottom = false, highlightId = "" } = {}) {
@@ -4381,9 +4455,57 @@ function renderOfflineSyncStatus(queue) {
   }).join("")}`;
 }
 
+function currentProfileDraftSnapshot() {
+  return JSON.stringify({
+    nickname: document.getElementById("nicknameInput")?.value.trim() || "",
+    avatar_label: document.getElementById("avatarLabelInput")?.value.trim() || "",
+    avatar_media_id: state.profileDraft.removePhoto ? "" : (state.profileDraft.avatarFile ? "pending-upload" : (state.data?.user?.avatar_media_id || "")),
+  });
+}
+
+function profileDraftIsDirty() {
+  return Boolean(state.profileDraft.baseline && currentProfileDraftSnapshot() !== state.profileDraft.baseline);
+}
+
+function renderProfilePreview() {
+  const user = state.data?.user || {};
+  const nickname = document.getElementById("nicknameInput")?.value.trim() || user.nickname || user.username || "我的昵称";
+  const avatarLabel = document.getElementById("avatarLabelInput")?.value.trim() || user.avatar_label || nickname.slice(0, 1) || "♡";
+  const preview = document.getElementById("profilePreviewAvatar");
+  const name = document.getElementById("profilePreviewNickname");
+  const warning = document.getElementById("nicknameMatchWarning");
+  if (name) name.textContent = nickname;
+  if (preview) {
+    const photoUrl = state.profileDraft.previewUrl || (!state.profileDraft.removePhoto ? user.avatar_url : "");
+    preview.innerHTML = photoUrl ? `<img src="${escapeHtml(photoUrl)}" alt="" decoding="async">` : escapeHtml(avatarLabel);
+    preview.dataset.avatarTheme = avatarTheme(user);
+  }
+  if (warning) warning.hidden = !state.data?.partner?.nickname || nickname !== state.data.partner.nickname;
+}
+
+function resetProfileDraft(user = state.data?.user) {
+  if (state.profileDraft.previewUrl) URL.revokeObjectURL(state.profileDraft.previewUrl);
+  state.profileDraft = { baseline: "", avatarFile: null, previewUrl: "", removePhoto: false };
+  const nickname = document.getElementById("nicknameInput");
+  const avatarLabel = document.getElementById("avatarLabelInput");
+  const avatarImage = document.getElementById("avatarImageInput");
+  if (nickname) nickname.value = user?.nickname || user?.username || "";
+  if (avatarLabel) avatarLabel.value = user?.avatar_label || user?.nickname?.slice(0, 1) || "♡";
+  if (avatarImage) avatarImage.value = "";
+  state.profileDraft.baseline = currentProfileDraftSnapshot();
+  renderProfilePreview();
+}
+
+function renderProfileHistory(history) {
+  const host = document.getElementById("profileHistoryList");
+  if (!host) return;
+  const items = history?.items || [];
+  host.innerHTML = items.length ? items.map(item => `<article class="device-row profile-history-row"><span class="avatar" data-avatar-theme="${avatarTheme(item)}">${escapeHtml(item.actor_avatar_label || item.actor_name?.slice(0, 1) || "♡")}</span><div class="grow"><strong>${escapeHtml(item.mine ? "我" : item.actor_name)}修改了${escapeHtml((item.changed_fields || []).join("、") || "个人资料")}</strong><small>${new Date(item.created_at).toLocaleString("zh-CN")}</small></div></article>`).join("") : `<p class="form-note">还没有资料修改记录。</p>`;
+}
+
 async function loadAccountCenter() {
-  const [result, media, trash] = await Promise.all([
-    api("/api/v1/account/devices"), api("/api/v1/media"), api("/api/v1/media/trash"),
+  const [result, media, trash, profileHistory] = await Promise.all([
+    api("/api/v1/account/devices"), api("/api/v1/media"), api("/api/v1/media/trash"), api("/api/v1/account/profile-history?limit=30"),
   ]);
   const [privacyResult, offlineResult] = await Promise.allSettled([
     api("/api/v1/account/privacy"), listOfflineMutationsForAccount(),
@@ -4393,8 +4515,8 @@ async function loadAccountCenter() {
   const user = state.data?.user; const partner = state.data?.partner;
   const identityCard = document.getElementById("accountIdentityCard");
   if (identityCard && user && partner) {
-    identityCard.innerHTML = `<span class="avatar" data-avatar-theme="${avatarTheme(user)}" aria-label="当前账号：${escapeHtml(user.nickname)}">${escapeHtml(user.avatar_label)}</span><div><small>当前登录账号</small><strong>${escapeHtml(user.nickname)}（${escapeHtml(user.username)}）</strong><span>伴侣：${escapeHtml(partner.nickname)}（${escapeHtml(partner.username)}）</span></div>`;
-    document.getElementById("avatarLabelInput").value = user.avatar_label || user.nickname?.slice(0, 1) || "♡";
+    identityCard.innerHTML = `<span class="avatar" data-avatar-theme="${avatarTheme(user)}" aria-label="我的头像：${escapeHtml(user.nickname)}">${avatarIdentityHtml(user)}</span><div><small>我 · 当前登录账号</small><strong>${escapeHtml(user.nickname)}（${escapeHtml(user.username)}）</strong><span>伴侣 · ${escapeHtml(partner.nickname)}（${escapeHtml(partner.username)}）</span></div>`;
+    resetProfileDraft(user);
     const themeInput = document.querySelector(`#themeProfileForm input[name="uiTheme"][value="${normalizeUiTheme(user.ui_theme)}"]`);
     if (themeInput) themeInput.checked = true;
     const textInput = document.querySelector(`#themeProfileForm input[name="uiTextSize"][value="${normalizeUiTextSize(user.ui_text_size)}"]`);
@@ -4406,6 +4528,7 @@ async function loadAccountCenter() {
   const mediaRow = item => `<article class="account-media-row">${["image", "video"].includes(item.kind) ? `<span class="media-preview-wrap"><img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy">${item.kind === "video" ? `<i aria-hidden="true">▶</i>` : ""}</span>` : `<span class="media-kind">♫</span>`}<div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${item.visibility === "private" ? "仅自己" : item.visibility === "delayed" ? "延时公开" : "双方可见"} · ${(Number(item.size_bytes) / 1024 / 1024).toFixed(1)} MB${item.metadata_stripped ? " · 隐私信息已清理" : ""}</small></div>${item.owner_id === state.data?.user?.id ? `<button data-action="trash-media" data-id="${item.id}">清理</button>` : ""}</article>`;
   document.getElementById("accountMediaList").innerHTML = media.items.length ? media.items.map(mediaRow).join("") : `<p class="form-note">还没有上传媒体。</p>`;
   document.getElementById("accountMediaTrash").innerHTML = trash.items.length ? trash.items.map(item => `<article class="account-media-row"><div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${new Date(item.deleted_at).toLocaleString("zh-CN")}</small></div><button data-action="restore-media" data-id="${item.id}" data-version="${item.version}">恢复</button><button class="danger-text" data-action="purge-media" data-id="${item.id}">永久删除</button></article>`).join("") : `<p class="form-note">回收站为空。</p>`;
+  renderProfileHistory(profileHistory);
   renderAccountPrivacy(privacy);
   renderOfflineSyncStatus(offlineQueue);
   openModal("accountModal");
@@ -4636,7 +4759,7 @@ async function loadBootstrap({ quiet = false } = {}) {
       ? (bootstrap.messages || []).filter(item => !knownMessageIds.has(item.id) && !item.mine)
       : [];
     if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
-    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
+    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), firstUnreadMessageId: "", firstUnreadSentAt: "", savedScrollTop: null, highlightId: "", highlightUntil: 0 };
     state.data = bootstrap;
     state.online = true;
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
@@ -4651,7 +4774,7 @@ async function loadBootstrap({ quiet = false } = {}) {
     if (!availableStyles.includes(state.plan)) state.plan = state.data.trip?.active_variant || availableStyles[0] || "slow";
     privateStorage().setItem("love-offline-trip", JSON.stringify({ user: state.data.user, partner: state.data.partner, couple: state.data.couple, permission_version: state.data.permission_version, trip: state.data.trip, coupleContext: state.data.coupleContext, weeklyReview: state.data.weeklyReview, datePlans: state.data.datePlans }));
     hideAuth();
-    if (state.screen === "chat" && newPartnerMessages.length && !chatWasNearBottom) state.chatHistory.newCount += newPartnerMessages.length;
+    if (state.screen === "chat" && newPartnerMessages.length && !chatWasNearBottom) registerUnreadChatMessages(newPartnerMessages);
     renderIdentity(); renderMessages({ preserveScroll: state.screen === "chat" && !chatWasNearBottom, stickToBottom: state.screen === "chat" && chatWasNearBottom }); renderPlan(); renderHotel(); renderWishlist(); renderDailyQuestion(); renderTimeline(); renderCoupleContext(); renderWeeklyReview(); renderDatePlans(); renderDecisions(); renderLifeData();
     await Promise.all([loadMeals({ quiet: true }), loadLifeAssistant({ quiet: true })]);
     // Reapply the user's active sub-page after any background/SSE refresh. This
@@ -4937,13 +5060,19 @@ function openModal(id) {
   (modal.querySelector("[autofocus], .field input, .field textarea") || modal.querySelector("button"))?.focus();
 }
 
-function closeModals() {
+function closeModals({ force = false } = {}) {
+  const accountWasOpen = document.getElementById("accountModal")?.classList.contains("open");
+  if (!force && accountWasOpen && profileDraftIsDirty()) {
+    if (!window.confirm("个人资料还有未保存的修改，确定放弃并关闭吗？")) return false;
+  }
   if (document.getElementById("voiceMemoryModal")?.classList.contains("open")) stopVoiceResources({ discard: true });
   if (document.getElementById("albumExportModal")?.classList.contains("open")) stopAlbumExportPolling();
   document.querySelectorAll(".modal.open").forEach(modal => { modal.classList.remove("open"); modal.setAttribute("aria-hidden", "true"); });
   document.querySelector(".phone-shell").removeAttribute("inert");
   state.modalTrigger?.focus?.();
   state.modalTrigger = null;
+  if (accountWasOpen) resetProfileDraft();
+  return true;
 }
 
 function renderSharedDetail(detail) {
@@ -5837,10 +5966,35 @@ document.addEventListener("click", async event => {
   // writes must not open prompts, mutate UI state, store draft fingerprints or
   // issue requests while offline.
   if (!guardOnlineUiAction(action)) return;
+  if (action === "remove-avatar-photo") {
+    if (state.profileDraft.previewUrl) URL.revokeObjectURL(state.profileDraft.previewUrl);
+    state.profileDraft.avatarFile = null;
+    state.profileDraft.previewUrl = "";
+    state.profileDraft.removePhoto = true;
+    const input = document.getElementById("avatarImageInput");
+    if (input) input.value = "";
+    renderProfilePreview();
+    toast("头像照片将在保存资料后移除");
+    return;
+  }
+  if (action === "dismiss-app-update") {
+    document.getElementById("appUpdateBanner").hidden = true;
+    return;
+  }
+  if (action === "apply-app-update") {
+    if (profileDraftIsDirty() && !window.confirm("个人资料还有未保存的修改。更新页面会放弃这些修改，仍然更新吗？")) return;
+    state.serviceWorkerUpdateApplying = true;
+    actionEl.disabled = true;
+    actionEl.textContent = "正在更新…";
+    const worker = state.serviceWorkerUpdate || state.serviceWorkerRegistration?.waiting;
+    if (worker) worker.postMessage({ type: "SKIP_WAITING" });
+    else window.location.reload();
+    return;
+  }
   if (action === "toggle-chat-search") { setChatSearchOpen(!state.chatHistory.searchOpen); return; }
   if (action === "close-chat-search") { setChatSearchOpen(false); return; }
   if (action === "load-older-messages") { await loadOlderMessages(); return; }
-  if (action === "jump-latest-messages") { scrollChatToLatest(); return; }
+  if (action === "jump-new-messages") { scrollChatToFirstUnread(); return; }
   if (action === "open-chat-search-result") {
     try { await openChatSearchResult(actionEl.dataset.messageId); }
     catch (error) { toast(error.message); }
@@ -8004,7 +8158,13 @@ document.getElementById("chatSearchForm").addEventListener("submit", async event
 document.getElementById("messages").addEventListener("scroll", event => {
   const viewport = event.currentTarget;
   state.chatHistory.savedScrollTop = viewport.scrollTop;
-  if (chatViewportNearBottom(viewport)) { state.chatHistory.newCount = 0; updateChatNewMessageButton(); }
+  if (chatViewportNearBottom(viewport)) {
+    state.chatHistory.newCount = 0;
+    state.chatHistory.unreadMessageIds.clear();
+    state.chatHistory.firstUnreadMessageId = "";
+    state.chatHistory.firstUnreadSentAt = "";
+    updateChatNewMessageButton();
+  }
   if (viewport.scrollTop < 36 && state.chatHistory.hasMore && !state.chatHistory.loadingOlder) loadOlderMessages();
 }, { passive: true });
 
@@ -8050,23 +8210,52 @@ document.getElementById("changePasswordForm").addEventListener("submit", async e
   finally { button.disabled = false; }
 });
 
+["nicknameInput", "avatarLabelInput"].forEach(id => document.getElementById(id)?.addEventListener("input", renderProfilePreview));
+document.getElementById("avatarImageInput")?.addEventListener("change", event => {
+  const file = event.target.files?.[0] || null;
+  if (file && !file.type.startsWith("image/")) {
+    event.target.value = "";
+    toast("请选择 JPEG、PNG、GIF 或 WebP 图片");
+    return;
+  }
+  if (state.profileDraft.previewUrl) URL.revokeObjectURL(state.profileDraft.previewUrl);
+  state.profileDraft.avatarFile = file;
+  state.profileDraft.previewUrl = file ? URL.createObjectURL(file) : "";
+  state.profileDraft.removePhoto = false;
+  renderProfilePreview();
+});
+
 document.getElementById("avatarProfileForm").addEventListener("submit", async event => {
   event.preventDefault();
   const button = event.submitter;
+  const nickname = document.getElementById("nicknameInput").value.trim();
   const avatarLabel = document.getElementById("avatarLabelInput").value.trim();
+  if (!nickname || Array.from(nickname).length > 30) {
+    toast("昵称长度需为 1–30 位");
+    return;
+  }
   if (!avatarLabel || Array.from(avatarLabel).length > 4) {
     toast("头像标识请填写 1 个汉字或表情（最多 4 个字符）");
     return;
   }
+  if (state.data?.partner?.nickname && nickname === state.data.partner.nickname && nickname !== state.data?.user?.nickname) {
+    if (!window.confirm("你和伴侣将使用相同昵称，消息和评论中可能不容易区分。仍然保存吗？")) return;
+  }
   button.disabled = true;
   try {
+    let avatarMediaId = state.data?.user?.avatar_media_id || "";
+    if (state.profileDraft.avatarFile) {
+      const uploaded = await uploadMedia(state.profileDraft.avatarFile, "private");
+      avatarMediaId = uploaded.id;
+    } else if (state.profileDraft.removePhoto) avatarMediaId = "";
     const result = await api("/api/v1/account/profile", {
-      method: "PUT", body: JSON.stringify({ avatar_label: avatarLabel }),
+      method: "PUT", body: JSON.stringify({ nickname, avatar_label: avatarLabel, avatar_media_id: avatarMediaId }),
     });
     state.data.user = result.user;
     renderIdentity();
+    resetProfileDraft(result.user);
     await loadAccountCenter();
-    toast("你的头像已经更新，对方刷新后也会看到");
+    toast(result.nickname_matches_partner ? "资料已保存；你们现在使用相同昵称" : "你的昵称和头像已经更新，对方刷新后也会看到");
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });
@@ -8521,7 +8710,7 @@ setInterval(async () => {
     const additions = (result.items || []).filter(item => !knownIds.has(item.id));
     if (additions.length) {
       state.data.messages = mergeChatMessages(state.data.messages, result.items);
-      if (!stayAtBottom) state.chatHistory.newCount += additions.filter(item => !item.mine).length;
+      if (!stayAtBottom) registerUnreadChatMessages(additions);
       renderMessages({ preserveScroll: !stayAtBottom, stickToBottom: stayAtBottom });
     }
   } catch (_) {

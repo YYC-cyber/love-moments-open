@@ -178,11 +178,48 @@ function shouldIgnoreConsoleError(message) {
     await pageB.locator("#messages .message", { hasText: marker }).waitFor({ timeout: 10_000 });
     checks.push("文字消息 SSE 双端实时同步");
 
-    const markerMessage = pageA.locator("#messages .message", { hasText: marker });
+    for (let index = 1; index <= 8; index += 1) {
+      const filler = `${marker}-滚动准备${index}`;
+      await pageA.locator("#chatInput").fill(filler);
+      await pageA.locator("#chatInput").press("Enter");
+    }
+    await pageB.locator("#messages .message", { hasText: `${marker}-滚动准备8` }).waitFor({ timeout: 10_000 });
+    await pageB.waitForFunction(() => {
+      const node = document.querySelector("#messages");
+      return node && node.scrollHeight - node.clientHeight > 100;
+    });
+    await pageB.evaluate(() => scrollChatToLatest({ behavior: "auto" }));
+    await pageB.locator("#messages").evaluate(node => { node.scrollTop = 0; });
+    await pageB.waitForFunction(() => {
+      const node = document.querySelector("#messages");
+      return node && node.scrollHeight - node.scrollTop - node.clientHeight > 72;
+    });
+    await pageA.locator("#chatInput").fill(`${marker}-新消息一`);
+    await pageA.locator("#chatInput").press("Enter");
+    await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.textContent?.includes("新消息（1）"));
+    await pageA.locator("#chatInput").fill(`${marker}-新消息二`);
+    await pageA.locator("#chatInput").press("Enter");
+    await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.textContent?.includes("新消息（2）"));
+    const firstUnread = pageB.locator("#messages .message", { hasText: `${marker}-新消息一` });
+    const firstUnreadId = await firstUnread.getAttribute("data-message-id");
+    await pageB.locator("#chatNewMessages").click();
+    await pageB.waitForFunction(expectedId => document.querySelector("#messages")?.dataset.lastUnreadJump === expectedId, firstUnreadId);
+    await pageB.locator('[data-nav="home"]').last().click();
+    await pageB.locator("#messages").evaluate(node => { node.scrollTop = 0; });
+    await pageB.locator('[data-nav="chat"]').last().click();
+    await pageB.waitForFunction(() => {
+      const node = document.querySelector("#messages");
+      return node && node.scrollHeight - node.scrollTop - node.clientHeight < 8;
+    });
+    checks.push("消息页每次打开定位最新消息，新消息计数浮标跳到第一条未读");
+
+    const collectionText = `${marker}-新消息二`;
+    const markerMessage = pageA.locator("#messages .message", { hasText: collectionText });
+    await markerMessage.scrollIntoViewIfNeeded();
     await markerMessage.locator('[data-action="save-message"]').click();
     await pageA.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("已收藏"));
     const afterCollection = await api(pageA, "/api/v1/bootstrap");
-    const collected = afterCollection.moments.find(item => item.body === marker);
+    const collected = afterCollection.moments.find(item => item.body === collectionText);
     assert(collected, "消息收藏为瞬间失败");
     checks.push("消息按钮/长按共用的收藏为瞬间流程");
 
@@ -402,8 +439,14 @@ function shouldIgnoreConsoleError(message) {
     const switcherB = pageB.locator("#tripSwitcher");
     await switcherB.selectOption(currentTripId);
     await pageB.locator('[data-action="approve-trip"]').click();
-    await pageB.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("正式生效"));
-    assert((await api(pageA, `/api/v1/trips/${currentTripId}`)).status === "confirmed", "双方确认后旅行没有生效");
+    await pageB.waitForFunction(async tripId => {
+      const response = await fetch(`/api/v1/trips/${encodeURIComponent(tripId)}`);
+      return response.ok && (await response.json()).status === "confirmed";
+    }, currentTripId);
+    await pageA.waitForFunction(async tripId => {
+      const response = await fetch(`/api/v1/trips/${encodeURIComponent(tripId)}?confirmed_check=${Date.now()}`, { cache: "no-store" });
+      return response.ok && (await response.json()).status === "confirmed";
+    }, currentTripId);
     checks.push("五套旅行方案预览、整套采用、完整多日行程、混搭与双方确认");
 
     await pageA.locator('.section-tabs [data-trip-section="overview"]').click();
@@ -426,8 +469,10 @@ function shouldIgnoreConsoleError(message) {
     // The trip created in this isolated run is disposable.  Delete it through
     // the same visible control a real user taps, then verify both accounts no
     // longer receive it.  This protects against a show-only delete button.
-    pageA.once("dialog", dialog => dialog.accept());
+    const acceptTripDeleteDialog = dialog => dialog.accept();
+    pageA.on("dialog", acceptTripDeleteDialog);
     await pageA.locator('[data-action="delete-trip"]').click();
+    pageA.off("dialog", acceptTripDeleteDialog);
     await pageA.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("旅行已删除"));
     assert(!(await api(pageA, "/api/v1/trips")).items.some(item => item.id === currentTripId), "删除后创建者仍能看到旅行");
     assert(!(await api(pageB, "/api/v1/trips")).items.some(item => item.id === currentTripId), "删除后伴侣仍能看到旅行");
@@ -841,6 +886,48 @@ function shouldIgnoreConsoleError(message) {
     await protectedMedia.locator("img").waitFor();
     assert(await protectedMedia.locator("small").textContent().then(value => value.includes("隐私信息已清理")), "账号媒体库未标记图片隐私清理");
     await protectedMedia.locator('[data-action="trash-media"]').waitFor();
+    const originalNickname = await pageA.locator("#nicknameInput").inputValue();
+    const partnerNickname = (await api(pageA, "/api/v1/bootstrap")).partner.nickname;
+    await pageA.locator("#nicknameInput").fill(partnerNickname);
+    await pageA.locator("#nicknameMatchWarning").waitFor({ state: "visible" });
+    await pageA.locator("#nicknameInput").fill(originalNickname);
+    await pageA.locator("#avatarImageInput").setInputFiles({ name: "profile-avatar.png", mimeType: "image/png", buffer: testPng });
+    await pageA.locator("#profilePreviewAvatar img").waitFor({ state: "visible" });
+    await pageA.locator("#avatarProfileForm button[type=submit], #avatarProfileForm .secondary-button").last().click();
+    await pageA.waitForFunction(() => document.querySelector(".avatar-wrap-me .avatar img"));
+    await pageA.waitForFunction(() => document.querySelector("#profileHistoryList")?.textContent?.includes("头像照片"));
+    await pageA.locator('[data-action="remove-avatar-photo"]').click();
+    const profileSaveButton = pageA.locator("#avatarProfileForm button[type=submit], #avatarProfileForm .secondary-button").last();
+    await profileSaveButton.click();
+    await pageA.waitForFunction(() => !document.querySelector(".avatar-wrap-me .avatar img"));
+    await profileSaveButton.waitFor({ state: "visible" });
+    await pageA.waitForFunction(() => !document.querySelector("#avatarProfileForm button[type=submit]")?.disabled);
+    await pageA.locator("#nicknameInput").fill(`${originalNickname}未保存`);
+    await pageA.waitForFunction(() => document.querySelector("#profilePreviewNickname")?.textContent?.includes("未保存"));
+    assert(await pageA.evaluate(() => profileDraftIsDirty()), "资料草稿修改后没有进入未保存状态");
+    await pageA.evaluate(() => {
+      window.__releaseOriginalConfirm = window.confirm;
+      window.__releaseUnsavedConfirmMessage = "";
+      window.confirm = message => {
+        window.__releaseUnsavedConfirmMessage = String(message || "");
+        return false;
+      };
+    });
+    await pageA.locator("#nicknameInput").fill(`${originalNickname}未保存`);
+    await pageA.waitForFunction(() => profileDraftIsDirty());
+    await pageA.locator("#accountModal [data-action=close-modal]").click();
+    await pageA.waitForFunction(() => Boolean(window.__releaseUnsavedConfirmMessage));
+    const closeDialogMessage = await pageA.evaluate(() => {
+      const message = window.__releaseUnsavedConfirmMessage || "";
+      window.confirm = window.__releaseOriginalConfirm;
+      delete window.__releaseOriginalConfirm;
+      delete window.__releaseUnsavedConfirmMessage;
+      return message;
+    });
+    assert(closeDialogMessage.includes("未保存"), "关闭资料页前没有提醒未保存修改");
+    assert(await pageA.locator("#accountModal").evaluate(node => node.classList.contains("open")), "取消放弃后资料页不应关闭");
+    await pageA.locator("#nicknameInput").fill(originalNickname);
+    checks.push("头像照片权限、资料预览、同名提醒、修改历史与未保存保护");
     const zipCheck = await pageA.evaluate(async () => {
       const response = await fetch("/api/v1/account/export.zip");
       const bytes = new Uint8Array(await response.arrayBuffer());
