@@ -357,7 +357,7 @@ const state = {
   chatHistory: {
     initialized: false, hasMore: true, loadingOlder: false,
     searchOpen: false, searchResults: [], searchQuery: "",
-    newCount: 0, unreadMessageIds: new Set(), firstUnreadMessageId: "", firstUnreadSentAt: "",
+    newCount: 0, unreadMessageIds: new Set(),
     savedScrollTop: null, highlightId: "", highlightUntil: 0,
   },
   longPressTimer: null,
@@ -2518,8 +2518,6 @@ function scrollChatToLatest({ behavior = "smooth" } = {}) {
   viewport.scrollTo({ top: viewport.scrollHeight, behavior });
   state.chatHistory.newCount = 0;
   state.chatHistory.unreadMessageIds.clear();
-  state.chatHistory.firstUnreadMessageId = "";
-  state.chatHistory.firstUnreadSentAt = "";
   const button = document.getElementById("chatNewMessages");
   if (button) button.hidden = true;
 }
@@ -2530,29 +2528,6 @@ function registerUnreadChatMessages(messages = []) {
   if (!(state.chatHistory.unreadMessageIds instanceof Set)) state.chatHistory.unreadMessageIds = new Set();
   unread.forEach(message => state.chatHistory.unreadMessageIds.add(message.id));
   state.chatHistory.newCount = state.chatHistory.unreadMessageIds.size;
-  const candidate = unread.slice().sort((left, right) => String(left.sent_at).localeCompare(String(right.sent_at)))[0];
-  if (!state.chatHistory.firstUnreadSentAt || String(candidate.sent_at).localeCompare(state.chatHistory.firstUnreadSentAt) < 0) {
-    state.chatHistory.firstUnreadMessageId = candidate.id;
-    state.chatHistory.firstUnreadSentAt = String(candidate.sent_at);
-  }
-}
-
-function scrollChatToFirstUnread({ behavior = "smooth" } = {}) {
-  const viewport = document.getElementById("messages");
-  const unreadId = state.chatHistory.firstUnreadMessageId;
-  const target = unreadId
-    ? [...(viewport?.querySelectorAll(".message[data-message-id]") || [])].find(item => item.dataset.messageId === unreadId)
-    : null;
-  state.chatHistory.newCount = 0;
-  state.chatHistory.unreadMessageIds.clear();
-  state.chatHistory.firstUnreadMessageId = "";
-  state.chatHistory.firstUnreadSentAt = "";
-  updateChatNewMessageButton();
-  if (!target) { scrollChatToLatest({ behavior }); return; }
-  viewport.dataset.lastUnreadJump = unreadId;
-  target.scrollIntoView({ behavior, block: "start" });
-  target.classList.add("chat-message-highlight");
-  window.setTimeout(() => target.classList.remove("chat-message-highlight"), 1900);
 }
 
 function mergeChatMessages(existing = [], incoming = []) {
@@ -2566,7 +2541,7 @@ function updateChatNewMessageButton() {
   if (!button) return;
   button.hidden = state.chatHistory.newCount < 1;
   button.textContent = `新消息（${state.chatHistory.newCount}）↓`;
-  button.setAttribute("aria-label", `有 ${state.chatHistory.newCount} 条新消息，点击跳转到第一条未读消息`);
+  button.setAttribute("aria-label", `有 ${state.chatHistory.newCount} 条新消息，点击回到最新消息`);
 }
 
 function renderMessages({ preserveScroll = state.chatHistory.initialized, preservePrepend = false, stickToBottom = false, highlightId = "" } = {}) {
@@ -4759,7 +4734,7 @@ async function loadBootstrap({ quiet = false } = {}) {
       ? (bootstrap.messages || []).filter(item => !knownMessageIds.has(item.id) && !item.mine)
       : [];
     if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
-    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), firstUnreadMessageId: "", firstUnreadSentAt: "", savedScrollTop: null, highlightId: "", highlightUntil: 0 };
+    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), savedScrollTop: null, highlightId: "", highlightUntil: 0 };
     state.data = bootstrap;
     state.online = true;
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
@@ -5994,7 +5969,7 @@ document.addEventListener("click", async event => {
   if (action === "toggle-chat-search") { setChatSearchOpen(!state.chatHistory.searchOpen); return; }
   if (action === "close-chat-search") { setChatSearchOpen(false); return; }
   if (action === "load-older-messages") { await loadOlderMessages(); return; }
-  if (action === "jump-new-messages") { scrollChatToFirstUnread(); return; }
+  if (action === "jump-new-messages") { scrollChatToLatest(); return; }
   if (action === "open-chat-search-result") {
     try { await openChatSearchResult(actionEl.dataset.messageId); }
     catch (error) { toast(error.message); }
@@ -8161,8 +8136,6 @@ document.getElementById("messages").addEventListener("scroll", event => {
   if (chatViewportNearBottom(viewport)) {
     state.chatHistory.newCount = 0;
     state.chatHistory.unreadMessageIds.clear();
-    state.chatHistory.firstUnreadMessageId = "";
-    state.chatHistory.firstUnreadSentAt = "";
     updateChatNewMessageButton();
   }
   if (viewport.scrollTop < 36 && state.chatHistory.hasMore && !state.chatHistory.loadingOlder) loadOlderMessages();

@@ -200,10 +200,12 @@ function shouldIgnoreConsoleError(message) {
     await pageA.locator("#chatInput").fill(`${marker}-新消息二`);
     await pageA.locator("#chatInput").press("Enter");
     await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.textContent?.includes("新消息（2）"));
-    const firstUnread = pageB.locator("#messages .message", { hasText: `${marker}-新消息一` });
-    const firstUnreadId = await firstUnread.getAttribute("data-message-id");
     await pageB.locator("#chatNewMessages").click();
-    await pageB.waitForFunction(expectedId => document.querySelector("#messages")?.dataset.lastUnreadJump === expectedId, firstUnreadId);
+    await pageB.waitForFunction(() => {
+      const node = document.querySelector("#messages");
+      return node && node.scrollHeight - node.scrollTop - node.clientHeight < 8
+        && document.querySelector("#chatNewMessages")?.hidden;
+    });
     await pageB.locator('[data-nav="home"]').last().click();
     await pageB.locator("#messages").evaluate(node => { node.scrollTop = 0; });
     await pageB.locator('[data-nav="chat"]').last().click();
@@ -211,7 +213,7 @@ function shouldIgnoreConsoleError(message) {
       const node = document.querySelector("#messages");
       return node && node.scrollHeight - node.scrollTop - node.clientHeight < 8;
     });
-    checks.push("消息页每次打开定位最新消息，新消息计数浮标跳到第一条未读");
+    checks.push("消息页每次打开定位最新消息，新消息计数浮标一键回到最新消息");
 
     const collectionText = `${marker}-新消息二`;
     const markerMessage = pageA.locator("#messages .message", { hasText: collectionText });
