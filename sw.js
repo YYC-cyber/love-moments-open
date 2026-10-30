@@ -1,10 +1,9 @@
-const CACHE = "love-moments-open-v55";
+const CACHE = "love-moments-open-v56";
 const ASSETS = [
   "/",
   "/static/index.html",
   "/static/app.css",
   "/static/app.js",
-  "/static/vendor/agora-rtc-sdk-ng-4.24.8.js",
   "/static/assets/couple-lake-hero.png",
   "/static/assets/love-moments-icon.svg",
   "/static/assets/love-moments-icon-180.png",

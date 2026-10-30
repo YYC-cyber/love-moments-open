@@ -8,6 +8,8 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import io
+import tarfile
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +59,9 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
     orphan_media = 0
     media_count_matches = False
     media_bytes_matches = False
+    theme_count_matches = False
+    theme_bytes_matches = False
+    invalid_theme_assets = 0
     integrity = "unavailable"
     foreign_key_violations = -1
     schema_version = 0
@@ -123,10 +128,41 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
     media_bytes_matches = (
         int(manifest.get("media_bytes", -1)) == declared_bytes == actual_bytes
     )
+    declared_theme_paths: set[str] = set()
+    declared_theme_bytes = 0
+    theme_root = backup / "theme-assets"
+    for item in manifest.get("theme_objects", []):
+        if not isinstance(item, dict):
+            invalid_theme_assets += 1
+            continue
+        try:
+            relative_path = _safe_relative_path(item.get("path"), "主题贴纸")
+        except ValueError:
+            invalid_theme_assets += 1
+            continue
+        relative = relative_path.as_posix()
+        target = (theme_root / relative_path).resolve()
+        if relative in declared_theme_paths or (target != theme_root.resolve() and theme_root.resolve() not in target.parents) or not target.is_file():
+            invalid_theme_assets += 1
+            continue
+        declared_theme_paths.add(relative)
+        size = target.stat().st_size
+        declared_theme_bytes += size
+        if int(item.get("size", -1)) != size or (item.get("sha256") and _checksum(target) != item["sha256"]):
+            invalid_theme_assets += 1
+    actual_theme_paths = {
+        path.relative_to(theme_root).as_posix()
+        for path in theme_root.rglob("*")
+        if path.is_file()
+    } if theme_root.is_dir() else set()
+    actual_theme_bytes = sum((theme_root / path).stat().st_size for path in actual_theme_paths)
+    theme_count_matches = int(manifest.get("theme_files", 0)) == len(declared_theme_paths) == len(actual_theme_paths)
+    theme_bytes_matches = int(manifest.get("theme_bytes", 0)) == declared_theme_bytes == actual_theme_bytes
     restore_ok = (
         integrity == "ok" and foreign_key_violations == 0 and checksum_ok
         and missing_media == 0 and invalid_media == 0 and orphan_media == 0
         and media_count_matches and media_bytes_matches
+        and invalid_theme_assets == 0 and theme_count_matches and theme_bytes_matches
         and bool(inventory["ok"]) and bool(export_policy["ok"])
     )
     result = {
@@ -145,6 +181,10 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
         "orphan_media": orphan_media,
         "media_count_matches": media_count_matches,
         "media_bytes_matches": media_bytes_matches,
+        "invalid_theme_assets": invalid_theme_assets,
+        "theme_count_matches": theme_count_matches,
+        "theme_bytes_matches": theme_bytes_matches,
+        "theme_files": len(actual_theme_paths),
         "manifest_media_count": int(manifest.get("media_files", -1)),
         "actual_media_count": len(actual_paths),
         "manifest_media_bytes": int(manifest.get("media_bytes", -1)),
@@ -158,6 +198,41 @@ def verify_backup(folder: str | Path, *, update_manifest: bool = True) -> dict[s
         if os.name != "nt":
             manifest_path.chmod(0o600)
     return result
+
+
+def mirror_backup_to_qiniu(folder: str | Path) -> dict[str, Any]:
+    """Upload an encrypted database/theme disaster bundle to private Qiniu Kodo."""
+    from cryptography.fernet import Fernet
+    from .storage import QiniuKodoMediaStorage
+
+    source = Path(folder).resolve()
+    manifest = _read_manifest(source)
+    secret = os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
+    if len(secret) < 32:
+        raise ValueError("BACKUP_ENCRYPTION_KEY 必须至少 32 个字符")
+    required = ("QINIU_ACCESS_KEY", "QINIU_SECRET_KEY", "QINIU_BUCKET", "QINIU_S3_REGION")
+    values = [os.getenv(name, "").strip() for name in required]
+    if not all(values):
+        raise ValueError("七牛云备份配置不完整")
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        tar.add(source / manifest.get("database_file", "love_moments.db"), arcname="love_moments.db")
+        tar.add(source / "manifest.json", arcname="manifest.json")
+        if (source / "theme-assets").is_dir():
+            tar.add(source / "theme-assets", arcname="theme-assets")
+    key = hashlib.sha256(secret.encode("utf-8")).digest()
+    import base64
+    encrypted = Fernet(base64.urlsafe_b64encode(key)).encrypt(archive.getvalue())
+    storage = QiniuKodoMediaStorage(*values, endpoint=os.getenv("QINIU_S3_ENDPOINT", ""))
+    prefix = os.getenv("BACKUP_QINIU_PREFIX", "private-disaster-backups").strip().strip("/") or "private-disaster-backups"
+    object_key = f"{prefix}/{source.name}.tar.gz.fernet"
+    stored = storage.put(object_key, encrypted, "application/octet-stream")
+    downloaded = storage.get(object_key)
+    checksum = hashlib.sha256(encrypted).hexdigest()
+    if hashlib.sha256(downloaded).hexdigest() != checksum:
+        storage.delete(object_key)
+        raise RuntimeError("七牛云灾备上传后的校验失败")
+    return {"object_key": stored.key, "bytes": stored.size, "sha256": checksum, "verified": True}
 
 
 def prune_automatic_backups(

@@ -464,6 +464,16 @@ def registration_mode() -> str:
     return mode if mode in {"open", "closed"} else "closed"
 
 
+def runtime_entry_status() -> dict[str, str]:
+    """Expose public entry choices without returning deployment credentials."""
+    return {
+        "primary_url": os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+        "sakura_url": os.getenv("SAKURA_PUBLIC_BASE_URL", "").strip().rstrip("/"),
+        "sakura_status": os.getenv("SAKURA_DEPLOYMENT_STATUS", "standby").strip().lower() or "standby",
+        "tailscale_url": os.getenv("TAILSCALE_PUBLIC_BASE_URL", "").strip().rstrip("/"),
+    }
+
+
 def queue_web_push(user_id: str, payload: dict, ttl_seconds: int = 60) -> int:
     """Persist before returning, then wake the asynchronous dispatcher."""
     if not PUSH.enabled:
@@ -839,6 +849,7 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 "authenticated": bool(user), "user": user,
                 "pairing": STORE.pairing_state(user["id"]) if user else None,
                 "registration_enabled": registration_mode() == "open",
+                "entry": runtime_entry_status(),
             })
             return
         elif path == "/api/v1/admin/overview":

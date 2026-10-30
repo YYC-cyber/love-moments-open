@@ -741,7 +741,16 @@ class AdminService:
                 and os.getenv("QINIU_S3_REGION", "").strip()
             ),
             "supabase": bool(os.getenv("SUPABASE_URL", "").strip() and os.getenv("SUPABASE_ANON_KEY", "").strip()),
-            "backup_mirror": bool(os.getenv("BACKUP_MIRROR_ROOT", "").strip()),
+            "backup_mirror": bool(
+                os.getenv("BACKUP_MIRROR_ROOT", "").strip()
+                or (
+                    os.getenv("BACKUP_QINIU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+                    and os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
+                    and os.getenv("QINIU_ACCESS_KEY", "").strip()
+                    and os.getenv("QINIU_SECRET_KEY", "").strip()
+                    and os.getenv("QINIU_BUCKET", "").strip()
+                )
+            ),
             "ocr": real_ocr_configured(),
             "booking": bool(
                 os.getenv("BOOKING_API_URL", "").strip()
@@ -846,7 +855,7 @@ class AdminService:
             {
                 "id": "backup_mirror", "label": "数据库异盘备份",
                 "status": "ok" if configured["backup_mirror"] else "warning",
-                "message": "已配置第二存储位置" if configured["backup_mirror"] else "尚未配置；电脑硬盘损坏时本机备份可能一起丢失",
+                "message": "已配置第二存储位置（本地镜像或加密对象存储）" if configured["backup_mirror"] else "尚未配置；服务器磁盘损坏时本机备份可能一起丢失",
             },
             {
                 "id": "external_quota", "label": "免费接口额度",

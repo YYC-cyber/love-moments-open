@@ -48,11 +48,13 @@ def create_backup(
     output_root: Path | None = None,
     database_path: Path | None = None,
     media_root: Path | None = None,
+    theme_root: Path | None = None,
     source: str = "manual",
 ) -> Path:
     load_env(ROOT / ".env")
     database = (database_path or _resolve(os.getenv("DATABASE_PATH", ""), "data/love_moments.db")).resolve()
     media = (media_root or _resolve(os.getenv("MEDIA_ROOT", ""), "data/media")).resolve()
+    themes = (theme_root or database.parent / "theme-assets").resolve()
     if not database.is_file():
         raise FileNotFoundError(f"数据库不存在：{database}")
 
@@ -101,6 +103,25 @@ def create_backup(
                     })
                     _private(path, 0o600)
 
+        theme_count = 0
+        theme_bytes = 0
+        theme_objects = []
+        theme_copy = working / "theme-assets"
+        if themes.is_dir():
+            shutil.copytree(themes, theme_copy)
+            for path in theme_copy.rglob("*"):
+                if path.is_dir():
+                    _private(path, 0o700)
+                elif path.is_file():
+                    theme_count += 1
+                    theme_bytes += path.stat().st_size
+                    theme_objects.append({
+                        "path": path.relative_to(theme_copy).as_posix(),
+                        "size": path.stat().st_size,
+                        "sha256": _checksum(path),
+                    })
+                    _private(path, 0o600)
+
         manifest = {
             "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "source": source,
@@ -110,6 +131,10 @@ def create_backup(
             "media_files": media_count,
             "media_bytes": media_bytes,
             "media_objects": media_objects,
+            "theme_files": theme_count,
+            "theme_bytes": theme_bytes,
+            "theme_objects": theme_objects,
+            "private_theme_assets_included": theme_count > 0,
             "includes_env": False,
             "service_secrets_included": False,
             "ephemeral_album_exports_included": False,

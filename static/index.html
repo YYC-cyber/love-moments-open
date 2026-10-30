@@ -31,6 +31,13 @@
           <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required></label>
           <button class="primary-button" id="authSubmit">登录</button>
         </form>
+        <div class="auth-progress" id="authProgress" role="status" aria-live="polite" hidden>
+          <div class="auth-progress-track"><i id="authProgressBar"></i></div>
+          <span id="authProgressText">正在准备登录…</span>
+        </div>
+        <a class="entry-notice" id="entryNotice" href="#" hidden>
+          <strong>当前打开的是备用入口</strong><span>备用入口目前暂停，请前往正在使用的正式地址。</span>
+        </a>
         <p class="account-note" id="registrationNote">请使用你们各自注册的账号登录。注册时填写的昵称，会成为你在情侣空间里的名字和头像文字。</p>
         <details class="pair-help">
           <summary>两个新账号怎么组成情侣？</summary>
@@ -989,7 +996,6 @@
     <div class="call-controls" id="activeCallControls"><button data-action="mute">⌁<small>静音</small></button><button data-action="speaker">◖<small>扬声器</small></button><button class="hangup" data-action="end-call">×<small>挂断</small></button></div>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="../../static/vendor/agora-rtc-sdk-ng-4.24.8.js"></script>
   <script src="../../static/app.js"></script>
 </body>
 </html>

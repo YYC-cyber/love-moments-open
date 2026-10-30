@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from love_moments import LoveMomentsStore
-from love_moments.maintenance import prune_automatic_backups, verify_backup
+from love_moments.maintenance import mirror_backup_to_qiniu, prune_automatic_backups, verify_backup
 from scripts.backup_local import create_backup
 from scripts import install_launchd
 from scripts import maintenance as scheduled
@@ -92,6 +92,41 @@ class MaintenanceTests(unittest.TestCase):
             verified["account_export_policy"]["covered"],
             verified["account_export_policy"]["required"],
         )
+
+    def test_backup_includes_and_verifies_private_theme_assets(self) -> None:
+        theme_root = self.database.parent / "theme-assets"
+        theme_root.mkdir()
+        (theme_root / "kitty-page-stickers-v2.png").write_bytes(b"private-theme-art")
+        destination = create_backup(self.root / "backups-theme", self.database, self.media)
+        manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["private_theme_assets_included"])
+        self.assertEqual(manifest["theme_files"], 1)
+        self.assertTrue((destination / "theme-assets" / "kitty-page-stickers-v2.png").is_file())
+        self.assertTrue(verify_backup(destination)["theme_count_matches"])
+
+    def test_qiniu_disaster_bundle_is_encrypted_and_verified_after_upload(self) -> None:
+        destination = create_backup(self.root / "backups-cloud", self.database, self.media)
+        objects = {}
+
+        class FakeQiniu:
+            def __init__(self, *_args, **_kwargs): pass
+            def put(self, key, data, _content_type):
+                objects[key] = data
+                return type("Stored", (), {"key": key, "size": len(data)})()
+            def get(self, key): return objects[key]
+            def delete(self, key): objects.pop(key, None)
+
+        env = {
+            "BACKUP_ENCRYPTION_KEY": "test-recovery-key-that-is-longer-than-32-characters",
+            "QINIU_ACCESS_KEY": "access", "QINIU_SECRET_KEY": "secret",
+            "QINIU_BUCKET": "love-moments", "QINIU_S3_REGION": "cn-east-1",
+        }
+        with patch.dict(os.environ, env, clear=False), patch("love_moments.storage.QiniuKodoMediaStorage", FakeQiniu):
+            result = mirror_backup_to_qiniu(destination)
+        encrypted = objects[result["object_key"]]
+        self.assertTrue(result["verified"])
+        self.assertNotIn(b"SQLite format 3", encrypted)
+        self.assertNotIn(b"manifest.json", encrypted)
 
     def test_backup_verification_rejects_path_traversal_or_unlisted_media(self) -> None:
         image = self.media / "images" / "visible.jpg"

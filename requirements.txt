@@ -9,6 +9,8 @@ certifi>=2024.8.30
 # 标准 Web Push（VAPID + RFC 8291 内容加密）。用于 iOS/iPadOS 16.4+
 # 主屏幕 Web App、Android 与桌面浏览器的免费后台通知，不依赖 FCM Key。
 pywebpush>=2.5.0,<3
+# 灾备包使用 Fernet 加密后才上传私有对象存储；显式声明，避免只依赖 Web Push 的间接依赖。
+cryptography>=45,<47
 # 本地生成固定模板 PDF，不把回忆内容上传给第三方 PDF 服务。
 reportlab>=4,<5
 #

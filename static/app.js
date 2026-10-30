@@ -4820,6 +4820,32 @@ function stopRealtime() {
   clearTimeout(state.realtimeRefresh);
 }
 
+function setAuthProgress(percent, message, { busy = true } = {}) {
+  const progress = document.getElementById("authProgress");
+  const bar = document.getElementById("authProgressBar");
+  const label = document.getElementById("authProgressText");
+  const submit = document.getElementById("authSubmit");
+  if (!progress || !bar || !label || !submit) return;
+  progress.hidden = !busy;
+  bar.style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
+  label.textContent = message || "正在打开共同空间…";
+  submit.disabled = busy;
+  submit.setAttribute("aria-busy", busy ? "true" : "false");
+}
+
+function renderEntryNotice(entry) {
+  const notice = document.getElementById("entryNotice");
+  if (!notice) return;
+  let primary = "";
+  let sakura = "";
+  try { primary = entry?.primary_url ? new URL(entry.primary_url).origin : ""; } catch (_) {}
+  try { sakura = entry?.sakura_url ? new URL(entry.sakura_url).origin : ""; } catch (_) {}
+  const current = location.origin.replace(/\/$/, "");
+  const shouldWarn = Boolean(primary && current !== primary && sakura === current && entry?.sakura_status === "standby");
+  notice.hidden = !shouldWarn;
+  if (shouldWarn) notice.href = primary;
+}
+
 function showAccountAuth(mode = "login") {
   if (mode === "register" && !state.registrationEnabled) mode = "login";
   state.authMode = mode;
@@ -4858,6 +4884,7 @@ function hideAuth() {
 async function initializeAuth() {
   try {
     const result = await api("/api/v1/auth/me");
+    renderEntryNotice(result.entry);
     state.registrationEnabled = result.registration_enabled !== false;
     if (!result.authenticated) { await clearMealOfflineData(); showAccountAuth(); return; }
     if (!result.pairing?.paired) { await clearMealOfflineData(); closeCookingForUnpairedAccount(); showPairing(); return; }
@@ -5262,7 +5289,7 @@ async function renewShengwangToken() {
 }
 
 async function createShengwangCall() {
-  if (!window.AgoraRTC) throw new Error("声网语音组件加载失败，请刷新页面后重试");
+  await loadAgoraSdk();
   const credentials = await issueShengwangToken();
   const client = window.AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
   state.callProvider = "shengwang";
@@ -5311,6 +5338,22 @@ async function createShengwangCall() {
   document.getElementById("callStatus").textContent = state.callRecord?.state === "connected"
     ? "已接通 · 等待对方音频…"
     : "正在呼叫，等待 TA 接听…";
+}
+
+let agoraSdkPromise = null;
+function loadAgoraSdk() {
+  if (window.AgoraRTC) return Promise.resolve(window.AgoraRTC);
+  if (agoraSdkPromise) return agoraSdkPromise;
+  document.getElementById("callStatus").textContent = "正在加载语音通话组件…";
+  agoraSdkPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/static/vendor/agora-rtc-sdk-ng-4.24.8.js";
+    script.async = true;
+    script.onload = () => window.AgoraRTC ? resolve(window.AgoraRTC) : reject(new Error("语音通话组件没有正确初始化"));
+    script.onerror = () => reject(new Error("语音通话组件加载失败，请检查网络后重试"));
+    document.head.appendChild(script);
+  }).catch(error => { agoraSdkPromise = null; throw error; });
+  return agoraSdkPromise;
 }
 
 async function connectCallMedia(provider) {
@@ -7973,16 +8016,21 @@ document.getElementById("authForm").addEventListener("submit", async event => {
     nickname: document.getElementById("authNickname").value
   };
   try {
+    setAuthProgress(18, "正在安全验证账号…");
     const endpoint = state.authMode === "register" ? "/api/v1/auth/register" : "/api/v1/auth/login";
     const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+    setAuthProgress(48, "账号验证成功，正在打开共同空间…");
     await clearMealOfflineData();
+    setAuthProgress(62, "正在读取消息、回忆和旅行…");
     resetTripLive();
     state.pushSynced = false;
     document.getElementById("authPassword").value = "";
     if (!result.pairing?.paired) showPairing(); else await loadBootstrap({ quiet: true });
+    setAuthProgress(100, "共同空间已准备好");
     broadcastAuthChange(state.authMode, result.user?.username || payload.username);
     toast(state.authMode === "register" ? "账号创建成功" : "登录成功");
   } catch (error) { toast(error.message); }
+  finally { setAuthProgress(0, "", { busy: false }); }
 });
 
 document.getElementById("changePasswordForm").addEventListener("submit", async event => {

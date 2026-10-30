@@ -27,6 +27,9 @@ Docker 只把 `127.0.0.1:52013` 暴露给服务器本机。Nginx 是唯一公网
    MEDIA_ROOT=/srv/love-moments/media
    BACKUP_ROOT=/srv/love-moments/backups
    BACKUP_MIRROR_ROOT=
+   BACKUP_QINIU_ENABLED=true
+   BACKUP_QINIU_PREFIX=private-disaster-backups
+   BACKUP_ENCRYPTION_KEY=至少32字符并在服务器外保存的随机密钥
    MAINTENANCE_STATE_ROOT=/srv/love-moments/maintenance
    LOG_ROOT=/srv/love-moments/logs
    PUBLIC_BASE_URL=https://你的域名
@@ -59,6 +62,14 @@ curl -fsS http://127.0.0.1:52013/api/health
 curl -fsS https://你的域名/api/health
 systemctl list-timers 'love-moments-*'
 systemctl status love-moments.service --no-pager
+```
+
+发布完成后，从可信电脑执行只读双账号验收（凭据只通过当前进程环境提供，不会写入仓库或日志）：
+
+```bash
+LOVE_VERIFY_BASE_URL=https://你的地址 \
+LOVE_VERIFY_ACCOUNTS_JSON='[{"username":"账号一","password":"密码"},{"username":"账号二","password":"密码"}]' \
+python3 scripts/verify_remote_deployment.py
 ```
 
 数据库与媒体不会写入镜像或代码目录，重建容器和更新代码不会覆盖 `/srv/love-moments`。不过系统盘仍不等于异地灾备：销毁实例或云盘会同时影响服务与本机备份，数据库还应定期复制到另一块云盘、NAS 或私有对象存储。

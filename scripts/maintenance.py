@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from love_moments.config import load_env  # noqa: E402
-from love_moments.maintenance import mirror_backup, prune_automatic_backups  # noqa: E402
+from love_moments.maintenance import mirror_backup, mirror_backup_to_qiniu, prune_automatic_backups  # noqa: E402
 from love_moments.store import LoveMomentsStore  # noqa: E402
 from scripts.backup_local import create_backup  # noqa: E402
 
@@ -147,9 +147,12 @@ def daily_maintenance() -> dict:
         destination = create_backup(backup_root, database, media_root, source="automatic")
         retention = prune_automatic_backups(backup_root)
         mirror_name = None
+        cloud_mirror = None
         mirror_value = os.getenv("BACKUP_MIRROR_ROOT", "").strip()
         if mirror_value:
             mirror_name = str(mirror_backup(destination, _resolve(mirror_value, mirror_value)))
+        if os.getenv("BACKUP_QINIU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            cloud_mirror = mirror_backup_to_qiniu(destination)
         media_checks = LoveMomentsStore(
             database, media_root=media_root, seed_demo_data=False,
         ).check_due_recipe_media(limit=100)
@@ -162,6 +165,7 @@ def daily_maintenance() -> dict:
             "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "backup": destination.name,
             "mirror": mirror_name,
+            "cloud_mirror": cloud_mirror,
             "retention": retention,
             "recipe_media_checks": media_checks,
             "database_integrity": integrity,

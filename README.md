@@ -72,6 +72,8 @@ ADMIN_USERNAMES=your_username
 
 **不配置任何第三方 API 也能启动。** 账号注册、情侣绑定、文字聊天、回忆、纪念日、清单、本地菜谱、本地媒体和后台都使用自己的 Python/SQLite 服务。外部 API 只负责智能规划、地图、实时报价、OCR、云存储或语音增强。
 
+如启用 `BACKUP_QINIU_ENABLED=true`，每日维护还会把 SQLite、清单和私有主题贴纸打成灾备包，用 `BACKUP_ENCRYPTION_KEY` 加密后上传七牛云私有空间并回读校验。这个密钥必须在服务器之外另存一份；恢复演练使用 `scripts/restore_qiniu_disaster_backup.py`，不会直接覆盖在线数据库。
+
 所有密钥都只填在服务器的 `.env`，不得写入网页、README、Issue、截图或 GitHub Secrets 以外的公开位置。各平台的免费额度和实名/付款要求可能调整，请以申请当天的控制台为准，并把 `.env` 中的本地调用上限设置得比平台额度更低。
 
 ### 推荐先配置
@@ -137,7 +139,7 @@ AMAP_WEB_KEY=your_amap_web_service_key
 - 私有实例的 `.env`、SQLite、媒体和备份不会复制到公开仓库。
 - 公开后端默认创建自己的 `data/love_moments.db`。
 - 所有第三方 API 均默认未配置，使用者必须填写自己的密钥。
-- 删除了针对维护者生产实例的远程验收和个人数据库重置脚本。
+- 远程验收脚本只从当前进程环境读取目标地址与账号，不包含维护者的生产地址或凭据。
 - 公开仓库的 CI 不引用私有仓库文件；可选实时接口只读取公开仓库自身配置的 GitHub Secrets。
 
 ## 七、测试
