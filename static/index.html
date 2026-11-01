@@ -208,7 +208,7 @@
         </div>
         <label class="trip-switcher"><span>查看旅行</span><select id="tripSwitcher" aria-label="切换旅行计划"></select></label>
         <nav class="section-tabs" aria-label="旅行功能页">
-          <button class="active" data-trip-section="overview">概览</button><button data-trip-section="assistant">问 AI</button><button data-trip-section="plans">五套方案</button><button data-trip-section="itinerary">每日行程</button><button data-trip-section="stays">酒店</button><button data-trip-section="tools">工具</button>
+          <button class="active" data-trip-section="overview">概览</button><button data-trip-section="assistant">问 AI</button><button data-trip-section="weather">天气</button><button data-trip-section="plans">五套方案</button><button data-trip-section="itinerary">每日行程</button><button data-trip-section="stays">酒店</button><button data-trip-section="tools">工具</button>
         </nav>
         <div data-trip-panel="overview">
           <article class="destination-warning card" id="tripDestinationWarning" hidden></article>
@@ -241,6 +241,13 @@
               <textarea id="tripAssistantInput" maxlength="1000" rows="2" placeholder="例如：找第二天晚餐，评分 4.5 以上、2 公里内" required></textarea>
               <button class="primary-button" id="tripAssistantSend">发送</button>
             </form>
+          </section>
+        </div>
+        <div data-trip-panel="weather">
+          <div class="subpage-heading"><div><span class="eyebrow ink">TRIP WEATHER</span><h2>旅行天气</h2><p>按已确认目的地和旅行日期查询；超出预报范围时不会用模拟天气代替。</p></div><button class="live-pill" id="tripWeatherRefresh" data-action="refresh-trip-weather">刷新预报</button></div>
+          <nav class="trip-weather-range" aria-label="天气预报范围"><button class="active" data-weather-range="10">未来 10 天</button><button data-weather-range="7">未来 7 天</button><button data-weather-range="trip">旅行日期</button></nav>
+          <section class="trip-weather-panel card" id="tripWeatherPanel" aria-live="polite">
+            <div class="empty-view"><p>进入天气页后会查询当前旅行的真实逐日预报。</p></div>
           </section>
         </div>
         <div data-trip-panel="plans">

@@ -325,7 +325,7 @@ const state = {
   mealSelectedDate: new Date().toLocaleDateString("sv-SE"),
   meals: { recipes: [], recipeDrafts: [], recipeNextCursor: null, wishes: [], cart: { items: [] }, calendar: { days: [] }, shopping: { items: [] }, profiles: { profiles: [] }, pantry: { items: [] }, categoryOrder: { categories: [] }, weeklyPlan: { id: null, status: "empty", items: [] }, shoppingPreview: null, substitutionPreview: null, substitutionMealId: "", openWishId: "", wishRecipeCandidates: [] },
   mealLoadSequence: 0,
-  tripSection: ["packing", "emergency", "expenses", "route"].includes(new URLSearchParams(location.search).get("trip_tool")) ? "tools" : (["overview", "assistant", "plans", "itinerary", "stays", "tools"].includes(privateStorage().getItem("love-trip-section")) ? privateStorage().getItem("love-trip-section") : "overview"),
+  tripSection: ["packing", "emergency", "expenses", "route"].includes(new URLSearchParams(location.search).get("trip_tool")) ? "tools" : (["overview", "assistant", "weather", "plans", "itinerary", "stays", "tools"].includes(privateStorage().getItem("love-trip-section")) ? privateStorage().getItem("love-trip-section") : "overview"),
   tripToolSection: ["packing", "emergency", "expenses", "route"].includes(new URLSearchParams(location.search).get("trip_tool")) ? new URLSearchParams(location.search).get("trip_tool") : (["packing", "emergency", "expenses", "route"].includes(privateStorage().getItem("love-trip-tool-section")) ? privateStorage().getItem("love-trip-tool-section") : "packing"),
   tripTools: { tripId: "", tripVersion: 0, packing: [], emergency: [], hospitals: [], evidence: null, offlineSnapshot: null, offlineReadOnly: false, loading: false, editingEmergency: null },
   tripExpenses: { tripId: "", data: null, loading: false, editing: null, selected: new Set(), requestSequence: 0 },
@@ -333,6 +333,7 @@ const state = {
   tripAssistantLoadSequence: 0,
   tripLiveEpoch: 0,
   tripLive: { tripId: "", ownerUserId: null, context: null, resultAnchorContext: null, result: null, fetchedAt: 0, deliveryMode: "idle", loading: false, error: "", routes: {} },
+  tripWeather: { tripId: "", rangeDays: 10, data: null, loading: false, error: "", requestSequence: 0 },
   timelineView: ["list", "album", "map", "report", "private", "trash"].includes(privateStorage().getItem("love-timeline-view")) ? privateStorage().getItem("love-timeline-view") : "list",
   timelineRenderToken: 0,
   memorySearchResult: null,
@@ -415,6 +416,11 @@ function resetTripLive(tripId = "") {
     tripId, ownerUserId: null, context: null, resultAnchorContext: null, result: null,
     fetchedAt: 0, deliveryMode: "idle", loading: false, error: "", routes: {},
   };
+  resetTripWeather(tripId);
+}
+
+function resetTripWeather(tripId = "") {
+  state.tripWeather = { tripId, rangeDays: Number(state.tripWeather?.rangeDays) || 10, data: null, loading: false, error: "", requestSequence: Number(state.tripWeather?.requestSequence || 0) + 1 };
 }
 
 function resetMemoryDiscovery() {
@@ -2159,7 +2165,7 @@ function scrollToContent(selector) {
 }
 
 function setTripSection(section = "overview", { scroll = true } = {}) {
-  const allowed = ["overview", "assistant", "plans", "itinerary", "stays", "tools"];
+  const allowed = ["overview", "assistant", "weather", "plans", "itinerary", "stays", "tools"];
   state.tripSection = allowed.includes(section) ? section : "overview";
   privateStorage().setItem("love-trip-section", state.tripSection);
   document.querySelectorAll("[data-trip-section]").forEach(button => button.classList.toggle("active", button.dataset.tripSection === state.tripSection));
@@ -2170,6 +2176,7 @@ function setTripSection(section = "overview", { scroll = true } = {}) {
     renderTripLive();
     loadTripAssistant({ quiet: true }).catch(error => toast(error.message));
   }
+  if (state.tripSection === "weather") loadTripWeather({ quiet: true }).catch(error => toast(error.message));
   if (state.tripSection === "tools") {
     if (state.tripToolSection === "expenses") loadTripExpenses({ quiet: true }).catch(error => toast(error.message));
     else loadTripTools({ quiet: true }).catch(error => toast(error.message));
@@ -3294,6 +3301,60 @@ function liveDistanceMeters(first, second) {
   const deltaLon = toRadians(second.longitude) - toRadians(first.longitude);
   const value = Math.sin(deltaLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+function tripWeatherIcon(code) {
+  const value = Number(code);
+  if ([0, 1].includes(value)) return "☀";
+  if ([2, 3].includes(value)) return "☁";
+  if ([45, 48].includes(value)) return "≋";
+  if ([71, 73, 75, 77, 85, 86].includes(value)) return "❄";
+  if ([95, 96, 99].includes(value)) return "ϟ";
+  return "☂";
+}
+
+function renderTripWeather() {
+  const host = document.getElementById("tripWeatherPanel"); const refresh = document.getElementById("tripWeatherRefresh");
+  if (!host || !refresh) return;
+  const weather = state.tripWeather; const tripId = state.data?.trip?.id || "";
+  document.querySelectorAll("[data-weather-range]").forEach(button => button.classList.toggle("active", String(button.dataset.weatherRange) === (weather.rangeDays ? String(weather.rangeDays) : "trip")));
+  refresh.disabled = weather.loading || !tripId; refresh.textContent = weather.loading ? "正在查询…" : "刷新预报";
+  if (!tripId) { host.innerHTML = '<div class="empty-view"><p>请先创建并选择一段旅行。</p></div>'; return; }
+  if (weather.loading && !weather.data) { host.innerHTML = '<div class="empty-view"><p>正在按旅行日期查询真实天气…</p></div>'; return; }
+  if (weather.error && !weather.data) { host.innerHTML = `<div class="trip-weather-notice warning"><strong>天气暂时没有查到</strong><p>${escapeHtml(weather.error)}</p></div>`; return; }
+  const data = weather.tripId === tripId ? weather.data : null;
+  if (!data) { host.innerHTML = '<div class="empty-view"><p>打开天气页后会自动查询当前旅行预报。</p></div>'; return; }
+  const location = [data.location?.name, data.location?.address].filter(Boolean).join(" · ");
+  const source = ["real_api", "cache"].includes(data.source_type) ? `${data.source_type === "cache" ? "接口缓存" : "真实接口"} · ${data.provider || data.source || "Open-Meteo"}` : "暂无真实预报";
+  const evidence = data.evidence_at ? `更新于 ${new Date(data.evidence_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "";
+  const days = (data.items || []).map(item => {
+    const temperature = item.temperature_min != null && item.temperature_max != null ? `${item.temperature_min}° / ${item.temperature_max}°` : "温度待确认";
+    const rain = item.precipitation_probability != null ? `降雨 ${item.precipitation_probability}%` : "降雨概率待确认";
+    const extras = [item.wind_speed_max != null ? `最大风速 ${item.wind_speed_max} km/h` : "", item.uv_index_max != null ? `紫外线 ${item.uv_index_max}` : ""].filter(Boolean).join(" · ");
+    const risky = Number(item.precipitation_probability || 0) >= 50 || [51,53,55,56,57,61,63,65,66,67,71,73,75,80,81,82,85,86,95,96,99].includes(Number(item.weather_code));
+    const places = (item.suggested_places || []).map(place => `<li><b>${escapeHtml(place.title)}</b><span>${escapeHtml(place.reason)}</span></li>`).join("");
+    return `<article class="trip-weather-day${risky ? " risky" : ""}"><span class="trip-weather-icon" aria-hidden="true">${tripWeatherIcon(item.weather_code)}</span><div><time>${escapeHtml(shortDate(item.date))}</time><strong>${escapeHtml(item.label || "天气变化中")}</strong><small>${escapeHtml(temperature)} · ${escapeHtml(rain)}</small>${extras ? `<em>${escapeHtml(extras)}</em>` : ""}</div>${places ? `<div class="trip-weather-places"><span>当前行程适合</span><ul>${places}</ul></div>` : ""}<div class="trip-weather-day-actions">${risky ? `<button data-action="weather-adjust-day" data-date="${escapeHtml(item.date)}" data-label="${escapeHtml(item.label || "天气变化")}">调整当天</button>` : ""}<button data-action="weather-recommend-day" data-date="${escapeHtml(item.date)}" data-label="${escapeHtml(item.label || "天气变化")}">按天气推荐景点</button></div></article>`;
+  }).join("");
+  const advice = (data.advice || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+  const future = data.check_again_on ? `<p><b>${escapeHtml(shortDate(data.check_again_on))}</b> 起再来查看，会进入真实 16 天预报范围。</p>` : "";
+  host.innerHTML = `<header class="trip-weather-header"><div><span class="mock-badge">${escapeHtml(source)}</span><h3>${escapeHtml(location || "当前旅行目的地")}</h3><p>${escapeHtml(data.message || "")}</p></div><small>${escapeHtml(evidence)}</small></header>${days ? `<div class="trip-weather-days">${days}</div>` : `<div class="trip-weather-notice"><strong>现在还没有逐日预报</strong><p>${escapeHtml(data.message || "请稍后重试。")}</p>${future}</div>`}${advice ? `<section class="trip-weather-advice"><h3>两个人的出行提醒</h3><ul>${advice}</ul></section>` : ""}<p class="form-note">预报来自 ${escapeHtml(data.provider || "Open-Meteo")}；天气会变化，临出发前请再次刷新。AI 只会生成调整草稿，不会自动覆盖行程。</p>`;
+}
+
+async function loadTripWeather({ force = false, quiet = false } = {}) {
+  const tripId = state.data?.trip?.id; if (!tripId) { renderTripWeather(); return; }
+  if (!force && state.tripWeather.tripId === tripId && state.tripWeather.data && Number(state.tripWeather.data.range_days || 0) === Number(state.tripWeather.rangeDays || 0)) { renderTripWeather(); return; }
+  const sequence = Number(state.tripWeather.requestSequence || 0) + 1;
+  state.tripWeather = { ...state.tripWeather, tripId, loading: true, error: "", requestSequence: sequence }; renderTripWeather();
+  try {
+    const params = new URLSearchParams(); if (force) params.set("refresh", "1"); if (state.tripWeather.rangeDays) params.set("days", String(state.tripWeather.rangeDays));
+    const data = await api(`/api/v1/trips/${encodeURIComponent(tripId)}/weather${params.size ? `?${params}` : ""}`);
+    if (sequence !== state.tripWeather.requestSequence || tripId !== state.data?.trip?.id) return;
+    state.tripWeather = { ...state.tripWeather, tripId, data, loading: false, error: "", requestSequence: sequence };
+  } catch (error) {
+    if (sequence !== state.tripWeather.requestSequence || tripId !== state.data?.trip?.id) return;
+    state.tripWeather = { ...state.tripWeather, loading: false, error: error.message || "天气接口暂时不可用" };
+    if (!quiet) toast(state.tripWeather.error);
+  } finally { if (sequence === state.tripWeather.requestSequence) renderTripWeather(); }
 }
 
 function routeModeLabel(mode) {
@@ -6058,6 +6119,11 @@ document.addEventListener("click", async event => {
   }
   const tripSection = event.target.closest("[data-trip-section]");
   if (tripSection) { navigate("trip"); setTripSection(tripSection.dataset.tripSection); return; }
+  const weatherRange = event.target.closest("[data-weather-range]");
+  if (weatherRange) {
+    state.tripWeather.rangeDays = weatherRange.dataset.weatherRange === "trip" ? null : Number(weatherRange.dataset.weatherRange);
+    state.tripWeather.data = null; await loadTripWeather(); return;
+  }
   const tripToolSection = event.target.closest("[data-trip-tool-section]");
   if (tripToolSection) {
     setTripToolSection(tripToolSection.dataset.tripToolSection);
@@ -6429,6 +6495,22 @@ document.addEventListener("click", async event => {
   }
   if (action === "trip-live-refresh") {
     await refreshTripLive();
+    return;
+  }
+  if (action === "refresh-trip-weather") {
+    await loadTripWeather({ force: true });
+    return;
+  }
+  if (action === "weather-adjust-day") {
+    const input = document.getElementById("tripAssistantInput");
+    input.value = `${actionEl.dataset.date || "这一天"} 预计${actionEl.dataset.label || "天气变化"}，请只调整当天受影响的室外项目，保留人工确认内容，并先给我查看修改前后差异。`;
+    setTripSection("assistant"); input.focus(); toast("已整理成调整请求，确认内容后点击发送");
+    return;
+  }
+  if (action === "weather-recommend-day") {
+    const input = document.getElementById("tripAssistantInput");
+    input.value = `${actionEl.dataset.date || "这一天"} 预计${actionEl.dataset.label || "天气变化"}。请根据这个天气推荐适合情侣去的真实景点：优先复用当前已确认地点；如需新增，只推荐能通过地图核验的目的地附近地点，说明室内/室外、推荐原因、预计停留时间和交通衔接，不要虚构店名或景点。先给建议，不要直接改行程。`;
+    setTripSection("assistant"); input.focus(); toast("已带入天气与日期，确认后发送给旅行助手");
     return;
   }
   if (action === "assistant-route") {

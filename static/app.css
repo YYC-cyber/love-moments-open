@@ -820,6 +820,18 @@ h1, h2, h3 { font-family: "Noto Serif SC", serif; }
 .trip-live-card p,.trip-live-card small { margin: 0; color: var(--muted); }
 .trip-live-error,.trip-live-inline-warning { border: 1px solid #d99a76; border-radius: 16px; padding: 12px; background: #fff5ec; color: #75412c; }
 .trip-live-error p,.trip-live-inline-warning { margin: 4px 0 0; }
+.trip-weather-panel { display: grid; gap: 16px; padding: 18px; overflow: hidden; background: linear-gradient(145deg,var(--paper),var(--cream)); }
+.trip-weather-range { display: flex; gap: 8px; overflow-x: auto; padding: 2px 1px 8px; }.trip-weather-range button { flex: 0 0 auto; min-height: 38px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--paper); }.trip-weather-range button.active { border-color: var(--wine); color: var(--paper); background: var(--wine); }
+.trip-weather-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.trip-weather-header h3 { margin: 8px 0 4px; font-size: 20px; }.trip-weather-header p,.trip-weather-header small { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }.trip-weather-header > small { flex: 0 0 auto; }
+.trip-weather-days { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; }
+.trip-weather-day { display: grid; grid-template-columns: 42px minmax(0,1fr); align-items: center; gap: 10px; min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 17px; background: color-mix(in srgb,var(--paper) 88%,transparent); }
+.trip-weather-day.risky { border-color: color-mix(in srgb,var(--wine) 42%,var(--line)); background: color-mix(in srgb,var(--blush) 46%,var(--paper)); }.trip-weather-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 14px; color: var(--wine-dark); background: var(--blush); font-size: 23px; }
+.trip-weather-day time,.trip-weather-day strong,.trip-weather-day small,.trip-weather-day em { display: block; min-width: 0; }.trip-weather-day time { color: var(--wine); font-size: 9px; font-weight: 800; }.trip-weather-day strong { margin-top: 3px; font-size: 14px; }.trip-weather-day small,.trip-weather-day em { margin-top: 4px; color: var(--muted); font-size: 9px; font-style: normal; line-height: 1.45; }
+.trip-weather-places { grid-column: 1 / -1; padding-top: 9px; border-top: 1px dashed var(--line); }.trip-weather-places > span { color: var(--wine); font-size: 9px; font-weight: 800; }.trip-weather-places ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 0; list-style: none; }.trip-weather-places li { display: grid; gap: 2px; }.trip-weather-places b { font-size: 10px; }.trip-weather-places li span { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.trip-weather-day-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit,minmax(108px,1fr)); gap: 7px; }.trip-weather-day button { min-height: 36px; border: 0; border-radius: 12px; color: var(--wine-dark); background: var(--blush); font-size: 10px; font-weight: 750; }
+.trip-weather-notice { padding: 18px; border: 1px dashed var(--line); border-radius: 18px; background: var(--paper); }.trip-weather-notice.warning { border-color: #d99a76; background: #fff5ec; }.trip-weather-notice strong { font-size: 15px; }.trip-weather-notice p { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.trip-weather-advice { padding: 15px; border-radius: 17px; color: var(--wine-dark); background: var(--blush); }.trip-weather-advice h3 { margin: 0 0 8px; font-size: 14px; }.trip-weather-advice ul { display: grid; gap: 6px; margin: 0; padding-left: 18px; }.trip-weather-advice li { font-size: 10px; line-height: 1.55; }
 .live-route-result { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 10px; border-radius: 12px; background: #f3e8e5; }
 .assistant-change-list,.assistant-warning ul { display: grid; gap: 7px; margin: 0; padding-left: 20px; }
 .assistant-change-list li { display: grid; gap: 2px; }
@@ -853,6 +865,7 @@ h1, h2, h3 { font-family: "Noto Serif SC", serif; }
   .assistant-message { max-width: 96%; }
   .trip-live-heading { display: grid; }
   .trip-live-heading button { width: 100%; }
+  .trip-weather-header { display: grid; }.trip-weather-days { grid-template-columns: 1fr; }
   .assistant-quote-row { grid-template-columns: 1fr; }
   .assistant-quote-row > div:last-child { justify-items: start; }
   .trip-assistant-form { bottom: 72px; grid-template-columns: 1fr; }

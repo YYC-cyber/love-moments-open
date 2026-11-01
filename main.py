@@ -1258,6 +1258,14 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.trip_route_legs(match.group(1), user["id"]))
             return
+        elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/weather", path):
+            user = self._require_user()
+            trip = STORE.get_trip(match.group(1), user_id=user["id"])
+            refresh = query.get("refresh", ["0"])[0] == "1"
+            days_value = query.get("days", [""])[0]
+            range_days = int(days_value) if days_value in {"7", "10"} else None
+            self._send_json(WEATHER.trip_forecast(trip, force_refresh=refresh, range_days=range_days), headers={"Cache-Control": "no-store"})
+            return
         elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/negotiation", path):
             user = self._require_user()
             self._send_json(STORE.get_trip_negotiation(match.group(1), user["id"]))
