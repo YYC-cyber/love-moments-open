@@ -301,6 +301,7 @@ const state = {
   selectedItemIds: new Set(),
   playTool: "",
   bead: { image: null, sourceUrl: "", size: 29, palette: [], indices: [], generatedIndices: [], selectedColor: 0 },
+  wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   editingItemId: null,
   itineraryDetailItemId: null,
   sharedDetail: null,
@@ -5037,7 +5038,7 @@ async function initializeRealtime(userId, generation, signal) {
   const source = new EventSource(`/api/v1/realtime/stream?after=${state.realtimeCursor}`, { withCredentials: true });
   state.realtime = source;
   const isCurrent = () => generation === realtimeGeneration && state.data?.user?.id === userId && state.realtime === source;
-  const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
+  const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "play.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
   const receive = event => {
     if (!isCurrent()) return;
     let realtimeEvent = null;
@@ -5056,6 +5057,7 @@ async function initializeRealtime(userId, generation, signal) {
       openSharedDetail(state.sharedDetail.resource_type, state.sharedDetail.resource_id, { refresh: true }).catch(() => {});
     }
     if (["meals.updated", "kitchen.updated"].includes(realtimeEvent?.event_type)) loadMeals({ quiet: true }).catch(() => {});
+    if (realtimeEvent?.event_type === "play.updated" && state.playTool === "wheel") loadCoupleWheel({ quiet: true }).catch(() => {});
     if (realtimeEvent?.event_type === "trip.tools_updated" && realtimeEvent?.payload?.resource === "trip_expense"
         && realtimeEvent.resource_id === state.data?.trip?.id && state.tripSection === "tools" && state.tripToolSection === "expenses") {
       loadTripExpenses({ quiet: true }).catch(() => {});
@@ -6006,13 +6008,44 @@ function filterEntertainmentFeatures(query = "") {
   const clear = document.querySelector('[data-action="clear-play-search"]'); if (clear) clear.hidden = !normalized;
 }
 function showEntertainmentHub({ focusSearch = false } = {}) {
-  state.playTool = ""; document.getElementById("playHubPanel").hidden = false; document.getElementById("beadToolPanel").hidden = true;
+  state.playTool = ""; document.getElementById("playHubPanel").hidden = false;
+  document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = true; });
   const search = document.getElementById("playSearch"); filterEntertainmentFeatures(search?.value || ""); if (focusSearch) search?.focus();
 }
 function openEntertainmentTool(tool) {
-  if (tool !== "beads") { toast("这个娱乐功能还没有开放"); return; }
-  state.playTool = tool; document.getElementById("playHubPanel").hidden = true; document.getElementById("beadToolPanel").hidden = false; renderSavedBeadPatterns();
+  if (!["beads", "wheel"].includes(tool)) { toast("这个娱乐功能还没有开放"); return; }
+  state.playTool = tool; document.getElementById("playHubPanel").hidden = true;
+  document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== (tool === "beads" ? "beadToolPanel" : "wheelToolPanel"); });
+  if (tool === "beads") renderSavedBeadPatterns();
+  else loadCoupleWheel().catch(error => toast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" }); document.querySelector(".phone-shell")?.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+const WHEEL_COLORS = ["#d52f62", "#f7a7bf", "#fff0f4", "#9f294d", "#ffd4df", "#f27c9e", "#fff8f3", "#c25373"];
+function wheelActiveOptions() { return (state.wheel.data?.options || []).filter(option => state.wheel.selected.has(option.id)); }
+function renderCoupleWheel() {
+  const data = state.wheel.data, list = document.getElementById("wheelOptionList"), history = document.getElementById("wheelHistory"), wheel = document.getElementById("coupleWheel");
+  if (!list || !history || !wheel) return;
+  document.querySelectorAll("[data-wheel-mode]").forEach(button => { const active = button.dataset.wheelMode === state.wheel.mode; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); });
+  document.getElementById("wheelConsentNotice").textContent = data?.consent_notice || "任何结果都可以跳过。";
+  const options = data?.options || [];
+  list.innerHTML = options.length ? options.map(option => `<label class="wheel-option${option.preset ? " preset" : " custom"}"><input type="checkbox" data-wheel-option="${escapeHtml(option.id)}" ${state.wheel.selected.has(option.id) ? "checked" : ""}><span><strong>${escapeHtml(option.label)}</strong><small>${option.preset ? "内置选项" : "双方自定义"}</small></span>${option.preset ? "" : `<span class="wheel-option-actions"><button type="button" data-action="edit-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}">编辑</button><button type="button" data-action="delete-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}">删除</button></span>`}</label>`).join("") : '<div class="empty-view"><p>还没有可用选项。</p></div>';
+  history.innerHTML = data?.history?.length ? data.history.map(item => `<div class="wheel-history-item"><span>♡</span><div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.spun_by_name)} · ${escapeHtml(new Date(item.spun_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</small></div></div>`).join("") : '<div class="empty-view"><p>还没有转动记录。</p></div>';
+  const active = wheelActiveOptions(), count = Math.max(active.length, 1);
+  wheel.style.background = `conic-gradient(from -90deg, ${Array.from({ length: count }, (_, index) => `${WHEEL_COLORS[index % WHEEL_COLORS.length]} ${(index * 100 / count).toFixed(2)}% ${((index + 1) * 100 / count).toFixed(2)}%`).join(",")})`;
+  wheel.style.transform = `rotate(${state.wheel.rotation}deg)`; wheel.setAttribute("aria-label", active.length ? `当前有${active.length}个可转选项` : "还没有选择转盘选项");
+  const spin = document.querySelector('[data-action="spin-couple-wheel"]'); if (spin) { spin.disabled = state.wheel.spinning || active.length < 2; spin.textContent = state.wheel.spinning ? "正在转…" : "转动转盘"; }
+}
+async function loadCoupleWheel({ quiet = false } = {}) {
+  const sequence = ++state.wheel.requestSequence; state.wheel.loading = true;
+  try { const data = await api(`/api/v1/entertainment/wheel?mode=${encodeURIComponent(state.wheel.mode)}`); if (sequence !== state.wheel.requestSequence) return; const prior = state.wheel.selected; state.wheel.data = data; state.wheel.selected = new Set(data.options.filter(option => prior.size ? prior.has(option.id) : true).map(option => option.id)); if (state.wheel.selected.size < 2) state.wheel.selected = new Set(data.options.map(option => option.id)); renderCoupleWheel(); }
+  catch (error) { if (!quiet) throw error; } finally { if (sequence === state.wheel.requestSequence) state.wheel.loading = false; }
+}
+async function spinCoupleWheel() {
+  if (state.wheel.spinning) return; const options = wheelActiveOptions(); if (options.length < 2) { toast("请至少选择两个转盘选项"); return; }
+  state.wheel.spinning = true; renderCoupleWheel();
+  try { const result = await api("/api/v1/entertainment/wheel/spin", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, option_ids: options.map(item => item.id) }) }); const index = Math.max(0, options.findIndex(item => item.id === result.option_id)), segment = 360 / options.length, target = 360 - (index * segment + segment / 2); state.wheel.rotation += 1440 + ((target - state.wheel.rotation % 360 + 360) % 360); const wheel = document.getElementById("coupleWheel"); wheel.style.transform = `rotate(${state.wheel.rotation}deg)`; await new Promise(resolve => setTimeout(resolve, matchMedia("(prefers-reduced-motion: reduce)").matches ? 20 : 2500)); document.getElementById("wheelResult").innerHTML = `<small>${escapeHtml(result.spun_by_name)} 转到了</small><strong>${escapeHtml(result.label)}</strong><button type="button" class="quiet" data-action="skip-wheel-result">不合适，跳过再转</button>`; if (state.wheel.data) { state.wheel.data.history = [result, ...(state.wheel.data.history || []).filter(item => item.id !== result.id)].slice(0, 8); renderCoupleWheel(); } loadCoupleWheel({ quiet: true }).catch(() => {}); }
+  finally { state.wheel.spinning = false; renderCoupleWheel(); }
 }
 const beadHex = color => `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 function beadColorDistance(a, b) { const mean = (a[0] + b[0]) / 2, red = a[0] - b[0], green = a[1] - b[1], blue = a[2] - b[2]; return (2 + mean / 256) * red * red + 4 * green * green + (2 + (255 - mean) / 256) * blue * blue; }
@@ -6096,6 +6129,14 @@ document.addEventListener("click", async event => {
   if (playTool) { openEntertainmentTool(playTool.dataset.tool); return; }
   if (event.target.closest('[data-action="back-play-hub"]')) { showEntertainmentHub(); return; }
   if (event.target.closest('[data-action="clear-play-search"]')) { const input = document.getElementById("playSearch"); input.value = ""; filterEntertainmentFeatures(); input.focus(); return; }
+  const wheelMode = event.target.closest("[data-wheel-mode]");
+  if (wheelMode) { state.wheel.mode = wheelMode.dataset.wheelMode; state.wheel.selected = new Set(); await loadCoupleWheel().catch(error => toast(error.message)); return; }
+  if (event.target.closest('[data-action="spin-couple-wheel"], [data-action="skip-wheel-result"]')) { await spinCoupleWheel().catch(error => toast(error.message)); return; }
+  if (event.target.closest('[data-action="select-all-wheel-options"]')) { state.wheel.selected = new Set((state.wheel.data?.options || []).map(option => option.id)); renderCoupleWheel(); return; }
+  const editWheel = event.target.closest('[data-action="edit-wheel-option"]');
+  if (editWheel) { const current = state.wheel.data?.options?.find(option => option.id === editWheel.dataset.id), label = window.prompt("修改双方都能看到的转盘选项", current?.label || ""); if (label == null) return; try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(editWheel.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ label, expected_version: Number(editWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已更新"); } catch (error) { toast(error.message); } return; }
+  const deleteWheel = event.target.closest('[data-action="delete-wheel-option"]');
+  if (deleteWheel) { if (!window.confirm("删除这个双方共享的转盘选项？")) return; try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(deleteWheel.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(deleteWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已删除"); } catch (error) { toast(error.message); } return; }
   const plan = event.target.closest("[data-plan]");
   if (plan) {
     state.plan = plan.dataset.plan; privateStorage().setItem("love-plan", state.plan); renderPlan();
@@ -8066,6 +8107,8 @@ document.addEventListener("click", async event => {
 });
 
 document.addEventListener("change", async event => {
+  const wheelOption = event.target.closest?.("[data-wheel-option]");
+  if (wheelOption) { if (wheelOption.checked) state.wheel.selected.add(wheelOption.dataset.wheelOption); else state.wheel.selected.delete(wheelOption.dataset.wheelOption); renderCoupleWheel(); return; }
   const expenseSettle = event.target.closest?.("[data-expense-settle]");
   if (expenseSettle) {
     if (!requireOnlineMutation("trip_expenses", "选择待结清花费")) { expenseSettle.checked = !expenseSettle.checked; return; }
@@ -8941,6 +8984,11 @@ document.getElementById("pantryForm").addEventListener("submit", async event => 
     await api("/api/v1/pantry/items", { method: "POST", body: JSON.stringify({ ...(current ? { ingredient_id: current.ingredient_id } : { name }), state: document.getElementById("pantryState").value, storage_location: document.getElementById("pantryStorage").value || null, expires_on: document.getElementById("pantryExpiry").value || null, quantity_note: document.getElementById("pantryNote").value.trim(), expected_version: current?.version || 0, idempotency_key: clientKey("pantry-upsert") }) });
     event.target.reset(); await loadMeals({ quiet: true }); toast("家中食材状态已同步");
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+
+document.getElementById("wheelOptionForm").addEventListener("submit", async event => {
+  event.preventDefault(); const input = document.getElementById("wheelOptionInput"), label = input.value.trim(); if (!label) return;
+  try { const created = await api("/api/v1/entertainment/wheel/options", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, label }) }); state.wheel.selected.add(created.id); input.value = ""; await loadCoupleWheel(); toast("已加入双方共享转盘"); } catch (error) { toast(error.message); }
 });
 
 document.getElementById("beadImageInput").addEventListener("change", event => { loadBeadImage(event.target.files?.[0]); event.target.value = ""; });

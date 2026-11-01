@@ -508,9 +508,9 @@
         <section id="playHubPanel" class="play-hub" aria-labelledby="playHubTitle">
           <div class="page-title-row play-title"><div><span class="eyebrow ink">PLAY TOGETHER</span><h1 id="playHubTitle">娱乐中心</h1><p>两个人的小工具和小游戏都会收在这里，按需要打开，不挤占日常页面。</p></div><span class="play-title-mark" aria-hidden="true">✿</span></div>
           <label class="play-search" for="playSearch"><span aria-hidden="true">⌕</span><input id="playSearch" type="search" maxlength="40" autocomplete="off" placeholder="搜索娱乐功能，例如：拼豆"><button type="button" data-action="clear-play-search" aria-label="清空搜索" hidden>×</button></label>
-          <div class="play-feature-grid" id="playFeatureGrid"><button type="button" class="play-feature-card" data-play-feature="beads" data-play-search="拼豆工坊 照片 像素 板图 手工 diy 颜色 图纸" data-action="open-play-tool" data-tool="beads"><span class="play-feature-icon" aria-hidden="true">▦</span><span><small>照片手作</small><strong>拼豆工坊</strong><em>上传照片，生成可修改、可打印的拼豆板图。</em><b>开始制作 →</b></span></button></div>
+          <div class="play-feature-grid" id="playFeatureGrid"><button type="button" class="play-feature-card" data-play-feature="beads" data-play-search="拼豆工坊 照片 像素 板图 手工 diy 颜色 图纸" data-action="open-play-tool" data-tool="beads"><span class="play-feature-icon" aria-hidden="true">▦</span><span><small>照片手作</small><strong>拼豆工坊</strong><em>上传照片，生成可修改、可打印的拼豆板图。</em><b>开始制作 →</b></span></button><button type="button" class="play-feature-card wheel-feature-card" data-play-feature="wheel" data-play-search="双人转盘 普通 情趣 变态 约会 吃什么 电影 互动 挑战" data-action="open-play-tool" data-tool="wheel"><span class="play-feature-icon" aria-hidden="true">◉</span><span><small>双人互动</small><strong>双人转盘</strong><em>普通、情趣和大胆挑战三种模式，双方选项与结果实时共享。</em><b>一起转转 →</b></span></button></div>
           <div class="play-search-empty" id="playSearchEmpty" hidden><span>⌕</span><h2>暂时没有找到这个功能</h2><p>试试搜索“拼豆”。以后新增的小游戏也会自动出现在这里。</p></div>
-          <p class="play-hub-note">目前有 1 个可用功能 · 后续可以继续加入转盘、拼图、P 图和其他双人小游戏。</p>
+          <p class="play-hub-note">目前有 2 个可用功能 · 后续可以继续加入拼图、P 图和其他双人小游戏。</p>
         </section>
         <section id="beadToolPanel" class="play-tool" aria-labelledby="beadToolTitle" hidden>
           <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · BEADS</span><h1 id="beadToolTitle">拼豆工坊</h1></div><span aria-hidden="true">▦</span></header>
@@ -542,6 +542,23 @@
           <div class="bead-library-heading"><div><span class="eyebrow ink">MY PATTERNS</span><h2 id="beadLibraryTitle">我的拼豆作品</h2></div><small>最多保留 12 份本机草稿</small></div>
           <div id="beadSavedList" class="bead-saved-list"><div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div></div>
         </section>
+        </section>
+        <section id="wheelToolPanel" class="play-tool wheel-tool" aria-labelledby="wheelToolTitle" hidden>
+          <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · COUPLE WHEEL</span><h1 id="wheelToolTitle">双人转盘</h1></div><span aria-hidden="true">◉</span></header>
+          <article class="wheel-stage card">
+            <div class="wheel-heading"><div><span class="pill rose">双方同步</span><h2>今天转到什么，就一起试试</h2><p>两个人看到相同选项和最近结果。任何结果都可以跳过，不舒服时立即停止。</p></div><span aria-hidden="true">♡</span></div>
+            <div class="wheel-mode-tabs" role="tablist" aria-label="转盘模式"><button type="button" class="active" data-wheel-mode="normal" role="tab" aria-selected="true">普通版</button><button type="button" data-wheel-mode="intimate" role="tab" aria-selected="false">情趣版</button><button type="button" data-wheel-mode="wild" role="tab" aria-selected="false">变态版</button></div>
+            <p id="wheelConsentNotice" class="wheel-consent-note">转到不合适的结果时可以直接跳过，再转一次。</p>
+            <div class="couple-wheel-wrap"><span class="wheel-pointer" aria-hidden="true"></span><div id="coupleWheel" class="couple-wheel" role="img" aria-label="等待读取双人转盘"><span>♡</span></div></div>
+            <div id="wheelResult" class="wheel-result" aria-live="polite"><small>等待转动</small><strong>先选好想参与的项目</strong></div>
+            <button type="button" class="primary-button wheel-spin-button" data-action="spin-couple-wheel">转动转盘</button>
+          </article>
+          <article class="wheel-options-card card">
+            <div class="wheel-section-heading"><div><h2>本轮选项</h2><p>至少勾选两项；取消勾选就不会转到它。</p></div><button type="button" class="quiet" data-action="select-all-wheel-options">全选</button></div>
+            <div id="wheelOptionList" class="wheel-option-list"><div class="empty-view"><p>正在读取选项…</p></div></div>
+            <form id="wheelOptionForm" class="wheel-option-form"><label class="field"><span>增加你们自己的选项</span><input id="wheelOptionInput" maxlength="40" placeholder="例如：一起去买杯奶茶" required></label><button class="secondary-button">加入共同转盘</button></form>
+          </article>
+          <article class="wheel-history-card card"><div class="wheel-section-heading"><div><h2>最近转到</h2><p>保留最近结果，双方登录后都能看到。</p></div></div><div id="wheelHistory" class="wheel-history"><div class="empty-view"><p>还没有转动记录。</p></div></div></article>
         </section>
       </div>
     </section>

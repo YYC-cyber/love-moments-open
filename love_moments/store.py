@@ -47,6 +47,7 @@ from .life_assistant_store import LifeAssistantMixin
 from .daily_summary import DailySummaryMixin
 from .provenance import ProvenanceMixin
 from .couple_interactions import CoupleInteractionMixin
+from .entertainment import EntertainmentMixin
 from .expression_assistant import ExpressionAssistant, MODES, expression_assistant_from_env
 from .kitchen import KitchenMixin
 from .travel_tools import TravelToolsMixin
@@ -147,6 +148,7 @@ class LoveMomentsStore(
     FutureLetterMixin,
     ProvenanceMixin,
     CoupleInteractionMixin,
+    EntertainmentMixin,
     LifeAssistantMixin,
     NotificationMixin,
     TravelAssistantMixin,

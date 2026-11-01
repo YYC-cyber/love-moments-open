@@ -1341,6 +1341,10 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.get_wishlist(user_id=user["id"]))
             return
+        elif path == "/api/v1/entertainment/wheel":
+            user = self._require_user()
+            self._send_json(STORE.get_couple_wheel(query.get("mode", ["normal"])[0], user["id"]))
+            return
         elif path == "/api/v1/daily-question":
             user = self._require_user()
             self._send_json(STORE.get_daily_question(user_id=user["id"]))
@@ -1438,7 +1442,11 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json({"ok": True}, headers={"Set-Cookie": self._session_cookie("", clear=True)})
                 return
             user = self._require_user()
-            if path == "/api/v1/admin/checks":
+            if path == "/api/v1/entertainment/wheel/options":
+                self._send_json(STORE.create_wheel_option(payload, user["id"]), 201)
+            elif path == "/api/v1/entertainment/wheel/spin":
+                self._send_json(STORE.spin_couple_wheel(payload, user["id"]), 201)
+            elif path == "/api/v1/admin/checks":
                 self._require_admin()
                 self._send_json(ADMIN.overview(self._request_secure_context(), self._session_token()))
             elif path == "/api/v1/admin/backups":
@@ -2146,7 +2154,9 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             self._enforce_write_origin()
             payload = self._read_json()
             user = self._require_user()
-            if match := re.fullmatch(r"/api/v1/trips/items/([^/]+)/impact", path):
+            if match := re.fullmatch(r"/api/v1/entertainment/wheel/options/([^/]+)", path):
+                self._send_json(STORE.update_wheel_option(match.group(1), payload, user["id"]))
+            elif match := re.fullmatch(r"/api/v1/trips/items/([^/]+)/impact", path):
                 self._send_json(STORE.impact_analysis(match.group(1), payload.get("changes", {}), user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/assistant/recap/([^/]+)", path):
                 self._send_json(STORE.update_trip_recap_draft(match.group(1), match.group(2), payload, user["id"]))
@@ -2222,7 +2232,9 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             self._enforce_write_origin()
             payload = self._read_json()
             user = self._require_user()
-            if match := re.fullmatch(r"/api/v1/media/uploads/([^/]+)", path):
+            if match := re.fullmatch(r"/api/v1/entertainment/wheel/options/([^/]+)", path):
+                self._send_json(STORE.delete_wheel_option(match.group(1), payload.get("expected_version"), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/media/uploads/([^/]+)", path):
                 self._send_json(STORE.cancel_media_upload(match.group(1), user["id"]))
             elif path == "/api/v1/push/subscriptions":
                 subscription = PUSH.normalize_subscription(payload.get("subscription"))
