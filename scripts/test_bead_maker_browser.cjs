@@ -23,11 +23,20 @@ async function waitForHealth(origin, child) { for (let attempt = 0; attempt < 10
     await page.locator("#playSearch").fill("不存在的游戏"); assert(await page.locator("#playSearchEmpty").isVisible(), "无搜索结果提示未显示");
     await page.locator("#playSearch").fill("拼豆"); assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索未找到拼豆工具");
     await page.locator('[data-play-feature="beads"]').click(); await page.locator("#beadToolPanel:not([hidden])").waitFor();
-    await page.locator("#beadImageInput").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer: png }); await page.locator("#beadBoardSize").selectOption("16"); await page.locator('[data-action="bead-generate"]').click(); await page.locator("#beadResult:not([hidden])").waitFor();
-    assert((await page.locator("#beadResultSummary").textContent()).includes("256 颗"), "拼豆数量错误"); await page.locator('[data-action="bead-save"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "保存失败");
+    await page.locator("#beadImageInput").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer: png });
+    await page.locator("#beadCropControls:not([hidden])").waitFor(); assert(await page.locator("#beadCropControls").isVisible(), "选图后没有显示可视化裁剪控制");
+    await page.locator("#beadCropZoom").fill("125"); assert((await page.locator("#beadSourcePreview").getAttribute("style")).includes("scale(1.25)"), "裁剪预览没有同步主体大小");
+    assert(await page.locator("#beadDetailMode option").count() === 3, "细节、均衡、简洁三种画面模式不完整");
+    await page.locator("#beadBoardSize").selectOption("16"); await page.locator('[data-action="bead-generate"]').click(); await page.locator("#beadResult:not([hidden])").waitFor();
+    assert((await page.locator("#beadResultSummary").textContent()).includes("256 颗"), "拼豆数量错误");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("实体拼豆色"), "没有使用实体拼豆色库");
+    assert((await page.locator("#beadPalette button").first().textContent()).includes("色"), "没有显示实体拼豆颜色名称");
+    const rareBefore = await page.locator('#beadPalette [data-availability="expanded"]').count();
+    if (rareBefore) { await page.locator('[data-action="bead-replace-rare"]').click(); assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === 0, "冷门色没有全部替换为常用色"); await page.locator('[data-action="bead-reset-edits"]').click(); assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === rareBefore, "冷门色替换后无法恢复生成结果"); }
+    await page.locator('[data-action="bead-save"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "保存失败");
     const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="bead-export"]').click(); assert((await (await downloadPromise).suggestedFilename()).endsWith(".png"), "导出失败");
-    await page.locator('[data-action="back-play-hub"]').click(); assert(await page.locator("#playHubPanel").isVisible(), "无法返回娱乐中心");
-    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-play-feature="beads"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "刷新后草稿丢失"); assert(errors.length === 0, errors.join(" | "));
-    console.log("公有版娱乐中心与拼豆浏览器验收通过");
+    await page.locator('#beadToolPanel [data-action="back-play-hub"]').click(); assert(await page.locator("#playHubPanel").isVisible(), "无法返回娱乐中心");
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-play-feature="beads"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "刷新后草稿丢失"); await page.locator('[data-action="bead-open"]').click(); await page.locator("#beadResult:not([hidden])").waitFor(); assert(errors.length === 0, errors.join(" | "));
+    console.log("公有版娱乐拼豆验收通过：实体色库、裁剪、替代、保存恢复与高清导出可用");
   } finally { if (browser) await browser.close(); if (server.exitCode === null) server.kill("SIGTERM"); if (server.exitCode === null) await new Promise(resolve => server.once("exit", resolve)); fs.rmSync(temp, { recursive: true, force: true }); }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });

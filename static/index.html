@@ -526,15 +526,22 @@
           <div class="bead-settings">
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option></select></label>
             <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12" selected>12 色 · 清晰易做</option><option value="24">24 色 · 细节丰富</option><option value="36">36 色 · 接近原图</option></select></label>
-            <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="contain">保留完整照片</option></select></label>
+            <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
+            <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
+          </div>
+          <div class="bead-crop-controls" id="beadCropControls" hidden aria-label="调整照片取景">
+            <label><span>左右位置 <output data-bead-crop-output="beadCropX">50</output></span><input id="beadCropX" type="range" min="0" max="100" value="50"></label>
+            <label><span>上下位置 <output data-bead-crop-output="beadCropY">50</output></span><input id="beadCropY" type="range" min="0" max="100" value="50"></label>
+            <label><span>主体大小 <output data-bead-crop-output="beadCropZoom">100%</output></span><input id="beadCropZoom" type="range" min="100" max="180" value="100"></label>
           </div>
           <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
-          <p class="form-note">建议人像先选择主体清楚、背景简单的照片。小尺寸会主动合并相近颜色，实际拼豆更容易购买和制作。</p>
+          <p class="form-note">会优先匹配实体拼豆常见颜色；冷门色仍可保留，并给出最接近的常用替代。不同品牌色号不同，购买时按颜色名称和门店色卡复核。</p>
         </article>
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
+          <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>
           <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
           <div class="bead-result-actions"><button type="button" class="secondary-button" data-action="bead-save">保存到本机</button><button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button></div>
         </section>
