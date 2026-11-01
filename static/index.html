@@ -546,18 +546,20 @@
           </div>
 
           <div class="bead-settings">
-            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option></select></label>
-            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12" selected>12 色 · 清晰易做</option><option value="24">24 色 · 细节丰富</option><option value="36">36 色 · 接近原图</option></select></label>
+            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option><option value="58">58 × 58 · 四块 29 板</option><option value="87">87 × 87 · 九块 29 板</option></select></label>
+            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24" selected>24 色 · 日常推荐</option><option value="36">36 色 · 细节丰富</option><option value="48">48 色 · 明暗更细</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
             <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
+            <label><span>照片背景</span><select id="beadBackgroundMode"><option value="keep" selected>保留原背景</option><option value="remove">本机智能去背景</option></select></label>
           </div>
           <div class="bead-crop-controls" id="beadCropControls" hidden aria-label="调整照片取景">
             <label><span>左右位置 <output data-bead-crop-output="beadCropX">50</output></span><input id="beadCropX" type="range" min="0" max="100" value="50"></label>
             <label><span>上下位置 <output data-bead-crop-output="beadCropY">50</output></span><input id="beadCropY" type="range" min="0" max="100" value="50"></label>
             <label><span>主体大小 <output data-bead-crop-output="beadCropZoom">100%</output></span><input id="beadCropZoom" type="range" min="100" max="180" value="100"></label>
+            <label id="beadBackgroundSensitivityRow" hidden><span>去背景力度 <output data-bead-crop-output="beadBackgroundSensitivity">42</output></span><input id="beadBackgroundSensitivity" type="range" min="18" max="90" value="42"></label>
           </div>
           <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
-          <p class="form-note">会优先匹配实体拼豆常见颜色；冷门色仍可保留，并给出最接近的常用替代。不同品牌色号不同，购买时按颜色名称和门店色卡复核。</p>
+          <p class="form-note">清晰度主要由板图尺寸决定，颜色数量负责还原明暗。去背景在本机识别与画面边缘连通的近似颜色，纯色背景效果最好；不同品牌色号不同，购买时仍请按颜色名称和门店色卡复核。</p>
         </article>
 
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">

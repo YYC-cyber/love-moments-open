@@ -6260,6 +6260,14 @@ const BEAD_COLOR_CATALOG = [
   ["U01", "藏蓝", "273B62", 1], ["U02", "宝蓝", "345FA8", 1], ["U03", "天蓝", "67A7DB", 1], ["U04", "浅蓝", "A9D2ED", 1],
   ["P01", "深紫", "52335F", 1], ["P02", "紫色", "79538D", 1], ["P03", "浅紫", "B69ACB", 1],
   ["K01", "玫红", "B93669", 1], ["K02", "粉红", "E77FA4", 1], ["K03", "浅粉", "F3B6CB", 1], ["K04", "樱花粉", "F8D4DF", 1],
+  ["W03", "冷瓷白", "F2F6F8", 1], ["N05", "银灰", "D7D8DC", 1], ["B07", "红木深棕", "512A2D", 1], ["B08", "沙金棕", "C68F65", 1], ["B09", "淡沙米", "EBD8BD", 1],
+  ["S06", "橄榄肤", "B77C5B", 1], ["S07", "蜜桃肤", "F2BFA0", 1], ["R04", "深绯红", "551D32", 1], ["R05", "玫瑰红", "D94D68", 1], ["R06", "淡珊瑚", "F59A92", 1],
+  ["O03", "焦橙", "C95427", 1], ["O04", "杏橙", "FFC083", 1], ["Y04", "芥末黄", "B88618", 1], ["Y05", "淡柠檬", "FFF6BD", 1],
+  ["G06", "森林绿", "173C2D", 1], ["G07", "翡翠绿", "1F7651", 1], ["G08", "鼠尾草", "91A982", 1], ["G09", "淡薄荷", "D4EFE0", 1],
+  ["C04", "深海青", "12434D", 1], ["C05", "水蓝", "55B9C1", 1], ["C06", "淡水青", "BDE7E7", 1],
+  ["U05", "午夜蓝", "172647", 1], ["U06", "矢车菊蓝", "557BC4", 1], ["U07", "婴儿蓝", "C8E3F4", 1],
+  ["P04", "李子紫", "44234F", 1], ["P05", "薰衣草", "9B79B2", 1], ["P06", "淡丁香", "DED0E8", 1],
+  ["K05", "深莓粉", "8E2859", 1], ["K06", "蔷薇粉", "D85E91", 1], ["K07", "腮红粉", "F9E4EA", 1],
   ["X01", "炭黑", "100E12", 0], ["X02", "蓝灰", "687887", 0], ["X03", "雾灰", "9B9294", 0], ["X04", "烟粉", "B98E94", 0], ["X05", "豆沙", "A85E68", 0], ["X06", "灰紫", "88758E", 0],
   ["X07", "灰绿", "718678", 0], ["X08", "橄榄绿", "788044", 0], ["X09", "荧光绿", "B7E84B", 0], ["X10", "柠檬黄", "F5EE56", 0], ["X11", "蜜桃", "F2A58D", 0],
   ["X12", "杏粉", "EBC0AF", 0], ["X13", "冰蓝", "C6E7E8", 0], ["X14", "丁香紫", "CDB9D8", 0], ["X15", "莓紫", "9E4778", 0], ["X16", "砖红", "A84A3F", 0],
@@ -6313,7 +6321,9 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
     const next = [...current];
     for (let y = 1; y < size - 1; y += 1) for (let x = 1; x < size - 1; x += 1) {
       const index = y * size + x;
-      const neighbors = [index - 1, index + 1, index - size, index + size, index - size - 1, index - size + 1, index + size - 1, index + size + 1];
+      if (current[index] < 0) continue;
+      const neighbors = [index - 1, index + 1, index - size, index + size, index - size - 1, index - size + 1, index + size - 1, index + size + 1].filter(other => current[other] >= 0);
+      if (!neighbors.length) continue;
       const counts = new Map(); neighbors.forEach(other => counts.set(current[other], (counts.get(current[other]) || 0) + 1));
       const [majority, amount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
       if (majority === current[index] || amount < (detailMode === "simple" ? 5 : 6)) continue;
@@ -6329,12 +6339,15 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
 
 function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqrt(pixels.length / 4)), detailMode = "detail" } = {}) {
   const colors = [];
+  const active = [];
   for (let index = 0; index < pixels.length; index += 4) {
     const alpha = pixels[index + 3] / 255;
+    active.push(alpha >= .5);
     colors.push([pixels[index], pixels[index + 1], pixels[index + 2]].map(value => Math.round(value * alpha + 255 * (1 - alpha))));
   }
+  if (!active.some(Boolean)) return { palette: [], paletteMeta: [], indices: active.map(() => -1) };
   const labs = colors.map(beadRgbToLab);
-  const weights = beadDetailWeights(colors, size, detailMode);
+  const weights = beadDetailWeights(colors, size, detailMode).map((weight, index) => active[index] ? weight : 0);
   const count = Math.max(1, Math.min(Number(requestedCount) || 12, BEAD_COLOR_CATALOG.length));
   const distances = BEAD_COLOR_CATALOG.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
   const selected = [];
@@ -6352,23 +6365,56 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
     selected.push(bestCandidate);
     bestDistances = bestDistances.map((distance, pixel) => Math.min(distance, distances[bestCandidate][pixel]));
   }
-  let indices = labs.map((_, pixel) => selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0));
+  let indices = labs.map((_, pixel) => active[pixel] ? selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0) : -1);
   let palette = selected.map(index => [...BEAD_COLOR_CATALOG[index].rgb]);
   indices = cleanupBeadIndices(indices, colors, palette, size, detailMode);
-  const used = [...new Set(indices)];
+  const used = [...new Set(indices.filter(index => index >= 0))];
   const remap = new Map(used.map((oldIndex, newIndex) => [oldIndex, newIndex]));
   palette = used.map(index => palette[index]);
   const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(BEAD_COLOR_CATALOG[selected[index]].rgb, paletteIndex));
-  return { palette, paletteMeta, indices: indices.map(index => remap.get(index)) };
+  return { palette, paletteMeta, indices: indices.map(index => index < 0 ? -1 : remap.get(index)) };
 }
 
-function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}) {
+function removeBeadBackground(imageData, size, sensitivity = 42) {
+  const data = imageData.data;
+  const border = [];
+  for (let x = 0; x < size; x += 1) border.push(x, (size - 1) * size + x);
+  for (let y = 1; y < size - 1; y += 1) border.push(y * size, y * size + size - 1);
+  const bins = new Map();
+  border.forEach(pixel => {
+    const offset = pixel * 4;
+    if (data[offset + 3] < 32) return;
+    const key = `${data[offset] >> 5}-${data[offset + 1] >> 5}-${data[offset + 2] >> 5}`;
+    const item = bins.get(key) || { count: 0, r: 0, g: 0, b: 0 };
+    item.count += 1; item.r += data[offset]; item.g += data[offset + 1]; item.b += data[offset + 2]; bins.set(key, item);
+  });
+  const dominant = [...bins.values()].sort((first, second) => second.count - first.count)[0];
+  if (!dominant) return imageData;
+  const reference = [dominant.r / dominant.count, dominant.g / dominant.count, dominant.b / dominant.count];
+  const limit = Math.max(18, Math.min(90, Number(sensitivity) || 42)) ** 2 * 3;
+  const visited = new Uint8Array(size * size); const queue = new Int32Array(size * size); let head = 0; let tail = 0;
+  const matches = pixel => {
+    const offset = pixel * 4;
+    if (data[offset + 3] < 32) return true;
+    return (data[offset] - reference[0]) ** 2 + (data[offset + 1] - reference[1]) ** 2 + (data[offset + 2] - reference[2]) ** 2 <= limit;
+  };
+  const enqueue = pixel => { if (!visited[pixel] && matches(pixel)) { visited[pixel] = 1; queue[tail++] = pixel; } };
+  border.forEach(enqueue);
+  while (head < tail) {
+    const pixel = queue[head++]; const x = pixel % size; const y = Math.floor(pixel / size);
+    if (x) enqueue(pixel - 1); if (x + 1 < size) enqueue(pixel + 1); if (y) enqueue(pixel - size); if (y + 1 < size) enqueue(pixel + size);
+  }
+  for (let pixel = 0; pixel < visited.length; pixel += 1) if (visited[pixel]) data[pixel * 4 + 3] = 0;
+  return imageData;
+}
+
+function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}, background = {}) {
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
-  context.fillStyle = "#ffffff"; context.fillRect(0, 0, size, size);
+  context.clearRect(0, 0, size, size);
   context.filter = detailMode === "detail" ? "contrast(1.08) saturate(1.06)" : detailMode === "simple" ? "contrast(.96) saturate(.92)" : "none";
   let scale = cropMode === "contain"
     ? Math.min(size / image.naturalWidth, size / image.naturalHeight)
@@ -6382,7 +6428,9 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   const top = cropMode === "contain" ? (size - height) / 2 : Math.min(0, Math.max(size - height, size / 2 - focusY * height));
   context.drawImage(image, left, top, width, height);
   context.filter = "none";
-  return context.getImageData(0, 0, size, size).data;
+  let imageData = context.getImageData(0, 0, size, size);
+  if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity);
+  return imageData.data;
 }
 
 function beadCounts(pattern = state.bead) {
@@ -6401,6 +6449,7 @@ function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
   pattern.indices.forEach((paletteIndex, index) => {
     const x = (index % pattern.size) * cell;
     const y = Math.floor(index / pattern.size) * cell;
+    if (paletteIndex < 0) return;
     context.fillStyle = beadHex(pattern.palette[paletteIndex] || [255, 255, 255]);
     context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell));
   });
@@ -6430,9 +6479,10 @@ function renderBeadPalette() {
 function renderBeadPattern() {
   paintBeadCanvas(document.getElementById("beadCanvas"), state.bead);
   renderBeadPalette();
-  const total = state.bead.size * state.bead.size;
+  const total = beadCounts().reduce((sum, count) => sum + count, 0);
+  const empty = state.bead.size * state.bead.size - total;
   const expanded = state.bead.paletteMeta.filter(item => !item.common).length;
-  document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`;
+  document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`;
   const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
@@ -6524,19 +6574,30 @@ function loadBeadImage(file) {
   image.src = url;
 }
 
-function generateBeadPattern() {
+async function generateBeadPattern() {
   if (!state.bead.image) { toast("请先选择照片"); return; }
+  const generateButton = document.querySelector('[data-action="bead-generate"]');
+  const originalLabel = generateButton?.textContent || "生成拼豆板图";
+  if (generateButton) { generateButton.disabled = true; generateButton.textContent = "正在计算明暗与拼豆位置…"; }
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  try {
   const size = Number(document.getElementById("beadBoardSize").value);
   const colorCount = Number(document.getElementById("beadColorCount").value);
   const cropMode = document.getElementById("beadCropMode").value;
   const detailMode = document.getElementById("beadDetailMode").value;
-  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings());
+  const backgroundMode = document.getElementById("beadBackgroundMode")?.value || "keep";
+  const backgroundSensitivity = Number(document.getElementById("beadBackgroundSensitivity")?.value || 42);
+  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity });
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
+  if (!result.palette.length) { toast("背景去除范围过大，已没有可生成的主体；请降低去背景力度"); return; }
   state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;
   state.bead.generatedPalette = result.palette.map(color => [...color]); state.bead.generatedPaletteMeta = result.paletteMeta.map(meta => ({ ...meta }));
   state.bead.generatedIndices = [...result.indices]; state.bead.selectedColor = 0;
   renderBeadPattern();
   document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+  } finally {
+    if (generateButton) { generateButton.disabled = false; generateButton.textContent = originalLabel; }
+  }
 }
 
 function saveCurrentBeadPattern() {
@@ -6578,7 +6639,8 @@ function exportBeadPattern() {
   const context = canvas.getContext("2d");
   context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0);
   context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34);
-  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${state.bead.size * state.bead.size} 颗 · 通用实体色名，购买时请按门店品牌色卡复核`, 18, boardSide + 58);
+  const totalBeads = counts.reduce((sum, count) => sum + count, 0);
+  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${totalBeads} 颗 · 空白 ${state.bead.size * state.bead.size - totalBeads} 格 · 购买时请按门店品牌色卡复核`, 18, boardSide + 58);
   const columnWidth = canvas.width / columns;
   state.bead.palette.forEach((color, index) => {
     const column = index % columns; const row = Math.floor(index / columns);
@@ -9550,7 +9612,10 @@ document.getElementById("beadImageInput").addEventListener("change", event => {
   loadBeadImage(event.target.files?.[0]);
   event.target.value = "";
 });
-for (const id of ["beadCropX", "beadCropY", "beadCropZoom"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
+for (const id of ["beadCropX", "beadCropY", "beadCropZoom", "beadBackgroundSensitivity"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
+document.getElementById("beadBackgroundMode")?.addEventListener("change", event => {
+  const row = document.getElementById("beadBackgroundSensitivityRow"); if (row) row.hidden = event.target.value !== "remove";
+});
 document.getElementById("beadCropMode")?.addEventListener("change", event => {
   if (event.target.value === "portrait") {
     document.getElementById("beadCropZoom").value = "118";

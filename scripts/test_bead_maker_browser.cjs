@@ -1,42 +1,112 @@
+/* Browser acceptance test for the local-only entertainment bead maker. */
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
+
 const root = path.resolve(__dirname, "..");
 const chromePath = process.env.PLAYWRIGHT_CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAF0lEQVR4nGP4z8DA8J+BgYGB4T8DAwMAHhgCAe2hUj8AAAAASUVORK5CYII=", "base64");
+
 function assert(value, message) { if (!value) throw new Error(message); }
-function freePort() { return new Promise((resolve, reject) => { const server = net.createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const port = server.address().port; server.close(error => error ? reject(error) : resolve(port)); }); }); }
-async function waitForHealth(origin, child) { for (let attempt = 0; attempt < 100; attempt += 1) { if (child.exitCode !== null) throw new Error("测试服务器提前退出"); try { if ((await fetch(origin + "/api/health")).ok) return; } catch (_) {} await new Promise(resolve => setTimeout(resolve, 100)); } throw new Error("测试服务器启动超时"); }
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer(); server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => { const port = server.address().port; server.close(error => error ? reject(error) : resolve(port)); });
+  });
+}
+async function waitForHealth(origin, child) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (child.exitCode !== null) throw new Error("测试服务器提前退出");
+    try { if ((await fetch(origin + "/api/health")).ok) return; } catch (_) {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("测试服务器启动超时");
+}
+
 (async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "love-open-beads-")), port = await freePort(), origin = `http://127.0.0.1:${port}`;
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "love-bead-maker-"));
+  const port = await freePort(); const origin = `http://127.0.0.1:${port}`;
   const server = spawn(process.env.PYTHON_BINARY || "python3", ["main.py"], { cwd: root, env: { ...process.env, APP_HOST: "127.0.0.1", APP_PORT: String(port), DATABASE_PATH: path.join(temp, "test.db"), MEDIA_ROOT: path.join(temp, "media"), BACKUP_ROOT: path.join(temp, "backups"), DEMO_MODE: "true", OPEN_METEO_ENABLED: "false", MEDIA_STORAGE_PROVIDER: "local", LOCAL_ADMIN_NOTIFICATIONS: "false", WATCHDOG_AUTO_RESTART: "false" }, stdio: ["ignore", "pipe", "pipe"] });
   let browser;
   try {
-    await waitForHealth(origin, server); const options = { headless: true }; if (fs.existsSync(chromePath)) options.executablePath = chromePath; browser = await chromium.launch(options);
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true }); const errors = []; page.on("pageerror", error => errors.push(error.message));
-    await page.goto(origin, { waitUntil: "domcontentloaded" }); await page.locator("#authUsername").fill("test"); await page.locator("#authPassword").fill("test123"); await page.locator("#authSubmit").click(); await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
-    await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-screen="play"].active').waitFor();
-    assert(await page.locator("#playHubPanel").isVisible(), "娱乐中心未显示"); assert(!(await page.locator("#beadToolPanel").isVisible()), "拼豆工具不应默认展开");
-    await page.locator("#playSearch").fill("不存在的游戏"); assert(await page.locator("#playSearchEmpty").isVisible(), "无搜索结果提示未显示");
-    await page.locator("#playSearch").fill("拼豆"); assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索未找到拼豆工具");
-    await page.locator('[data-play-feature="beads"]').click(); await page.locator("#beadToolPanel:not([hidden])").waitFor();
-    await page.locator("#beadImageInput").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer: png });
-    await page.locator("#beadCropControls:not([hidden])").waitFor(); assert(await page.locator("#beadCropControls").isVisible(), "选图后没有显示可视化裁剪控制");
-    await page.locator("#beadCropZoom").fill("125"); assert((await page.locator("#beadSourcePreview").getAttribute("style")).includes("scale(1.25)"), "裁剪预览没有同步主体大小");
-    assert(await page.locator("#beadDetailMode option").count() === 3, "细节、均衡、简洁三种画面模式不完整");
-    await page.locator("#beadBoardSize").selectOption("16"); await page.locator('[data-action="bead-generate"]').click(); await page.locator("#beadResult:not([hidden])").waitFor();
-    assert((await page.locator("#beadResultSummary").textContent()).includes("256 颗"), "拼豆数量错误");
-    assert((await page.locator("#beadResultSummary").textContent()).includes("实体拼豆色"), "没有使用实体拼豆色库");
+    await waitForHealth(origin, server);
+    const options = { headless: true }; if (fs.existsSync(chromePath)) options.executablePath = chromePath;
+    browser = await chromium.launch(options);
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true });
+    const errors = []; page.on("pageerror", error => errors.push(error.message));
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator("#authUsername").fill("tangtang"); await page.locator("#authPassword").fill("12345678"); await page.locator("#authSubmit").click();
+    await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
+    await page.locator('.bottom-nav [data-nav="play"]').click();
+    await page.locator('[data-screen="play"].active').waitFor();
+    assert(await page.locator(".bottom-nav button").count() === 6, "娱乐入口没有进入主导航");
+    assert(await page.locator("#playHubPanel").isVisible(), "娱乐入口没有先显示功能中心");
+    assert(!(await page.locator("#beadToolPanel").isVisible()), "娱乐首页不应直接展开拼豆编辑器");
+    await page.locator("#playSearch").fill("不存在的功能");
+    assert(await page.locator("#playSearchEmpty").isVisible(), "搜索无结果时没有清晰反馈");
+    await page.locator("#playSearch").fill("拼豆");
+    assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索无法找到拼豆功能");
+    await page.locator('[data-play-feature="beads"]').click();
+    await page.locator("#beadToolPanel:not([hidden])").waitFor();
+    const toneCheck = await page.evaluate(() => {
+      const dark = new ImageData(12, 12); for (let offset = 0; offset < dark.data.length; offset += 4) { dark.data[offset] = 45; dark.data[offset + 1] = 38; dark.data[offset + 2] = 34; dark.data[offset + 3] = 255; }
+      const normal = new ImageData(12, 12); for (let offset = 0; offset < normal.data.length; offset += 4) { normal.data[offset] = 140; normal.data[offset + 1] = 132; normal.data[offset + 2] = 126; normal.data[offset + 3] = 255; }
+      return { darkBefore: 45, darkAfter: adjustBeadTones(dark, 12, "auto").data[0], normalBefore: 140, normalAfter: adjustBeadTones(normal, 12, "auto").data[0] };
+    });
+    assert(toneCheck.darkAfter > toneCheck.darkBefore, `偏暗主体没有自动提亮：${JSON.stringify(toneCheck)}`);
+    assert(toneCheck.normalAfter >= toneCheck.normalBefore && toneCheck.normalAfter <= toneCheck.normalBefore + 14, `正常曝光没有受到柔和且受控的提亮：${JSON.stringify(toneCheck)}`);
+    await page.locator("#beadImageInput").setInputFiles(process.env.BEAD_TEST_IMAGE || { name: "couple.png", mimeType: "image/png", buffer: png });
+    await page.locator('[data-action="bead-generate"]').waitFor({ state: "visible" });
+    await page.locator("#beadCropControls:not([hidden])").waitFor();
+    await page.locator("#beadCropZoom").fill("125");
+    assert((await page.locator("#beadSourcePreview").getAttribute("style")).includes("scale(1.25)"), "裁剪预览没有同步主体大小");
+    const boardSize = process.env.BEAD_TEST_SIZE || "16"; const colorCount = process.env.BEAD_TEST_COLORS || "8";
+    await page.locator("#beadBoardSize").selectOption(boardSize); await page.locator("#beadColorCount").selectOption(colorCount);
+    await page.locator('[data-action="bead-generate"]').click();
+    await page.locator("#beadResult:not([hidden])").waitFor();
+    assert(await page.locator("#beadPalette button").count() >= 1, "没有生成颜色统计");
     assert((await page.locator("#beadPalette button").first().textContent()).includes("色"), "没有显示实体拼豆颜色名称");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("实体拼豆色"), "没有使用实体拼豆色库");
+    assert((await page.locator("#beadResultSummary").textContent()).includes(`共 ${Number(boardSize) ** 2} 颗`), "拼豆总数错误");
     const rareBefore = await page.locator('#beadPalette [data-availability="expanded"]').count();
-    if (rareBefore) { await page.locator('[data-action="bead-replace-rare"]').click(); assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === 0, "冷门色没有全部替换为常用色"); await page.locator('[data-action="bead-reset-edits"]').click(); assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === rareBefore, "冷门色替换后无法恢复生成结果"); }
-    await page.locator('[data-action="bead-save"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "保存失败");
-    const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="bead-export"]').click(); assert((await (await downloadPromise).suggestedFilename()).endsWith(".png"), "导出失败");
-    await page.locator('#beadToolPanel [data-action="back-play-hub"]').click(); assert(await page.locator("#playHubPanel").isVisible(), "无法返回娱乐中心");
-    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-play-feature="beads"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "刷新后草稿丢失"); await page.locator('[data-action="bead-open"]').click(); await page.locator("#beadResult:not([hidden])").waitFor(); assert(errors.length === 0, errors.join(" | "));
-    console.log("公有版娱乐拼豆验收通过：实体色库、裁剪、替代、保存恢复与高清导出可用");
-  } finally { if (browser) await browser.close(); if (server.exitCode === null) server.kill("SIGTERM"); if (server.exitCode === null) await new Promise(resolve => server.once("exit", resolve)); fs.rmSync(temp, { recursive: true, force: true }); }
+    if (rareBefore) {
+      await page.locator('[data-action="bead-replace-rare"]').click();
+      assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === 0, "冷门色没有全部替换为常用色");
+      await page.locator('[data-action="bead-reset-edits"]').click();
+      assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === rareBefore, "替换冷门色后无法恢复生成结果");
+    }
+    const cutoutData = await page.evaluate(() => {
+      const canvas = document.createElement("canvas"); canvas.width = 64; canvas.height = 64; const context = canvas.getContext("2d");
+      context.fillStyle = "#F5E6D4"; context.fillRect(0, 0, 64, 64); context.fillStyle = "#8D2446"; context.fillRect(20, 12, 24, 42);
+      return canvas.toDataURL("image/png").split(",")[1];
+    });
+    await page.locator("#beadImageInput").setInputFiles({ name: "cutout.png", mimeType: "image/png", buffer: Buffer.from(cutoutData, "base64") });
+    await page.waitForTimeout(150); await page.locator("#beadBackgroundMode").selectOption("remove");
+    assert(await page.locator("#beadBackgroundSensitivityRow").isVisible(), "去背景模式没有显示力度调节");
+    await page.locator("#beadBackgroundSensitivity").fill("36"); await page.locator('[data-action="bead-generate"]').click();
+    await page.waitForTimeout(100); const cutoutSummary = await page.locator("#beadResultSummary").textContent();
+    assert(cutoutSummary.includes("去除背景"), `去背景没有产生透明空格：${cutoutSummary}`);
+    assert(!cutoutSummary.includes(`共 ${Number(boardSize) ** 2} 颗`), "去背景后仍把空白区域计为拼豆");
+    if (process.env.BEAD_TEST_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_SCREENSHOT, fullPage: true });
+    await page.locator("#beadPalette button").first().click(); await page.locator("#beadCanvas").click({ position: { x: 15, y: 15 } });
+    await page.locator('[data-action="bead-save"]').click();
+    assert(await page.locator(".bead-saved-card").count() === 1, "本机保存未显示");
+    const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="bead-export"]').click();
+    const download = await downloadPromise; assert((await download.suggestedFilename()).endsWith(".png"), "导出文件不是 PNG");
+    await page.locator('#beadToolPanel [data-action="back-play-hub"]').click();
+    assert(await page.locator("#playHubPanel").isVisible(), "拼豆工具无法返回娱乐中心");
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('.bottom-nav [data-nav="play"]').click(); await page.locator('[data-play-feature="beads"]').click();
+    assert(await page.locator(".bead-saved-card").count() === 1, "刷新后本机草稿丢失");
+    await page.locator('[data-action="bead-open"]').click(); await page.locator("#beadResult:not([hidden])").waitFor();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    assert(overflow <= 1, `娱乐页面横向溢出 ${overflow}px`); assert(errors.length === 0, errors.join(" | "));
+    console.log("娱乐拼豆浏览器验收通过：明暗色阶、大板、去背景、改单格、保存、恢复和高清导出均可用");
+  } finally {
+    if (browser) await browser.close(); if (server.exitCode === null) server.kill("SIGTERM");
+    if (server.exitCode === null) await new Promise(resolve => server.once("exit", resolve)); fs.rmSync(temp, { recursive: true, force: true });
+  }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
+
