@@ -299,6 +299,7 @@ const state = {
   agoraRemoteTrack: null,
   data: null,
   selectedItemIds: new Set(),
+  playTool: "",
   bead: { image: null, sourceUrl: "", size: 29, palette: [], indices: [], generatedIndices: [], selectedColor: 0 },
   editingItemId: null,
   itineraryDetailItemId: null,
@@ -1015,7 +1016,7 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
     state.chatHistory.initialized = true;
   });
   if (state.data && screen !== "play") loadSmartSurface(screen, { quiet: true });
-  if (screen === "play") renderSavedBeadPatterns();
+  if (screen === "play") showEntertainmentHub();
   if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).then(result => { state.messageReadState = result; renderMessageReadState(); }).catch(() => {});
 }
 
@@ -5937,6 +5938,21 @@ window.addEventListener("pageshow", () => { if (state.cooking.session) refreshCo
 window.addEventListener("focus", () => { if (state.cooking.session) refreshCookingSession().catch(() => {}); });
 
 const BEAD_STORAGE_KEY = "love-bead-patterns";
+function filterEntertainmentFeatures(query = "") {
+  const normalized = String(query).trim().toLocaleLowerCase("zh-CN"); let visible = 0;
+  document.querySelectorAll("[data-play-feature]").forEach(card => { const matches = !normalized || String(card.dataset.playSearch || card.textContent).toLocaleLowerCase("zh-CN").includes(normalized); card.hidden = !matches; if (matches) visible += 1; });
+  const empty = document.getElementById("playSearchEmpty"); if (empty) empty.hidden = visible > 0;
+  const clear = document.querySelector('[data-action="clear-play-search"]'); if (clear) clear.hidden = !normalized;
+}
+function showEntertainmentHub({ focusSearch = false } = {}) {
+  state.playTool = ""; document.getElementById("playHubPanel").hidden = false; document.getElementById("beadToolPanel").hidden = true;
+  const search = document.getElementById("playSearch"); filterEntertainmentFeatures(search?.value || ""); if (focusSearch) search?.focus();
+}
+function openEntertainmentTool(tool) {
+  if (tool !== "beads") { toast("这个娱乐功能还没有开放"); return; }
+  state.playTool = tool; document.getElementById("playHubPanel").hidden = true; document.getElementById("beadToolPanel").hidden = false; renderSavedBeadPatterns();
+  window.scrollTo({ top: 0, behavior: "smooth" }); document.querySelector(".phone-shell")?.scrollTo({ top: 0, behavior: "smooth" });
+}
 const beadHex = color => `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 function beadColorDistance(a, b) { const mean = (a[0] + b[0]) / 2, red = a[0] - b[0], green = a[1] - b[1], blue = a[2] - b[2]; return (2 + mean / 256) * red * red + 4 * green * green + (2 + (255 - mean) / 256) * blue * blue; }
 function quantizeBeadPixels(pixels, requestedCount) {
@@ -6015,6 +6031,10 @@ document.addEventListener("click", async event => {
   if (beadColor) { state.bead.selectedColor = Number(beadColor.dataset.beadColor); renderBeadPalette(); return; }
   const beadAction = event.target.closest("[data-action^='bead-']");
   if (beadAction) { const action = beadAction.dataset.action; if (action === "bead-pick-image") document.getElementById("beadImageInput").click(); else if (action === "bead-generate") generateBeadPattern(); else if (action === "bead-reset-edits") { state.bead.indices = [...state.bead.generatedIndices]; renderBeadPattern(); toast("已恢复刚生成的板图"); } else if (action === "bead-save") saveCurrentBeadPattern(); else if (action === "bead-export") exportBeadPattern(); else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id); else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); } return; }
+  const playTool = event.target.closest('[data-action="open-play-tool"]');
+  if (playTool) { openEntertainmentTool(playTool.dataset.tool); return; }
+  if (event.target.closest('[data-action="back-play-hub"]')) { showEntertainmentHub(); return; }
+  if (event.target.closest('[data-action="clear-play-search"]')) { const input = document.getElementById("playSearch"); input.value = ""; filterEntertainmentFeatures(); input.focus(); return; }
   const plan = event.target.closest("[data-plan]");
   if (plan) {
     state.plan = plan.dataset.plan; privateStorage().setItem("love-plan", state.plan); renderPlan();
@@ -8842,6 +8862,7 @@ document.getElementById("pantryForm").addEventListener("submit", async event => 
 });
 
 document.getElementById("beadImageInput").addEventListener("change", event => { loadBeadImage(event.target.files?.[0]); event.target.value = ""; });
+document.getElementById("playSearch").addEventListener("input", event => filterEntertainmentFeatures(event.target.value));
 document.getElementById("beadUploadZone").addEventListener("dragover", event => { event.preventDefault(); event.currentTarget.classList.add("dragging"); });
 document.getElementById("beadUploadZone").addEventListener("dragleave", event => event.currentTarget.classList.remove("dragging"));
 document.getElementById("beadUploadZone").addEventListener("drop", event => { event.preventDefault(); event.currentTarget.classList.remove("dragging"); loadBeadImage(event.dataTransfer?.files?.[0]); });

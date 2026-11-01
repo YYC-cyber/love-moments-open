@@ -498,10 +498,15 @@
 
     <section class="screen" data-screen="play">
       <div class="content play-content">
-        <div class="page-title-row play-title">
-          <div><span class="eyebrow ink">CREATE TOGETHER</span><h1>娱乐工坊</h1><p>把喜欢的照片变成可以照着制作的拼豆板图。</p></div>
-          <span class="play-title-mark" aria-hidden="true">✿</span>
-        </div>
+        <section id="playHubPanel" class="play-hub" aria-labelledby="playHubTitle">
+          <div class="page-title-row play-title"><div><span class="eyebrow ink">PLAY TOGETHER</span><h1 id="playHubTitle">娱乐中心</h1><p>两个人的小工具和小游戏都会收在这里，按需要打开，不挤占日常页面。</p></div><span class="play-title-mark" aria-hidden="true">✿</span></div>
+          <label class="play-search" for="playSearch"><span aria-hidden="true">⌕</span><input id="playSearch" type="search" maxlength="40" autocomplete="off" placeholder="搜索娱乐功能，例如：拼豆"><button type="button" data-action="clear-play-search" aria-label="清空搜索" hidden>×</button></label>
+          <div class="play-feature-grid" id="playFeatureGrid"><button type="button" class="play-feature-card" data-play-feature="beads" data-play-search="拼豆工坊 照片 像素 板图 手工 diy 颜色 图纸" data-action="open-play-tool" data-tool="beads"><span class="play-feature-icon" aria-hidden="true">▦</span><span><small>照片手作</small><strong>拼豆工坊</strong><em>上传照片，生成可修改、可打印的拼豆板图。</em><b>开始制作 →</b></span></button></div>
+          <div class="play-search-empty" id="playSearchEmpty" hidden><span>⌕</span><h2>暂时没有找到这个功能</h2><p>试试搜索“拼豆”。以后新增的小游戏也会自动出现在这里。</p></div>
+          <p class="play-hub-note">目前有 1 个可用功能 · 后续可以继续加入转盘、拼图、P 图和其他双人小游戏。</p>
+        </section>
+        <section id="beadToolPanel" class="play-tool" aria-labelledby="beadToolTitle" hidden>
+          <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · BEADS</span><h1 id="beadToolTitle">拼豆工坊</h1></div><span aria-hidden="true">▦</span></header>
         <article class="bead-maker card" aria-labelledby="beadMakerTitle">
           <div class="bead-maker-heading"><div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div><span class="bead-mascot" aria-hidden="true">▦</span></div>
           <div class="bead-workflow" aria-label="拼豆生成步骤"><span class="active">1 选照片</span><i></i><span>2 调参数</span><i></i><span>3 生成制作</span></div>
@@ -529,6 +534,7 @@
         <section class="bead-library card" aria-labelledby="beadLibraryTitle">
           <div class="bead-library-heading"><div><span class="eyebrow ink">MY PATTERNS</span><h2 id="beadLibraryTitle">我的拼豆作品</h2></div><small>最多保留 12 份本机草稿</small></div>
           <div id="beadSavedList" class="bead-saved-list"><div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div></div>
+        </section>
         </section>
       </div>
     </section>

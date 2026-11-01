@@ -19,10 +19,15 @@ async function waitForHealth(origin, child) { for (let attempt = 0; attempt < 10
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true }); const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(origin, { waitUntil: "domcontentloaded" }); await page.locator("#authUsername").fill("test"); await page.locator("#authPassword").fill("test123"); await page.locator("#authSubmit").click(); await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
     await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-screen="play"].active').waitFor();
+    assert(await page.locator("#playHubPanel").isVisible(), "娱乐中心未显示"); assert(!(await page.locator("#beadToolPanel").isVisible()), "拼豆工具不应默认展开");
+    await page.locator("#playSearch").fill("不存在的游戏"); assert(await page.locator("#playSearchEmpty").isVisible(), "无搜索结果提示未显示");
+    await page.locator("#playSearch").fill("拼豆"); assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索未找到拼豆工具");
+    await page.locator('[data-play-feature="beads"]').click(); await page.locator("#beadToolPanel:not([hidden])").waitFor();
     await page.locator("#beadImageInput").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer: png }); await page.locator("#beadBoardSize").selectOption("16"); await page.locator('[data-action="bead-generate"]').click(); await page.locator("#beadResult:not([hidden])").waitFor();
     assert((await page.locator("#beadResultSummary").textContent()).includes("256 颗"), "拼豆数量错误"); await page.locator('[data-action="bead-save"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "保存失败");
     const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="bead-export"]').click(); assert((await (await downloadPromise).suggestedFilename()).endsWith(".png"), "导出失败");
-    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('[data-nav="play"]').last().click(); assert(await page.locator(".bead-saved-card").count() === 1, "刷新后草稿丢失"); assert(errors.length === 0, errors.join(" | "));
-    console.log("公有版拼豆浏览器验收通过");
+    await page.locator('[data-action="back-play-hub"]').click(); assert(await page.locator("#playHubPanel").isVisible(), "无法返回娱乐中心");
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator('[data-nav="play"]').last().click(); await page.locator('[data-play-feature="beads"]').click(); assert(await page.locator(".bead-saved-card").count() === 1, "刷新后草稿丢失"); assert(errors.length === 0, errors.join(" | "));
+    console.log("公有版娱乐中心与拼豆浏览器验收通过");
   } finally { if (browser) await browser.close(); if (server.exitCode === null) server.kill("SIGTERM"); if (server.exitCode === null) await new Promise(resolve => server.once("exit", resolve)); fs.rmSync(temp, { recursive: true, force: true }); }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
