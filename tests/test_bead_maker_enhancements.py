@@ -31,6 +31,13 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("index < 0 ? -1", self.javascript)
         self.assertIn("去除背景 ${empty} 格", self.javascript)
 
+    def test_subject_tone_is_analysed_locally(self):
+        self.assertIn('id="beadToneMode"', self.html)
+        self.assertIn("主体整体提亮 · 推荐", self.html)
+        self.assertIn("function adjustBeadTones", self.javascript)
+        self.assertIn("if (median < 145)", self.javascript)
+        self.assertIn('mode === "bright"', self.javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

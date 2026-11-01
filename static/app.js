@@ -6408,7 +6408,37 @@ function removeBeadBackground(imageData, size, sensitivity = 42) {
   return imageData;
 }
 
-function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}, background = {}) {
+function adjustBeadTones(imageData, size, mode = "auto") {
+  if (mode === "original") return imageData;
+  const data = imageData.data; const luminance = [];
+  const inset = Math.max(1, Math.floor(size * .12));
+  for (let y = inset; y < size - inset; y += 1) for (let x = inset; x < size - inset; x += 1) {
+    const offset = (y * size + x) * 4; if (data[offset + 3] < 128) continue;
+    luminance.push(.2126 * data[offset] + .7152 * data[offset + 1] + .0722 * data[offset + 2]);
+  }
+  if (!luminance.length) return imageData;
+  luminance.sort((first, second) => first - second);
+  const median = luminance[Math.floor(luminance.length * .5)];
+  let target = median;
+  if (mode === "bright") target = median < 205 ? Math.max(165, median) : 188;
+  else if (median < 145) target = Math.min(158, 145 + (145 - median) * .12);
+  else if (median < 178) target = Math.min(184, median + 7);
+  else if (median > 202) target = 184;
+  if (Math.abs(target - median) < 3 || median <= 1 || median >= 254) return imageData;
+  let gamma = Math.log(Math.max(1, target) / 255) / Math.log(median / 255);
+  gamma = Math.max(mode === "bright" ? .45 : .52, Math.min(mode === "bright" ? 1 : 1.14, gamma));
+  for (let offset = 0; offset < data.length; offset += 4) {
+    if (data[offset + 3] < 128) continue;
+    const source = .2126 * data[offset] + .7152 * data[offset + 1] + .0722 * data[offset + 2];
+    if (source <= 0) continue;
+    const corrected = 255 * ((source / 255) ** gamma);
+    const scale = Math.max(.78, Math.min(mode === "bright" ? 2.15 : 1.9, corrected / source));
+    data[offset] = Math.min(255, Math.round(data[offset] * scale)); data[offset + 1] = Math.min(255, Math.round(data[offset + 1] * scale)); data[offset + 2] = Math.min(255, Math.round(data[offset + 2] * scale));
+  }
+  return imageData;
+}
+
+function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}, background = {}, toneMode = "auto") {
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
   const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -6430,6 +6460,7 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   context.filter = "none";
   let imageData = context.getImageData(0, 0, size, size);
   if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity);
+  imageData = adjustBeadTones(imageData, size, toneMode);
   return imageData.data;
 }
 
@@ -6587,7 +6618,8 @@ async function generateBeadPattern() {
   const detailMode = document.getElementById("beadDetailMode").value;
   const backgroundMode = document.getElementById("beadBackgroundMode")?.value || "keep";
   const backgroundSensitivity = Number(document.getElementById("beadBackgroundSensitivity")?.value || 42);
-  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity });
+  const toneMode = document.getElementById("beadToneMode")?.value || "auto";
+  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
   if (!result.palette.length) { toast("背景去除范围过大，已没有可生成的主体；请降低去背景力度"); return; }
   state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;

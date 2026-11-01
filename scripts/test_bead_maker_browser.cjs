@@ -38,7 +38,7 @@ async function waitForHealth(origin, child) {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator("#authUsername").fill("tangtang"); await page.locator("#authPassword").fill("12345678"); await page.locator("#authSubmit").click();
+    await page.locator("#authUsername").fill("test"); await page.locator("#authPassword").fill("test123"); await page.locator("#authSubmit").click();
     await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
     await page.locator('.bottom-nav [data-nav="play"]').click();
     await page.locator('[data-screen="play"].active').waitFor();
