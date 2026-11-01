@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS users (
         CHECK(ui_text_size IN ('standard','large')),
     ui_sticker_density TEXT NOT NULL DEFAULT 'cute'
         CHECK(ui_sticker_density IN ('minimal','cute','full')),
+    ui_layout_mode TEXT NOT NULL DEFAULT 'adaptive'
+        CHECK(ui_layout_mode IN ('adaptive','iphone13')),
     locale TEXT NOT NULL DEFAULT 'zh-CN',
     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

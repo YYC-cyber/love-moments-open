@@ -514,6 +514,8 @@ class LoveMomentsStore(
                 db.execute("ALTER TABLE users ADD COLUMN ui_text_size TEXT NOT NULL DEFAULT 'standard'")
             if "ui_sticker_density" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN ui_sticker_density TEXT NOT NULL DEFAULT 'cute'")
+            if "ui_layout_mode" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN ui_layout_mode TEXT NOT NULL DEFAULT 'adaptive'")
             if "avatar_media_id" not in columns:
                 db.execute("ALTER TABLE users ADD COLUMN avatar_media_id TEXT REFERENCES media_assets(id)")
             session_columns = {row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()}
@@ -1236,7 +1238,7 @@ class LoveMomentsStore(
         value = dict(row)
         result = {key: value.get(key) for key in (
             "id", "username", "nickname", "avatar_label", "ui_theme",
-            "avatar_media_id", "ui_text_size", "ui_sticker_density", "locale", "timezone", "created_at",
+            "avatar_media_id", "ui_text_size", "ui_sticker_density", "ui_layout_mode", "locale", "timezone", "created_at",
         )}
         result["avatar_url"] = (
             f"/api/v1/media/{value['avatar_media_id']}?thumbnail=1"
@@ -1274,14 +1276,14 @@ class LoveMomentsStore(
         """Update the small, user-owned part of an account profile.
 
         Avatar photos must already exist in the protected media store and be
-        owned by the current user. Theme, text size and sticker density are
+        owned by the current user. Theme, text size, sticker density and layout are
         allowlisted presentation preferences owned by this account. None of
         these fields touches shared content.
         """
         if not isinstance(payload, dict):
             raise ValueError("账号资料格式不正确")
         unsupported = set(payload) - {
-            "nickname", "avatar_label", "avatar_media_id", "ui_theme", "ui_text_size", "ui_sticker_density",
+            "nickname", "avatar_label", "avatar_media_id", "ui_theme", "ui_text_size", "ui_sticker_density", "ui_layout_mode",
         }
         if unsupported:
             raise ValueError("账号资料包含不支持的字段")
@@ -1321,6 +1323,12 @@ class LoveMomentsStore(
                 raise ValueError("请选择有效的贴纸数量")
             updates["ui_sticker_density"] = sticker_density
             changed_fields.append("ui_sticker_density")
+        if "ui_layout_mode" in payload:
+            layout_mode = str(payload.get("ui_layout_mode") or "").strip().lower()
+            if layout_mode not in {"adaptive", "iphone13"}:
+                raise ValueError("请选择有效的页面布局")
+            updates["ui_layout_mode"] = layout_mode
+            changed_fields.append("ui_layout_mode")
         if not changed_fields:
             raise ValueError("没有需要更新的账号资料")
         with self.connection() as db:
@@ -1368,6 +1376,11 @@ class LoveMomentsStore(
                     "UPDATE users SET ui_sticker_density=? WHERE id=?",
                     (updates["ui_sticker_density"], user_id),
                 )
+            if "ui_layout_mode" in updates:
+                db.execute(
+                    "UPDATE users SET ui_layout_mode=? WHERE id=?",
+                    (updates["ui_layout_mode"], user_id),
+                )
             self._audit(
                 db, "account.profile_updated", "user", user_id,
                 {"changed_fields": changed_fields}, actor_id=user_id,
@@ -1402,6 +1415,7 @@ class LoveMomentsStore(
         labels = {
             "nickname": "昵称", "avatar_label": "头像标识", "avatar_media_id": "头像照片",
             "ui_theme": "界面主题", "ui_text_size": "文字大小", "ui_sticker_density": "贴纸数量",
+            "ui_layout_mode": "页面布局",
         }
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)

@@ -103,8 +103,26 @@ async function navigateAllSurfaces(page, label) {
     tablet.on("pageerror", error => errors.push("test1: " + error.message));
     await Promise.all([login(phone, origin, "test"), login(tablet, origin, "test1")]);
 
+    await phone.evaluate(async () => {
+      const response = await fetch("/api/v1/account/profile", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ui_layout_mode: "iphone13" }),
+      });
+      if (!response.ok) throw new Error("无法保存 iPhone 13 布局");
+      location.reload();
+    });
+    await phone.waitForFunction(() => document.body.dataset.uiLayout === "iphone13");
+
     await navigateAllSurfaces(phone, "390×844");
     await navigateAllSurfaces(tablet, "768×1024");
+    const phoneGeometry = await phone.evaluate(() => ({
+      shell: Math.round(document.querySelector(".phone-shell").getBoundingClientRect().width),
+      navButton: Math.round(document.querySelector(".bottom-nav button").getBoundingClientRect().height),
+      inputFont: getComputedStyle(document.querySelector("#chatInput")).fontSize,
+    }));
+    assert(phoneGeometry.shell === 390, "iPhone 13 页面宽度错误：" + JSON.stringify(phoneGeometry));
+    assert(phoneGeometry.navButton >= 44, "iPhone 13 导航点击区域不足 44pt：" + JSON.stringify(phoneGeometry));
+    assert(parseFloat(phoneGeometry.inputFont) >= 16, "iPhone 输入框会触发自动缩放：" + JSON.stringify(phoneGeometry));
 
     await phone.locator('.bottom-nav [data-nav="home"]').click();
     assert(await phone.locator(".home-more").evaluate(node => !node.open), "首页低频动态默认没有收起");

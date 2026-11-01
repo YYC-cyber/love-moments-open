@@ -30,15 +30,22 @@ function normalizeStickerDensity(value) {
   return ["minimal", "cute", "full"].includes(value) ? value : "cute";
 }
 
+function normalizeLayoutMode(value) {
+  return value === "iphone13" ? "iphone13" : "adaptive";
+}
+
 function applyUiDisplayPreferences(user = {}, { remember = true } = {}) {
   const textSize = normalizeUiTextSize(user.ui_text_size);
   const stickerDensity = normalizeStickerDensity(user.ui_sticker_density);
+  const layoutMode = normalizeLayoutMode(user.ui_layout_mode);
   document.body.dataset.uiTextSize = textSize;
   document.body.dataset.stickerDensity = stickerDensity;
+  document.body.dataset.uiLayout = layoutMode;
   if (remember) {
     try {
       localStorage.setItem("love-ui-text-size", textSize);
       localStorage.setItem("love-sticker-density", stickerDensity);
+      localStorage.setItem("love-ui-layout", layoutMode);
     } catch (_) {}
   }
 }
@@ -48,6 +55,7 @@ try {
   applyUiDisplayPreferences({
     ui_text_size: localStorage.getItem("love-ui-text-size") || "standard",
     ui_sticker_density: localStorage.getItem("love-sticker-density") || "cute",
+    ui_layout_mode: localStorage.getItem("love-ui-layout") || "adaptive",
   }, { remember: false });
 } catch (_) {}
 
@@ -4571,6 +4579,8 @@ async function loadAccountCenter() {
     if (textInput) textInput.checked = true;
     const densityInput = document.querySelector(`#themeProfileForm input[name="stickerDensity"][value="${normalizeStickerDensity(user.ui_sticker_density)}"]`);
     if (densityInput) densityInput.checked = true;
+    const layoutInput = document.querySelector(`#themeProfileForm input[name="layoutMode"][value="${normalizeLayoutMode(user.ui_layout_mode)}"]`);
+    if (layoutInput) layoutInput.checked = true;
   }
   document.getElementById("deviceList").innerHTML = result.items.map(item => `<article class="device-row"><div class="grow"><strong>${escapeHtml(item.device_name)}</strong><small>${item.current ? "当前设备 · " : ""}${new Date(item.last_seen_at).toLocaleString("zh-CN")} · ${escapeHtml(item.ip_address || "未知地址")}</small></div>${!item.current && item.active ? `<button data-action="revoke-device" data-id="${item.id}">撤销</button>` : `<span class="mock-badge">${item.active ? "当前" : "已失效"}</span>`}</article>`).join("");
   const mediaRow = item => `<article class="account-media-row">${["image", "video"].includes(item.kind) ? `<span class="media-preview-wrap"><img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy">${item.kind === "video" ? `<i aria-hidden="true">▶</i>` : ""}</span>` : `<span class="media-kind">♫</span>`}<div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${item.visibility === "private" ? "仅自己" : item.visibility === "delayed" ? "延时公开" : "双方可见"} · ${(Number(item.size_bytes) / 1024 / 1024).toFixed(1)} MB${item.metadata_stripped ? " · 隐私信息已清理" : ""}</small></div>${item.owner_id === state.data?.user?.id ? `<button data-action="trash-media" data-id="${item.id}">清理</button>` : ""}</article>`;
@@ -8340,8 +8350,9 @@ document.getElementById("themeProfileForm").addEventListener("submit", async eve
   const selected = document.querySelector('#themeProfileForm input[name="uiTheme"]:checked')?.value;
   const textSize = document.querySelector('#themeProfileForm input[name="uiTextSize"]:checked')?.value;
   const stickerDensity = document.querySelector('#themeProfileForm input[name="stickerDensity"]:checked')?.value;
+  const layoutMode = document.querySelector('#themeProfileForm input[name="layoutMode"]:checked')?.value;
   if (!selected) { toast("请选择一种界面风格"); return; }
-  if (!textSize || !stickerDensity) { toast("请选择文字大小和贴纸数量"); return; }
+  if (!textSize || !stickerDensity || !layoutMode) { toast("请选择文字大小、贴纸数量和页面布局"); return; }
   button.disabled = true;
   try {
     const result = await api("/api/v1/account/profile", {
@@ -8349,6 +8360,7 @@ document.getElementById("themeProfileForm").addEventListener("submit", async eve
         ui_theme: normalizeUiTheme(selected),
         ui_text_size: normalizeUiTextSize(textSize),
         ui_sticker_density: normalizeStickerDensity(stickerDensity),
+        ui_layout_mode: normalizeLayoutMode(layoutMode),
       }),
     });
     state.data.user = result.user;

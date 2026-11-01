@@ -1502,6 +1502,27 @@ body[data-ui-text-size="large"] :is(.message,.timeline-item p,.route-item small,
 .display-preference-options b,.display-preference-options small { display: block; }
 .display-preference-options b { font-size: 11px; }
 .display-preference-options small { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.layout-preference-options { grid-template-columns: repeat(2,minmax(0,1fr)); }
+
+/* iPhone 13 and iPhone 13 Pro share a 390 x 844 CSS viewport. */
+body[data-ui-layout="iphone13"] { --app-shell-width: 390px; --bottom-nav-height: 70px; }
+body[data-ui-layout="iphone13"] .phone-shell { width: min(100%,390px); }
+body[data-ui-layout="iphone13"] .content { padding-inline: 14px; }
+body[data-ui-layout="iphone13"] .screen { padding-bottom: calc(102px + env(safe-area-inset-bottom)); }
+body[data-ui-layout="iphone13"] .home-hero { height: 224px; }
+body[data-ui-layout="iphone13"] .home-content { border-radius: 24px 24px 0 0; }
+body[data-ui-layout="iphone13"] .bottom-nav { bottom: max(6px,env(safe-area-inset-bottom)); width: min(calc(100% - 12px),378px); padding: 6px 7px; border-radius: 20px; -webkit-backdrop-filter: blur(14px) saturate(1.1); backdrop-filter: blur(14px) saturate(1.1); }
+body[data-ui-layout="iphone13"] .bottom-nav button { min-height: 44px; }
+body[data-ui-layout="iphone13"] :is(button,.sheet-close,.round-add,.route-item button) { min-width: 44px; min-height: 44px; }
+body[data-ui-layout="iphone13"] :is(input,select,textarea) { font-size: 16px; }
+body[data-ui-layout="iphone13"] :is(.trip-title,.life-title) { padding: 14px; border-radius: 19px; }
+body[data-ui-layout="iphone13"] :is(.card,.smart-disclosure,.compact-more) { border-radius: 16px; }
+body[data-ui-layout="iphone13"] .chat-content { padding-inline: 12px; padding-bottom: calc(var(--bottom-nav-height) + 14px + env(safe-area-inset-bottom)); }
+body[data-ui-layout="iphone13"] .chat-compose-dock { border-radius: 16px; }
+body[data-ui-layout="iphone13"] .message { max-width: 80%; }
+body[data-ui-layout="iphone13"] .sheet { width: min(100%,390px); padding-inline: 18px; }
+body[data-ui-layout="iphone13"] .theme-page-ribbon { min-height: 52px; }
+body[data-ui-layout="iphone13"] .screen.active :is(button,a,input,select,textarea,summary) { scroll-margin-block-end: calc(104px + env(safe-area-inset-bottom)); }
 @media (max-width: 520px) {
   .theme-choice { grid-template-columns: 50px 1fr; }
   .display-preference-options { grid-template-columns: 1fr; }

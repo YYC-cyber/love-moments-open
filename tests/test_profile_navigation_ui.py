@@ -69,7 +69,19 @@ class PublicProfilePrivacyTests(unittest.TestCase):
                 )
                 db.execute("PRAGMA user_version=34")
             store = LoveMomentsStore(path, seed_demo_data=False)
-            self.assertIsNone(store.get_user("legacy-user")["avatar_media_id"])
+            user = store.get_user("legacy-user")
+            self.assertIsNone(user["avatar_media_id"])
+            self.assertEqual(user["ui_layout_mode"], "adaptive")
+
+    def test_layout_preference_is_personal_and_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LoveMomentsStore(Path(directory) / "profile.db", seed_demo_data=True)
+            partner_before = store.get_user(DEMO_PARTNER)
+            updated = store.update_my_profile({"ui_layout_mode": "iphone13"}, DEMO_USER)
+            self.assertEqual(updated["user"]["ui_layout_mode"], "iphone13")
+            self.assertEqual(store.get_user(DEMO_PARTNER), partner_before)
+            with self.assertRaisesRegex(ValueError, "有效的页面布局"):
+                store.update_my_profile({"ui_layout_mode": "untrusted"}, DEMO_USER)
 
 
 class PublicProfileUiContractTests(unittest.TestCase):
@@ -94,6 +106,9 @@ class PublicProfileUiContractTests(unittest.TestCase):
         self.assertNotIn('function scrollChatToFirstUnread', js)
         self.assertIn('"private, no-cache" if private_theme', (ROOT / "main.py").read_text(encoding="utf-8"))
         self.assertIn(".avatar > img", css)
+        self.assertIn('name="layoutMode"', html)
+        self.assertIn('document.body.dataset.uiLayout = layoutMode', js)
+        self.assertIn('body[data-ui-layout="iphone13"]', css)
 
 
 if __name__ == "__main__":
