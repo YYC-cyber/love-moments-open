@@ -98,7 +98,7 @@ async function loadThemeArtwork(userId) {
     }
     let cardArtCount = 0;
     for (let index = 1; index <= 4; index += 1) {
-      const expected = `/api/v1/theme-assets/kitty-couple-cards-${index}-v2.webp`;
+      const expected = `/api/v1/theme-assets/kitty-couple-cards-${index}-v3.webp`;
       if (manifest.assets?.[`kitty_cards_${index}`] === expected) {
         document.body.style.setProperty(`--kitty-card-sheet-${index}`, `url("${expected}")`);
         cardArtCount += 1;
@@ -6190,7 +6190,7 @@ function applyCardVisual(node, style = {}) {
   const sticker = node.matches(".card-kitty-sticker") ? node : node.querySelector(".card-kitty-sticker");
   if (!sticker) return;
   const index = Number(style.sticker_index || 0), sheet = Math.max(1, Math.min(4, Math.floor(index / 6) + 1)), local = Math.max(0, Math.min(5, index % 6));
-  sticker.style.backgroundImage = `url("/api/v1/theme-assets/kitty-couple-cards-${sheet}-v2.webp")`;
+  sticker.style.backgroundImage = `url("/api/v1/theme-assets/kitty-couple-cards-${sheet}-v3.webp")`;
   sticker.style.backgroundSize = "300% 200%";
   sticker.style.backgroundPosition = `${(local % 3) * 50}% ${Math.floor(local / 3) * 100}%`;
 }
@@ -6198,9 +6198,10 @@ function applyRenderedCardStyles(root = document) {
   const styles = new Map((state.cards.data?.styles || []).map(item => [item.id, item]));
   root.querySelectorAll("[data-card-style-id]").forEach(node => applyCardVisual(node, styles.get(node.dataset.cardStyleId) || {}));
 }
-function coupleCardFace({ style = {}, title = "双人卡", message = "", eyebrow = "LOVE MOMENTS · 双人珍藏", status = "等待双方签名", serial = "PREVIEW" } = {}) {
+function coupleCardFace({ style = {}, title = "双人卡", message = "", recipientMessage = "", eyebrow = "LOVE MOMENTS · 双人珍藏", status = "等待双方签名", serial = "PREVIEW" } = {}) {
   const pattern = String(style.pattern || "letter").replace(/[^a-z_]/g, "");
-  return `<div class="signed-card-face" data-card-pattern="${escapeHtml(pattern)}" data-card-style-id="${escapeHtml(style.id || "wish")}"><span class="card-foil-corner" aria-hidden="true">✦</span><span class="card-kitty-sticker" aria-hidden="true">♡</span><header class="card-certificate-head"><small>${escapeHtml(eyebrow)}</small><em>NO. ${escapeHtml(serial)}</em></header><div class="card-ribbon">OUR LITTLE PROMISE</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p><footer class="card-certificate-foot"><b>${escapeHtml(status)}</b><span>♡ 由我们共同签署与珍藏</span></footer></div>`;
+  const reply = recipientMessage ? `<blockquote class="card-recipient-message"><small>TA 的回信</small><span>${escapeHtml(recipientMessage)}</span></blockquote>` : "";
+  return `<div class="signed-card-face" data-card-pattern="${escapeHtml(pattern)}" data-card-style-id="${escapeHtml(style.id || "wish")}"><span class="card-envelope-flap" aria-hidden="true"></span><span class="card-envelope-fold card-envelope-fold-left" aria-hidden="true"></span><span class="card-envelope-fold card-envelope-fold-right" aria-hidden="true"></span><span class="card-lace-edge" aria-hidden="true"></span><span class="card-kitty-sticker" aria-hidden="true">♡</span><article class="card-letter-sheet"><header class="card-certificate-head"><small>${escapeHtml(eyebrow)}</small><em>NO. ${escapeHtml(serial)}</em></header><div class="card-ribbon">A LETTER, JUST FOR YOU</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p>${reply}<footer class="card-certificate-foot"><b>${escapeHtml(status)}</b><span>♡ 写给我们，也只由我们珍藏</span></footer></article><span class="card-wax-seal" aria-hidden="true"><i>LM</i></span><span class="card-foil-corner" aria-hidden="true">✦</span></div>`;
 }
 function selectedCardTemplate() { return state.cards.data?.templates?.find(item => item.id === state.cards.templateId); }
 function selectedCardStyle() { return state.cards.data?.styles?.find(item => item.id === state.cards.styleId); }
@@ -6210,11 +6211,12 @@ function renderCoupleCards() {
   templates.innerHTML = data.templates.map(item => `<button type="button" class="card-template-choice${item.id === state.cards.templateId ? " active" : ""}" data-card-template="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.prompt)}</small></button>`).join("");
   styles.innerHTML = data.styles.map(item => `<button type="button" class="card-style-choice${item.id === state.cards.styleId ? " active" : ""}" data-card-style="${escapeHtml(item.id)}" data-card-style-id="${escapeHtml(item.id)}"><span class="card-kitty-sticker" aria-hidden="true">♡</span><strong>${escapeHtml(item.name)}</strong><small>${item.family === "girl" ? "女生系" : item.family === "boy" ? "男生系" : "中性系"}</small></button>`).join("");
   const template = selectedCardTemplate(), style = selectedCardStyle();
-  document.getElementById("customCardTitleField").hidden = state.cards.templateId !== "custom";
+  const title = document.getElementById("customCardTitle");
   const message = document.getElementById("coupleCardMessage"); if (!message.dataset.edited) message.value = template?.prompt || "";
-  document.getElementById("cardLivePreview").innerHTML = coupleCardFace({ style, eyebrow: style?.name || "Kitty 卡面", title: state.cards.templateId === "custom" ? document.getElementById("customCardTitle").value || "自定义卡" : template?.name || "双人卡", message: message.value || template?.prompt || "" });
+  if (!title.dataset.edited) title.value = template?.name || "双人卡";
+  document.getElementById("cardLivePreview").innerHTML = coupleCardFace({ style, eyebrow: style?.name || "Kitty 卡面", title: title.value || template?.name || "双人卡", message: message.value || template?.prompt || "" });
   document.getElementById("cardPendingCount").textContent = data.pending_for_me ? `${data.pending_for_me} 张待我签` : "";
-  list.innerHTML = data.cards.length ? data.cards.map(card => `<article class="saved-couple-card">${coupleCardFace({ style: card.style, eyebrow: card.style_name, title: card.title, message: card.message, status: card.status === "signed" ? "双方已签名 · 永久收藏" : card.can_sign ? "等待我签名" : "等待 TA 签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<div class="saved-card-meta"><span>${escapeHtml(card.creator_name)} → ${escapeHtml(card.recipient_name)}</span><span>${escapeHtml(new Date(card.created_at).toLocaleString("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }))}</span></div><p class="card-safety-note">${escapeHtml(card.template_notice)}</p><div class="saved-card-actions">${card.can_sign ? `<button type="button" class="primary-button" data-action="open-card-sign" data-id="${escapeHtml(card.id)}">查看并签名</button>` : ""}${card.can_download ? `<a class="secondary-button" href="/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/pdf" download>下载珍藏版 PDF</a>` : ""}</div></article>`).join("") : '<div class="empty-view"><p>制作第一张卡，等 TA 签名后就能永久收藏。</p></div>';
+  list.innerHTML = data.cards.length ? data.cards.map(card => `<article class="saved-couple-card">${coupleCardFace({ style: card.style, eyebrow: card.style_name, title: card.title, message: card.message, recipientMessage: card.recipient_message, status: card.status === "signed" ? "双方已签名 · 永久收藏" : card.can_sign ? "等待我签名" : "等待 TA 签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<div class="saved-card-meta"><span>${escapeHtml(card.creator_name)} → ${escapeHtml(card.recipient_name)}</span><span>${escapeHtml(new Date(card.created_at).toLocaleString("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }))}</span></div><p class="card-safety-note">${escapeHtml(card.template_notice)}</p><div class="saved-card-actions">${card.can_sign ? `<button type="button" class="primary-button" data-action="open-card-sign" data-id="${escapeHtml(card.id)}">查看并签名</button>` : ""}${card.can_download ? `<a class="secondary-button" href="/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/pdf" download>下载珍藏版 PDF</a>` : ""}</div></article>`).join("") : '<div class="empty-view"><p>制作第一张卡，等 TA 签名后就能永久收藏。</p></div>';
   applyRenderedCardStyles(document.getElementById("cardToolPanel"));
 }
 async function loadCoupleCards({ quiet = false } = {}) {
@@ -6235,11 +6237,15 @@ function prepareSignatureCanvas(kind) {
   canvas.addEventListener("pointermove", event => { if (!drawing) return; signatureState(kind).at(-1).push(point(event)); renderSignature(kind); });
   const stop = () => { drawing = false; }; canvas.addEventListener("pointerup", stop); canvas.addEventListener("pointercancel", stop); canvas.addEventListener("pointerleave", stop); renderSignature(kind);
 }
+function renderCardSignSummary(card) {
+  const recipientMessage = document.getElementById("cardRecipientMessage")?.value.trim() || "";
+  document.getElementById("cardSignSummary").innerHTML = `${coupleCardFace({ style: card.style, eyebrow: `${card.creator_name} 发给你`, title: card.title, message: card.message, recipientMessage, status: "等待你的珍贵签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<p class="card-safety-note">${escapeHtml(card.template_notice)}</p>`;
+  applyCardVisual(document.querySelector("#cardSignSummary .signed-card-face"), card.style);
+}
 function openCardSign(cardId) {
   const card = state.cards.data?.cards?.find(item => item.id === cardId); if (!card?.can_sign) { toast("这张卡当前不需要你签名"); return; }
   state.cards.signingId = cardId; state.cards.recipientSignature = [];
-  document.getElementById("cardSignSummary").innerHTML = `${coupleCardFace({ style: card.style, eyebrow: `${card.creator_name} 发给你`, title: card.title, message: card.message, status: "等待你的珍贵签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<p class="card-safety-note">${escapeHtml(card.template_notice)}</p>`;
-  applyCardVisual(document.querySelector("#cardSignSummary .signed-card-face"), card.style);
+  document.getElementById("cardRecipientMessage").value = ""; renderCardSignSummary(card);
   document.getElementById("cardRecipientSignatureName").value = state.data?.user?.nickname || ""; document.getElementById("cardRecipientConfirmed").checked = false; openModal("coupleCardSignModal"); requestAnimationFrame(() => prepareSignatureCanvas("recipient"));
 }
 
@@ -6724,7 +6730,7 @@ document.addEventListener("click", async event => {
   if (event.target.closest('[data-action="back-play-hub"]')) { showEntertainmentHub(); return; }
   if (event.target.closest('[data-action="clear-play-search"]')) { const input = document.getElementById("playSearch"); input.value = ""; filterEntertainmentFeatures(); input.focus(); return; }
   const cardTemplate = event.target.closest("[data-card-template]");
-  if (cardTemplate) { state.cards.templateId = cardTemplate.dataset.cardTemplate; state.cards.styleId = cardTemplate.dataset.cardTemplate; document.getElementById("coupleCardMessage").dataset.edited = ""; renderCoupleCards(); return; }
+  if (cardTemplate) { state.cards.templateId = cardTemplate.dataset.cardTemplate; state.cards.styleId = cardTemplate.dataset.cardTemplate; document.getElementById("coupleCardMessage").dataset.edited = ""; document.getElementById("customCardTitle").dataset.edited = ""; renderCoupleCards(); return; }
   const cardStyle = event.target.closest("[data-card-style]");
   if (cardStyle) { state.cards.styleId = cardStyle.dataset.cardStyle; renderCoupleCards(); return; }
   const signCard = event.target.closest('[data-action="open-card-sign"]');
@@ -8853,7 +8859,7 @@ document.addEventListener("input", event => {
   const form = event.target.closest?.("[data-smart-form]");
   if (form && event.target.matches("input")) state.smartIntentDrafts[form.dataset.smartForm] = event.target.value;
   if (["coupleCardMessage", "customCardTitle"].includes(event.target.id)) {
-    if (event.target.id === "coupleCardMessage") event.target.dataset.edited = "1";
+    event.target.dataset.edited = "1";
     if (state.cards.data) renderCoupleCards();
   }
 });
@@ -9628,16 +9634,20 @@ document.getElementById("coupleCardForm").addEventListener("submit", async event
   event.preventDefault(); const button = event.submitter; button.disabled = true;
   try {
     const result = await api("/api/v1/entertainment/cards", { method: "POST", body: JSON.stringify({ template_id: state.cards.templateId, style_id: state.cards.styleId, title: document.getElementById("customCardTitle").value.trim(), message: document.getElementById("coupleCardMessage").value.trim(), signature_name: document.getElementById("cardCreatorSignatureName").value.trim(), signature: state.cards.creatorSignature, confirmed: document.getElementById("cardCreatorConfirmed").checked }) });
-    state.cards.creatorSignature = []; document.getElementById("cardCreatorConfirmed").checked = false; document.getElementById("coupleCardMessage").dataset.edited = ""; await loadCoupleCards(); toast(`已签名并发送${result.template_name}`);
+    state.cards.creatorSignature = []; document.getElementById("cardCreatorConfirmed").checked = false; document.getElementById("coupleCardMessage").dataset.edited = ""; document.getElementById("customCardTitle").dataset.edited = ""; await loadCoupleCards(); toast(`已签名并发送${result.template_name}`);
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
 
 document.getElementById("coupleCardSignForm").addEventListener("submit", async event => {
   event.preventDefault(); const card = state.cards.data?.cards?.find(item => item.id === state.cards.signingId); if (!card) return; const button = event.submitter; button.disabled = true;
   try {
-    await api(`/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/sign`, { method: "POST", body: JSON.stringify({ signature_name: document.getElementById("cardRecipientSignatureName").value.trim(), signature: state.cards.recipientSignature, confirmed: document.getElementById("cardRecipientConfirmed").checked, expected_version: card.version }) });
-    closeModals({ force: true }); state.cards.recipientSignature = []; state.cards.signingId = null; await loadCoupleCards(); toast("双方签名已完成，现在可以下载 PDF");
+    await api(`/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/sign`, { method: "POST", body: JSON.stringify({ recipient_message: document.getElementById("cardRecipientMessage").value.trim(), signature_name: document.getElementById("cardRecipientSignatureName").value.trim(), signature: state.cards.recipientSignature, confirmed: document.getElementById("cardRecipientConfirmed").checked, expected_version: card.version }) });
+    closeModals({ force: true }); state.cards.recipientSignature = []; state.cards.signingId = null; document.getElementById("cardRecipientMessage").value = ""; await loadCoupleCards(); toast("留言和双方签名已收藏，现在可以下载 PDF");
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+document.getElementById("cardRecipientMessage").addEventListener("input", () => {
+  const card = state.cards.data?.cards?.find(item => item.id === state.cards.signingId);
+  if (card) renderCardSignSummary(card);
 });
 
 document.getElementById("beadImageInput").addEventListener("change", event => {

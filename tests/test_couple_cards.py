@@ -50,10 +50,12 @@ class CoupleCardTests(unittest.TestCase):
             self.store.couple_card_pdf(created["id"], DEMO_USER)
         signed = self.store.sign_couple_card(created["id"], {
             "signature_name": "超", "signature": SIGNATURE, "confirmed": True,
+            "recipient_message": "好呀，我们一起慢慢实现。",
             "expected_version": created["version"],
         }, DEMO_PARTNER)
         self.assertEqual(signed["status"], "signed")
         self.assertTrue(signed["recipient_signature"])
+        self.assertEqual(signed["recipient_message"], "好呀，我们一起慢慢实现。")
         pdf, filename = self.store.couple_card_pdf(created["id"], DEMO_USER)
         self.assertTrue(pdf.startswith(b"%PDF-"))
         self.assertGreater(len(pdf), 5000)
@@ -80,6 +82,15 @@ class CoupleCardTests(unittest.TestCase):
         }, DEMO_USER)
         self.assertEqual(created["style"]["id"], "promise")
         self.assertEqual(created["style"]["pattern"], "promise_seal")
+
+    def test_sender_can_personalise_title_for_any_template(self) -> None:
+        created = self.store.create_couple_card({
+            "template_id": "wish", "style_id": "wish", "title": "只属于我们的冬日愿望",
+            "message": "一起去看冬天的海", "signature_name": "唐",
+            "signature": SIGNATURE, "confirmed": True,
+        }, DEMO_USER)
+        self.assertEqual(created["title"], "只属于我们的冬日愿望")
+        self.assertEqual(created["message"], "一起去看冬天的海")
 
 
 if __name__ == "__main__":

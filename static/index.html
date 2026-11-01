@@ -618,8 +618,10 @@
             <div class="wheel-heading"><div><span class="pill rose">24 种实用卡</span><h2>给 TA 做一张正式的小约定</h2><p>发卡人先手写签名，收卡人阅读后再次签名；双签完成才能下载 PDF。</p></div></div>
             <form id="coupleCardForm">
               <h3>1 · 选择卡片类型</h3><div id="cardTemplateGrid" class="card-template-grid"></div>
-              <label id="customCardTitleField" class="field" hidden><span>自定义卡名</span><input id="customCardTitle" maxlength="30" placeholder="例如：周末赖床卡"></label>
-              <label class="field"><span>想对 TA 说的话</span><textarea id="coupleCardMessage" maxlength="500" required></textarea></label>
+              <div class="card-writing-fields">
+                <label id="customCardTitleField" class="field"><span>卡片标题（可以自己改）</span><input id="customCardTitle" maxlength="30" placeholder="例如：只属于我们的周末卡" required></label>
+                <label class="field"><span>亲手写给 TA 的话</span><textarea id="coupleCardMessage" maxlength="500" placeholder="在这里写下你真正想说的话；选择模板只会给你一个开头，不会限制内容。" required></textarea></label>
+              </div>
               <h3>2 · 选择 Kitty 卡面</h3><div id="cardStyleGrid" class="card-style-grid"></div>
               <div id="cardLivePreview" class="couple-card-preview" aria-live="polite"></div>
               <h3>3 · 发卡人手写签名</h3>
@@ -646,7 +648,7 @@
 
   <div class="modal" id="coupleCardSignModal" role="dialog" aria-modal="true" aria-labelledby="coupleCardSignTitle" aria-hidden="true">
     <div class="sheet scroll-sheet card-sign-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SIGN TOGETHER</span><h2 id="coupleCardSignTitle">签收这张卡</h2><div id="cardSignSummary"></div>
-      <form id="coupleCardSignForm"><label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardRecipientSignatureName" maxlength="20" readonly required></label><div class="signature-board"><p>请收卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardRecipientSignature" width="640" height="220" aria-label="收卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="recipient">清空重签</button></div><label class="check-field"><input id="cardRecipientConfirmed" type="checkbox" required><span>我已完整阅读，自愿签署；每次兑现仍以双方当下意愿为准。</span></label><button type="submit" class="primary-button">完成双方签名</button></form>
+      <form id="coupleCardSignForm"><label class="field"><span>写给发卡人的回信（可选，会留在卡片上）</span><textarea id="cardRecipientMessage" maxlength="240" placeholder="例如：好呀，我们一起慢慢实现。"></textarea></label><label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardRecipientSignatureName" maxlength="20" readonly required></label><div class="signature-board"><p>请收卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardRecipientSignature" width="640" height="220" aria-label="收卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="recipient">清空重签</button></div><label class="check-field"><input id="cardRecipientConfirmed" type="checkbox" required><span>我已完整阅读，自愿签署；每次兑现仍以双方当下意愿为准。</span></label><button type="submit" class="primary-button">留言并完成双方签名</button></form>
     </div>
   </div>
 

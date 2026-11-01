@@ -77,10 +77,10 @@ PRIVATE_THEME_FILES = {
     "daniel": "daniel-stickers-v1.png",
     "kitty_pages": "kitty-page-stickers-v2.png",
     "daniel_pages": "daniel-page-stickers-v2.png",
-    "kitty_cards_1": "kitty-couple-cards-1-v2.webp",
-    "kitty_cards_2": "kitty-couple-cards-2-v2.webp",
-    "kitty_cards_3": "kitty-couple-cards-3-v2.webp",
-    "kitty_cards_4": "kitty-couple-cards-4-v2.webp",
+    "kitty_cards_1": "kitty-couple-cards-1-v3.webp",
+    "kitty_cards_2": "kitty-couple-cards-2-v3.webp",
+    "kitty_cards_3": "kitty-couple-cards-3-v3.webp",
+    "kitty_cards_4": "kitty-couple-cards-4-v3.webp",
 }
 
 
