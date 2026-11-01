@@ -1430,9 +1430,12 @@ class HttpApiTests(unittest.TestCase):
     def test_realtime_sse_stream_emits_scoped_event(self) -> None:
         opener = self.opener()
         self.post(opener, "/auth/login", {"username": "test", "password": "test123"})
-        with opener.open(self.base + "/realtime/events?after=0") as response:
-            cursor = json.load(response)["latest_sequence"]
-        created = self.post(opener, "/messages", {"type": "text", "content": "实时流测试", "idempotency_key": "http:sse:message:0001"})
+        with main.STORE.connection() as db:
+            cursor = int(db.execute("SELECT COALESCE(MAX(sequence),0) FROM realtime_events").fetchone()[0])
+        created = self.post(opener, "/messages", {
+            "type": "text", "content": "实时流测试",
+            "idempotency_key": f"http:sse:message:{uuid.uuid4().hex}",
+        })
         with opener.open(self.base + f"/realtime/stream?after={cursor}", timeout=3) as response:
             lines = []
             for _ in range(30):
