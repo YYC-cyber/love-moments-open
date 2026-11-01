@@ -77,6 +77,10 @@ PRIVATE_THEME_FILES = {
     "daniel": "daniel-stickers-v1.png",
     "kitty_pages": "kitty-page-stickers-v2.png",
     "daniel_pages": "daniel-page-stickers-v2.png",
+    "kitty_cards_1": "kitty-couple-cards-1-v2.webp",
+    "kitty_cards_2": "kitty-couple-cards-2-v2.webp",
+    "kitty_cards_3": "kitty-couple-cards-3-v2.webp",
+    "kitty_cards_4": "kitty-couple-cards-4-v2.webp",
 }
 
 
@@ -97,7 +101,10 @@ def _private_theme_asset(filename: str) -> Path | None:
         if not path.is_file() or not 8 <= path.stat().st_size <= 10 * 1024 * 1024:
             return None
         with path.open("rb") as stream:
-            if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+            header = stream.read(12)
+            if header[:8] != b"\x89PNG\r\n\x1a\n" and not (
+                header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+            ):
                 return None
     except OSError:
         return None
@@ -674,7 +681,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         self.send_response(200)
-        self.send_header("Content-Type", "image/png")
+        content_type = "image/webp" if content[:4] == b"RIFF" and content[8:12] == b"WEBP" else "image/png"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Content-Disposition", f'inline; filename="{filename}"')
         self.send_header("ETag", etag)
@@ -756,6 +764,18 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
 
     def _send_album_export(self, job_id: str, user: dict) -> None:
         content, filename = STORE.get_album_export_download(job_id, user["id"])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _send_couple_card_pdf(self, card_id: str, user: dict) -> None:
+        content, filename = STORE.couple_card_pdf(card_id, user["id"])
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Length", str(len(content)))
@@ -1345,6 +1365,13 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.get_couple_wheel(query.get("mode", ["normal"])[0], user["id"]))
             return
+        elif path == "/api/v1/entertainment/cards":
+            user = self._require_user()
+            self._send_json(STORE.list_couple_cards(user["id"]), headers={"Cache-Control": "no-store"})
+            return
+        elif match := re.fullmatch(r"/api/v1/entertainment/cards/([^/]+)/pdf", path):
+            self._send_couple_card_pdf(match.group(1), self._require_user())
+            return
         elif path == "/api/v1/daily-question":
             user = self._require_user()
             self._send_json(STORE.get_daily_question(user_id=user["id"]))
@@ -1446,6 +1473,22 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                 self._send_json(STORE.create_wheel_option(payload, user["id"]), 201)
             elif path == "/api/v1/entertainment/wheel/spin":
                 self._send_json(STORE.spin_couple_wheel(payload, user["id"]), 201)
+            elif path == "/api/v1/entertainment/cards":
+                result = STORE.create_couple_card(payload, user["id"])
+                queue_partner_web_push(user["id"], {
+                    "type": "couple_card", "title": "你收到一张双人卡片",
+                    "body": f"{result['creator_name']} 发来一张{result['template_name']}，等待你的签名。",
+                    "url": "/?screen=play&tool=cards", "tag": f"couple-card-{result['id']}",
+                }, ttl_seconds=86400)
+                self._send_json(result, 201)
+            elif match := re.fullmatch(r"/api/v1/entertainment/cards/([^/]+)/sign", path):
+                result = STORE.sign_couple_card(match.group(1), payload, user["id"])
+                queue_partner_web_push(user["id"], {
+                    "type": "couple_card_signed", "title": "双人卡片已完成签名",
+                    "body": f"{result['recipient_name']} 已签署{result['template_name']}，现在可以保存 PDF。",
+                    "url": "/?screen=play&tool=cards", "tag": f"couple-card-signed-{result['id']}",
+                }, ttl_seconds=86400)
+                self._send_json(result)
             elif path == "/api/v1/admin/checks":
                 self._require_admin()
                 self._send_json(ADMIN.overview(self._request_secure_context(), self._session_token()))

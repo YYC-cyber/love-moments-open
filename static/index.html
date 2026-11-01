@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f8f2ec">
+  <meta name="theme-color" id="themeColorMeta" content="#f8f2ec">
   <meta name="color-scheme" content="light">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -16,7 +16,7 @@
   <link rel="apple-touch-icon" sizes="180x180" href="../../static/assets/love-moments-icon-180.png">
   <link rel="stylesheet" href="../../static/app.css">
 </head>
-<body>
+<body data-ui-theme="classic">
   <section class="auth-gate" id="authGate" aria-label="账号登录">
     <div class="auth-panel">
       <div class="auth-brand"><span class="brand-mark">L</span><div><strong>恋屿</strong><small>LOVE MOMENTS</small></div></div>
@@ -26,7 +26,6 @@
         <p class="auth-lead">使用恋屿账号和密码登录，不连接微信或其他社交账号。</p>
         <div class="auth-tabs"><button class="active" data-auth-mode="login">登录</button><button data-auth-mode="register">注册</button></div>
         <form id="authForm">
-          <label class="field register-only"><span>昵称</span><input id="authNickname" autocomplete="nickname" placeholder="希望对方怎样称呼你"></label>
           <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required></label>
           <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required></label>
           <button class="primary-button" id="authSubmit">登录</button>
@@ -38,7 +37,7 @@
         <a class="entry-notice" id="entryNotice" href="#" hidden>
           <strong>当前打开的是备用入口</strong><span>备用入口目前暂停，请前往正在使用的正式地址。</span>
         </a>
-        <p class="account-note" id="registrationNote">请使用你们各自注册的账号登录。注册时填写的昵称，会成为你在情侣空间里的名字和头像文字。</p>
+        <p class="account-note" id="registrationNote">请使用你们各自注册的账号登录。昵称和头像可以登录后在个人设置中修改。</p>
         <details class="pair-help">
           <summary>两个新账号怎么组成情侣？</summary>
           <p>两人各自注册 → 一人生成邀请码 → 另一人登录自己的账号并输入邀请码。建议使用两台设备或普通窗口加隐私窗口。</p>
@@ -194,7 +193,7 @@
             <button type="button" data-action="expression-help" aria-label="帮我表达">✦</button>
             <button class="send" aria-label="发送">↑</button>
           </form>
-          <p class="form-note">断网时只会在当前情侣空间暂存文字消息，确认本机保存成功后才显示“待发送”；图片、语音和视频需要联网后再发送。</p>
+          <details class="chat-offline-note"><summary>离线发送说明</summary><p>断网时只会在当前情侣空间暂存文字消息，确认本机保存成功后才显示“待发送”；图片、语音和视频需要联网后再发送。</p></details>
         </div>
         <input id="chatMediaInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp,audio/*,video/mp4,video/webm,video/quicktime" hidden>
       </div>
@@ -373,7 +372,7 @@
         <details class="memory-search card" id="memorySearchPanel">
           <summary><span><b>搜索我们的回忆</b><small>按关键词、日期和类型查找当前可见内容</small></span></summary>
           <form id="memorySearchForm" class="memory-search-form">
-            <label class="memory-search-query"><span>想找什么</span><input id="memorySearchQuery" maxlength="100" autocomplete="off" placeholder="例如：去年我们在杭州记录的照片"></label>
+            <label class="memory-search-query"><span>想找什么</span><input id="memorySearchQuery" maxlength="100" autocomplete="off" placeholder="例如：去年一起在杭州记录的照片"></label>
             <label><span>开始日期</span><input id="memorySearchStart" type="date"></label>
             <label><span>结束日期</span><input id="memorySearchEnd" type="date"></label>
             <label><span>内容类型</span><select id="memorySearchType"><option value="all">全部</option><option value="photo">照片</option><option value="video">视频</option><option value="voice">语音</option><option value="chat">聊天收藏</option><option value="call">通话</option><option value="trip">旅行</option></select></label>
@@ -506,23 +505,46 @@
     <section class="screen" data-screen="play">
       <div class="content play-content">
         <section id="playHubPanel" class="play-hub" aria-labelledby="playHubTitle">
-          <div class="page-title-row play-title"><div><span class="eyebrow ink">PLAY TOGETHER</span><h1 id="playHubTitle">娱乐中心</h1><p>两个人的小工具和小游戏都会收在这里，按需要打开，不挤占日常页面。</p></div><span class="play-title-mark" aria-hidden="true">✿</span></div>
+          <div class="page-title-row play-title">
+            <div><span class="eyebrow ink">PLAY TOGETHER</span><h1 id="playHubTitle">娱乐中心</h1><p>两个人的小工具和小游戏都会收在这里，按需要打开，不挤占日常页面。</p></div>
+            <span class="play-title-mark" aria-hidden="true">✿</span>
+          </div>
           <label class="play-search" for="playSearch"><span aria-hidden="true">⌕</span><input id="playSearch" type="search" maxlength="40" autocomplete="off" placeholder="搜索娱乐功能，例如：拼豆"><button type="button" data-action="clear-play-search" aria-label="清空搜索" hidden>×</button></label>
-          <div class="play-feature-grid" id="playFeatureGrid"><button type="button" class="play-feature-card" data-play-feature="beads" data-play-search="拼豆工坊 照片 像素 板图 手工 diy 颜色 图纸" data-action="open-play-tool" data-tool="beads"><span class="play-feature-icon" aria-hidden="true">▦</span><span><small>照片手作</small><strong>拼豆工坊</strong><em>上传照片，生成可修改、可打印的拼豆板图。</em><b>开始制作 →</b></span></button><button type="button" class="play-feature-card wheel-feature-card" data-play-feature="wheel" data-play-search="双人转盘 普通 情趣 变态 约会 吃什么 电影 互动 挑战" data-action="open-play-tool" data-tool="wheel"><span class="play-feature-icon" aria-hidden="true">◉</span><span><small>双人互动</small><strong>双人转盘</strong><em>普通、情趣和大胆挑战三种模式，双方选项与结果实时共享。</em><b>一起转转 →</b></span></button></div>
+          <div class="play-feature-grid" id="playFeatureGrid">
+            <button type="button" class="play-feature-card" data-play-feature="beads" data-play-search="拼豆工坊 照片 像素 板图 手工 diy 颜色 图纸" data-action="open-play-tool" data-tool="beads">
+              <span class="play-feature-icon" aria-hidden="true">▦</span><span><small>照片手作</small><strong>拼豆工坊</strong><em>上传照片，生成可修改、可打印的拼豆板图。</em><b>开始制作 →</b></span>
+            </button>
+            <button type="button" class="play-feature-card wheel-feature-card" data-play-feature="wheel" data-play-search="双人转盘 普通 情趣 变态 约会 吃什么 电影 互动 挑战" data-action="open-play-tool" data-tool="wheel">
+              <span class="play-feature-icon" aria-hidden="true">◉</span><span><small>双人互动</small><strong>双人转盘</strong><em>普通、情趣和大胆挑战三种模式，双方选项与结果实时共享。</em><b>一起转转 →</b></span>
+            </button>
+            <button type="button" class="play-feature-card card-feature-card" data-play-feature="cards" data-play-search="双人卡牌 愿望卡 和好卡 亲亲卡 签名 PDF Hello Kitty" data-action="open-play-tool" data-tool="cards">
+              <span class="play-feature-icon" aria-hidden="true">♡</span><span><small>双人约定</small><strong>双人签名卡</strong><em>24 种实用卡、24 套 Kitty 卡面，双方手写签名后保存 PDF。</em><b>制作卡片 →</b></span>
+            </button>
+          </div>
           <div class="play-search-empty" id="playSearchEmpty" hidden><span>⌕</span><h2>暂时没有找到这个功能</h2><p>试试搜索“拼豆”。以后新增的小游戏也会自动出现在这里。</p></div>
-          <p class="play-hub-note">目前有 2 个可用功能 · 后续可以继续加入拼图、P 图和其他双人小游戏。</p>
+          <p class="play-hub-note">目前有 3 个可用功能 · 每个工具都独立打开，不挤占日常页面。</p>
         </section>
+
         <section id="beadToolPanel" class="play-tool" aria-labelledby="beadToolTitle" hidden>
           <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · BEADS</span><h1 id="beadToolTitle">拼豆工坊</h1></div><span aria-hidden="true">▦</span></header>
+
         <article class="bead-maker card" aria-labelledby="beadMakerTitle">
-          <div class="bead-maker-heading"><div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div><span class="bead-mascot" aria-hidden="true">▦</span></div>
-          <div class="bead-workflow" aria-label="拼豆生成步骤"><span class="active">1 选照片</span><i></i><span>2 调参数</span><i></i><span>3 生成制作</span></div>
+          <div class="bead-maker-heading">
+            <div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div>
+            <span class="bead-mascot" aria-hidden="true">▦</span>
+          </div>
+
+          <div class="bead-workflow" aria-label="拼豆生成步骤">
+            <span class="active">1 选照片</span><i></i><span>2 调参数</span><i></i><span>3 生成制作</span>
+          </div>
+
           <div class="bead-upload" id="beadUploadZone">
             <input id="beadImageInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
             <button type="button" class="bead-upload-button" data-action="bead-pick-image"><b>＋</b><span>选择一张照片</span><small>支持 JPG、PNG、WebP，原图不离开本机</small></button>
             <img id="beadSourcePreview" alt="待转换的照片预览" hidden>
             <button type="button" class="quiet bead-change-image" data-action="bead-pick-image" hidden>更换照片</button>
           </div>
+
           <div class="bead-settings">
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option></select></label>
             <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12" selected>12 色 · 清晰易做</option><option value="24">24 色 · 细节丰富</option><option value="36">36 色 · 接近原图</option></select></label>
@@ -537,48 +559,93 @@
           <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
           <p class="form-note">会优先匹配实体拼豆常见颜色；冷门色仍可保留，并给出最接近的常用替代。不同品牌色号不同，购买时按颜色名称和门店色卡复核。</p>
         </article>
+
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
           <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>
           <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
-          <div class="bead-result-actions"><button type="button" class="secondary-button" data-action="bead-save">保存到本机</button><button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button></div>
+          <div class="bead-result-actions">
+            <button type="button" class="secondary-button" data-action="bead-save">保存到本机</button>
+            <button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button>
+          </div>
         </section>
+
         <section class="bead-library card" aria-labelledby="beadLibraryTitle">
           <div class="bead-library-heading"><div><span class="eyebrow ink">MY PATTERNS</span><h2 id="beadLibraryTitle">我的拼豆作品</h2></div><small>最多保留 12 份本机草稿</small></div>
           <div id="beadSavedList" class="bead-saved-list"><div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div></div>
         </section>
         </section>
-        <section id="wheelToolPanel" class="play-tool wheel-tool" aria-labelledby="wheelToolTitle" hidden>
+
+        <section id="wheelToolPanel" class="play-tool wheel-tool" aria-labelledby="wheelToolTitle" data-play-tool="wheel" hidden>
           <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · COUPLE WHEEL</span><h1 id="wheelToolTitle">双人转盘</h1></div><span aria-hidden="true">◉</span></header>
+
           <article class="wheel-stage card">
             <div class="wheel-heading"><div><span class="pill rose">双方同步</span><h2>今天转到什么，就一起试试</h2><p>两个人看到相同选项和最近结果。任何结果都可以跳过，不舒服时立即停止。</p></div><span aria-hidden="true">♡</span></div>
-            <div class="wheel-mode-tabs" role="tablist" aria-label="转盘模式"><button type="button" class="active" data-wheel-mode="normal" role="tab" aria-selected="true">普通版</button><button type="button" data-wheel-mode="intimate" role="tab" aria-selected="false">情趣版</button><button type="button" data-wheel-mode="wild" role="tab" aria-selected="false">变态版</button></div>
+            <div class="wheel-mode-tabs" role="tablist" aria-label="转盘模式">
+              <button type="button" class="active" data-wheel-mode="normal" role="tab" aria-selected="true">普通版</button>
+              <button type="button" data-wheel-mode="intimate" role="tab" aria-selected="false">情趣版</button>
+              <button type="button" data-wheel-mode="wild" role="tab" aria-selected="false">变态版</button>
+            </div>
             <p id="wheelConsentNotice" class="wheel-consent-note">转到不合适的结果时可以直接跳过，再转一次。</p>
-            <div class="couple-wheel-wrap"><span class="wheel-pointer" aria-hidden="true"></span><div id="coupleWheel" class="couple-wheel" role="img" aria-label="等待读取双人转盘"><span>♡</span></div></div>
+            <div class="couple-wheel-wrap">
+              <span class="wheel-pointer" aria-hidden="true"></span>
+              <div id="coupleWheel" class="couple-wheel" role="img" aria-label="等待读取双人转盘"><span id="coupleWheelCenter">♡</span></div>
+            </div>
             <div id="wheelResult" class="wheel-result" aria-live="polite"><small>等待转动</small><strong>先选好想参与的项目</strong></div>
             <button type="button" class="primary-button wheel-spin-button" data-action="spin-couple-wheel">转动转盘</button>
           </article>
+
           <article class="wheel-options-card card">
             <div class="wheel-section-heading"><div><h2>本轮选项</h2><p>至少勾选两项；取消勾选就不会转到它。</p></div><button type="button" class="quiet" data-action="select-all-wheel-options">全选</button></div>
             <div id="wheelOptionList" class="wheel-option-list"><div class="empty-view"><p>正在读取选项…</p></div></div>
             <form id="wheelOptionForm" class="wheel-option-form"><label class="field"><span>增加你们自己的选项</span><input id="wheelOptionInput" maxlength="40" placeholder="例如：一起去买杯奶茶" required></label><button class="secondary-button">加入共同转盘</button></form>
           </article>
-          <article class="wheel-history-card card"><div class="wheel-section-heading"><div><h2>最近转到</h2><p>保留最近结果，双方登录后都能看到。</p></div></div><div id="wheelHistory" class="wheel-history"><div class="empty-view"><p>还没有转动记录。</p></div></div></article>
+
+          <article class="wheel-history-card card">
+            <div class="wheel-section-heading"><div><h2>最近转到</h2><p>保留最近结果，双方登录后都能看到。</p></div></div>
+            <div id="wheelHistory" class="wheel-history"><div class="empty-view"><p>还没有转动记录。</p></div></div>
+          </article>
+        </section>
+
+        <section id="cardToolPanel" class="play-tool couple-card-tool" aria-labelledby="cardToolTitle" data-play-tool="cards" hidden>
+          <header class="play-tool-header"><button type="button" data-action="back-play-hub" aria-label="返回娱乐中心">‹</button><div><span class="eyebrow ink">ENTERTAINMENT · SIGNED CARDS</span><h1 id="cardToolTitle">双人签名卡</h1></div><span aria-hidden="true">♡</span></header>
+          <article class="card card-maker">
+            <div class="wheel-heading"><div><span class="pill rose">24 种实用卡</span><h2>给 TA 做一张正式的小约定</h2><p>发卡人先手写签名，收卡人阅读后再次签名；双签完成才能下载 PDF。</p></div></div>
+            <form id="coupleCardForm">
+              <h3>1 · 选择卡片类型</h3><div id="cardTemplateGrid" class="card-template-grid"></div>
+              <label id="customCardTitleField" class="field" hidden><span>自定义卡名</span><input id="customCardTitle" maxlength="30" placeholder="例如：周末赖床卡"></label>
+              <label class="field"><span>想对 TA 说的话</span><textarea id="coupleCardMessage" maxlength="500" required></textarea></label>
+              <h3>2 · 选择 Kitty 卡面</h3><div id="cardStyleGrid" class="card-style-grid"></div>
+              <div id="cardLivePreview" class="couple-card-preview" aria-live="polite"></div>
+              <h3>3 · 发卡人手写签名</h3>
+              <label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardCreatorSignatureName" maxlength="20" readonly required></label>
+              <div class="signature-board"><p>请发卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardCreatorSignature" width="640" height="220" aria-label="发卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="creator">清空重签</button></div>
+              <label class="check-field"><input id="cardCreatorConfirmed" type="checkbox" required><span>我确认卡片内容真实、自愿，并理解对方可以不签或稍后再签。</span></label>
+              <button type="submit" class="primary-button">签名并发送给 TA</button>
+            </form>
+          </article>
+          <article class="card card-vault"><div class="wheel-section-heading"><div><h2>我们的卡片收藏</h2><p>已签卡可以长期查看和下载 PDF；待签卡会明确显示状态。</p></div><span id="cardPendingCount"></span></div><div id="coupleCardList" class="couple-card-list"><div class="empty-view"><p>还没有卡片。</p></div></div></article>
         </section>
       </div>
     </section>
 
     <nav class="bottom-nav" aria-label="主导航">
       <button class="active" data-nav="home"><span>⌂</span><small>首页</small></button>
-      <button data-nav="chat"><span>◌</span><small>消息</small><i class="nav-dot" id="chatUnreadBadge" hidden>0</i></button>
-      <button data-nav="trip"><span>⌁</span><small>旅行</small></button>
-      <button data-nav="timeline"><span>◇</span><small>时光</small></button>
+      <button data-nav="chat"><span>✉</span><small>消息</small><i class="nav-dot" id="chatUnreadBadge" hidden>0</i></button>
+      <button data-nav="trip"><span>✈</span><small>旅行</small></button>
+      <button data-nav="timeline"><span>✦</span><small>时光</small></button>
       <button data-nav="play"><span>♟</span><small>娱乐</small></button>
       <button data-nav="life"><span>♡</span><small>我们</small></button>
     </nav>
   </main>
+
+  <div class="modal" id="coupleCardSignModal" role="dialog" aria-modal="true" aria-labelledby="coupleCardSignTitle" aria-hidden="true">
+    <div class="sheet scroll-sheet card-sign-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SIGN TOGETHER</span><h2 id="coupleCardSignTitle">签收这张卡</h2><div id="cardSignSummary"></div>
+      <form id="coupleCardSignForm"><label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardRecipientSignatureName" maxlength="20" readonly required></label><div class="signature-board"><p>请收卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardRecipientSignature" width="640" height="220" aria-label="收卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="recipient">清空重签</button></div><label class="check-field"><input id="cardRecipientConfirmed" type="checkbox" required><span>我已完整阅读，自愿签署；每次兑现仍以双方当下意愿为准。</span></label><button type="submit" class="primary-button">完成双方签名</button></form>
+    </div>
+  </div>
 
   <div class="modal" id="itineraryDetailModal" role="dialog" aria-modal="true" aria-labelledby="itineraryDetailTitle" aria-hidden="true">
     <div class="sheet scroll-sheet itinerary-detail-sheet">
@@ -594,10 +661,10 @@
       <span class="eyebrow ink" id="sharedDetailKind">OUR SHARED STORY</span>
       <div id="sharedDetailContent" role="status"></div>
       <section class="shared-comment-section" aria-labelledby="sharedCommentHeading">
-        <div class="shared-comment-heading"><div><h3 id="sharedCommentHeading">两个人的评论</h3><p>评论保存在共同空间，情侣双方登录后都能看到。</p></div><span id="sharedCommentCount">0 条</span></div>
+        <div class="shared-comment-heading"><div><h3 id="sharedCommentHeading">两个人的评论</h3><p id="sharedCommentVisibilityNote">评论保存在共同空间，双方登录后都能看到。</p></div><span id="sharedCommentCount">0 条</span></div>
         <div id="sharedCommentList" class="shared-comment-list"></div>
         <form id="sharedCommentForm" class="shared-comment-form">
-          <textarea id="sharedCommentBody" maxlength="1000" placeholder="写下想和 TA 说的话…" required></textarea>
+          <textarea id="sharedCommentBody" maxlength="1000" placeholder="写下想和对方说的话…" required></textarea>
           <button class="primary-button">发送评论</button>
         </form>
       </section>

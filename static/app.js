@@ -68,10 +68,12 @@ function clearThemeArtwork() {
   themeArtworkOwner = null;
   themeArtworkGeneration += 1;
   delete document.body.dataset.themeArtReady;
+  delete document.body.dataset.cardArtReady;
   for (const name of ["kitty", "daniel"]) {
     document.body.style.removeProperty(`--${name}-sticker-sheet`);
     document.body.style.removeProperty(`--${name}-page-sticker-sheet`);
   }
+  for (let index = 1; index <= 4; index += 1) document.body.style.removeProperty(`--kitty-card-sheet-${index}`);
 }
 
 async function loadThemeArtwork(userId) {
@@ -94,6 +96,15 @@ async function loadThemeArtwork(userId) {
       }
       available.push(name);
     }
+    let cardArtCount = 0;
+    for (let index = 1; index <= 4; index += 1) {
+      const expected = `/api/v1/theme-assets/kitty-couple-cards-${index}-v2.webp`;
+      if (manifest.assets?.[`kitty_cards_${index}`] === expected) {
+        document.body.style.setProperty(`--kitty-card-sheet-${index}`, `url("${expected}")`);
+        cardArtCount += 1;
+      }
+    }
+    if (cardArtCount === 4) document.body.dataset.cardArtReady = "kitty-couple";
     document.body.dataset.themeArtReady = available.join(" ");
   } catch (_) {
     if (generation === themeArtworkGeneration) themeArtworkOwner = null;
@@ -302,6 +313,7 @@ const state = {
   playTool: "",
   bead: { image: null, sourceUrl: "", size: 29, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
+  cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
   itineraryDetailItemId: null,
   sharedDetail: null,
@@ -368,10 +380,18 @@ const state = {
   installPrompt: null,
   chatImport: null,
   chatHistory: {
-    initialized: false, hasMore: true, loadingOlder: false,
-    searchOpen: false, searchResults: [], searchQuery: "",
-    newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0,
-    savedScrollTop: null, highlightId: "", highlightUntil: 0,
+    initialized: false,
+    hasMore: true,
+    loadingOlder: false,
+    searchOpen: false,
+    searchResults: [],
+    searchQuery: "",
+    newCount: 0,
+    unreadMessageIds: new Set(),
+    latestLockUntil: 0,
+    savedScrollTop: null,
+    highlightId: "",
+    highlightUntil: 0,
   },
   longPressTimer: null,
   accountAutoOpened: false,
@@ -507,6 +527,8 @@ async function api(path, options = {}) {
   });
   assertNotCancelled();
   const body = await response.json().catch(error => {
+    // Cancellation is not malformed JSON. In particular, an old 401 body
+    // must never clear a newly signed-in session after an A-to-B-to-A switch.
     if (error?.name === "AbortError") throw error;
     assertNotCancelled();
     return {};
@@ -985,6 +1007,18 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
 
+function partnerNickname(fallback = "对方") {
+  return String(state.data?.partner?.nickname || fallback);
+}
+
+function notificationNicknameText(value, item = {}) {
+  const nickname = String(item.actor_name || partnerNickname());
+  return String(value || "")
+    .replaceAll("对方", nickname)
+    .replace(/\bTA\b/gi, nickname)
+    .replace(/^[^，。！？\s]{1,30}(?=(?:创建|调整|更新|提交|取消|延长|发来|写好|记录|回应|正在|已经|给你|在共同))/, nickname);
+}
+
 function renderMessageReadState() {
   const badge = document.getElementById("chatUnreadBadge");
   if (!badge) return;
@@ -1016,12 +1050,21 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
     if (!state.memoryCompletionLoaded) loadMemoryCompletion().catch(error => toast(error.message));
     loadFutureLetters({ quiet: true });
   }
-  if (screen !== "chat") document.querySelector(".phone-shell").scrollTo({ top: 0, behavior: "smooth" });
-  else requestAnimationFrame(() => {
-    scrollChatToLatest({ behavior: "auto" });
-    state.chatHistory.savedScrollTop = null;
-    state.chatHistory.initialized = true;
-  });
+  // Phones scroll the document while the desktop preview scrolls the framed
+  // shell. Reset both so switching tabs never inherits another page's depth.
+  const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+  if (screen !== "chat") {
+    window.scrollTo({ top: 0, behavior });
+    document.querySelector(".phone-shell")?.scrollTo({ top: 0, behavior });
+  } else {
+    requestAnimationFrame(() => {
+      const viewport = document.getElementById("messages");
+      if (!viewport) return;
+      scrollChatToLatest({ behavior: "auto" });
+      state.chatHistory.savedScrollTop = null;
+      state.chatHistory.initialized = true;
+    });
+  }
   if (state.data && screen !== "play") loadSmartSurface(screen, { quiet: true });
   if (screen === "play") showEntertainmentHub();
   if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).then(result => { state.messageReadState = result; renderMessageReadState(); }).catch(() => {});
@@ -1529,7 +1572,8 @@ function renderSmartSurface(surface, manifest, message = "") {
 async function loadSmartSurface(surface, { quiet = false } = {}) {
   if (!smartExamples[surface]) return;
   if (quiet && (surfaceHasDraftIntent(surface) || state.composingSmartSurfaces.has(surface) || (state.pinnedSmartSurfaces.has(surface) && manifestHasPendingWrite(state.manifests[surface])))) {
-    // Preserve the input node, focus and selection during background refreshes.
+    // A protected draft must keep its DOM too: replacing innerHTML preserves
+    // the string but loses focus, text selection and an in-progress tap.
     if (!document.querySelector(`[data-smart-form="${surface}"]`)) renderSmartSurface(surface, state.manifests[surface]);
     return;
   }
@@ -1783,7 +1827,7 @@ function renderFutureLetters() {
     const label = item.status === "draft" ? "私密草稿" : item.status === "sealed" ? "已封存" : "已送达";
     const when = item.deliver_at ? new Date(item.deliver_at).toLocaleString("zh-CN") : item.delivered_at ? new Date(item.delivered_at).toLocaleString("zh-CN") : "尚未设定送达时间";
     return `<button class="future-letter-card" data-action="open-future-letter-detail" data-id="${escapeHtml(item.id)}"><small>${label} · ${escapeHtml(when)}</small><strong>${escapeHtml(item.title || "未来信")}</strong><p>${item.status === "sealed" ? "正文已封存，取消后才能重新查看与编辑。" : item.status === "delivered" ? "信件已经送达，可以打开查看。" : "只有你能看到这份草稿。"}</p></button>`;
-  }).join("") : `<p class="muted">还没有未来信。写下后，对方在到期前不会看到任何提示。</p>`;
+  }).join("") : `<p class="muted">还没有未来信。写下后，${escapeHtml(partnerNickname())}在到期前不会看到任何提示。</p>`;
 }
 
 function openFutureLetterComposer(letter = null) {
@@ -2677,8 +2721,9 @@ function renderMessages({ preserveScroll = state.chatHistory.initialized, preser
       : message.type === "video" && mediaUrl ? `<video class="message-media" controls preload="metadata" poster="${imagePreviewUrl}" src="${mediaUrl}"></video>` : "";
     const status = message.mine ? `<span class="message-status">${message.delivery_status === "read" ? "已读" : "已送达"}</span>` : "";
     const expression = message.mine && message.type === "text"
-      ? `<button class="message-save" data-action="expression-help" data-message-id="${escapeHtml(message.id)}">帮我表达</button>` : "";
-    return `${divider}<div class="message ${message.mine ? "mine" : "theirs"}${groupClasses}" data-message-id="${escapeHtml(message.id)}" title="长按收藏为瞬间">${media}<p>${escapeHtml(message.content)}</p><time>${timeLabel(message.sent_at)}${status}</time>${expression}<button class="message-save" data-action="save-message" data-message-id="${escapeHtml(message.id)}">收藏为瞬间</button></div>`;
+      ? `<button class="message-save" data-action="expression-help" data-message-id="${escapeHtml(message.id)}">帮我润色</button>` : "";
+    const actions = `${expression}<button class="message-save" data-action="save-message" data-message-id="${escapeHtml(message.id)}">收藏为瞬间</button>`;
+    return `${divider}<div class="message ${message.mine ? "mine" : "theirs"}${groupClasses}" data-message-id="${escapeHtml(message.id)}" title="长按收藏为瞬间"><div class="message-body">${media}<p>${escapeHtml(message.content)}</p></div><div class="message-meta"><time>${timeLabel(message.sent_at)}${status}</time><details class="message-menu"><summary aria-label="打开消息操作">•••</summary><span>${actions}</span></details></div></div>`;
   }).join("");
   const historyControl = state.chatHistory.loadingOlder
     ? `<div class="chat-history-status">正在读取更早消息…</div>`
@@ -2687,21 +2732,30 @@ function renderMessages({ preserveScroll = state.chatHistory.initialized, preser
       : `<div class="chat-history-status">已经到最早一条了</div>`;
   viewport.innerHTML = `${historyControl}${html || `<div class="empty-view"><p>还没有消息，发一句“想你了”开始聊天吧。</p></div>`}`;
   const lockToLatest = state.screen === "chat" && state.chatHistory.latestLockUntil > Date.now();
-  if (lockToLatest || stickToBottom || (!state.chatHistory.initialized && state.screen === "chat")) viewport.scrollTop = viewport.scrollHeight;
-  else if (preserveScroll) viewport.scrollTop = preservePrepend ? oldTop + Math.max(0, viewport.scrollHeight - oldHeight) : oldTop;
-  else if (wasNearBottom) viewport.scrollTop = viewport.scrollHeight;
+  if (lockToLatest || stickToBottom || (!state.chatHistory.initialized && state.screen === "chat")) {
+    viewport.scrollTop = viewport.scrollHeight;
+  } else if (preserveScroll) {
+    viewport.scrollTop = preservePrepend ? oldTop + Math.max(0, viewport.scrollHeight - oldHeight) : oldTop;
+  } else if (wasNearBottom) {
+    viewport.scrollTop = viewport.scrollHeight;
+  }
   state.chatHistory.initialized = true;
   const activeHighlightId = highlightId || (state.chatHistory.highlightUntil > Date.now() ? state.chatHistory.highlightId : "");
-  if (activeHighlightId) requestAnimationFrame(() => {
-    const target = [...viewport.querySelectorAll(".message[data-message-id]")].find(item => item.dataset.messageId === activeHighlightId);
-    if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    target.classList.add("chat-message-highlight");
-    window.setTimeout(() => {
-      target.classList.remove("chat-message-highlight");
-      if (state.chatHistory.highlightId === activeHighlightId) { state.chatHistory.highlightId = ""; state.chatHistory.highlightUntil = 0; }
-    }, 1900);
-  });
+  if (activeHighlightId) {
+    requestAnimationFrame(() => {
+      const target = [...viewport.querySelectorAll(".message[data-message-id]")].find(item => item.dataset.messageId === activeHighlightId);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("chat-message-highlight");
+      window.setTimeout(() => {
+        target.classList.remove("chat-message-highlight");
+        if (state.chatHistory.highlightId === activeHighlightId) {
+          state.chatHistory.highlightId = "";
+          state.chatHistory.highlightUntil = 0;
+        }
+      }, 1900);
+    });
+  }
   updateChatNewMessageButton();
 }
 
@@ -2731,7 +2785,10 @@ function setChatSearchOpen(open) {
   state.chatHistory.searchOpen = Boolean(open);
   const panel = document.getElementById("chatSearchPanel");
   if (panel) panel.hidden = !state.chatHistory.searchOpen;
-  if (open) { renderChatSearchResults(); requestAnimationFrame(() => document.getElementById("chatSearchInput")?.focus()); }
+  if (open) {
+    renderChatSearchResults();
+    requestAnimationFrame(() => document.getElementById("chatSearchInput")?.focus());
+  }
 }
 
 async function openChatSearchResult(messageId) {
@@ -2754,7 +2811,13 @@ function renderIdentity() {
   document.querySelector(".couple-card h2").textContent = `${user.nickname} & ${partner.nickname}`;
   document.querySelector(".couple-card p").textContent = `相遇于 ${couple.anniversary} · 属于你们的共同空间`;
   document.querySelector("#callScreen h2").textContent = partner.nickname;
-  document.getElementById("partnerMomentLabel").textContent = `${partner.nickname}的此刻 · 当前账号：${user.nickname}`;
+  document.getElementById("partnerMomentLabel").textContent = `伴侣状态 · ${partner.nickname}`;
+  const memorySearch = document.getElementById("memorySearchQuery");
+  if (memorySearch) memorySearch.placeholder = `例如：去年${user.nickname}在杭州记录的照片`;
+  const commentVisibility = document.getElementById("sharedCommentVisibilityNote");
+  if (commentVisibility) commentVisibility.textContent = `评论保存在共同空间，${user.nickname}和${partner.nickname}登录后都能看到。`;
+  const commentBody = document.getElementById("sharedCommentBody");
+  if (commentBody) commentBody.placeholder = `写下想和${partner.nickname}说的话…`;
   applyUiTheme(user.ui_theme || "classic");
   applyUiDisplayPreferences(user);
   const anniversary = new Date(`${couple.anniversary}T00:00:00`);
@@ -2864,7 +2927,7 @@ function renderWeeklyReview() {
   if (!review) { host.hidden = true; return; }
   host.hidden = false;
   const summary = review.summary || {};
-  host.innerHTML = `<span class="eyebrow ink">OUR WEEK</span><h3>这一周，我们又多了一些故事</h3><p>${summary.momentCount || 0} 个瞬间 · ${summary.completedCount || 0} 件共同小事 · ${summary.callCount || 0} 次通话</p><div class="inline-actions"><button data-action="open-weekly">${review.both_revealed ? "查看共同答案" : review.answered_by_me ? "等待 TA 回答" : "写下我的回顾"}</button></div>`;
+  host.innerHTML = `<span class="eyebrow ink">OUR WEEK</span><h3>这一周，我们又多了一些故事</h3><p>${summary.momentCount || 0} 个瞬间 · ${summary.completedCount || 0} 件共同小事 · ${summary.callCount || 0} 次通话</p><div class="inline-actions"><button data-action="open-weekly">${review.both_revealed ? "查看共同答案" : review.answered_by_me ? `等待 ${escapeHtml(partnerNickname("TA"))} 回答` : "写下我的回顾"}</button></div>`;
   const metrics = `<div class="weekly-metrics"><span><b>${summary.momentCount || 0}</b>瞬间</span><span><b>${summary.completedCount || 0}</b>完成</span><span><b>${Math.round((summary.callSeconds || 0) / 60)}</b>通话分钟</span></div>`;
   const answers = (review.answers || []).map(answer => answer.locked
     ? `<div class="revealed-answer">${escapeHtml(answer.nickname)} 已写好，等你提交后一起揭晓。</div>`
@@ -2878,7 +2941,7 @@ function renderWeeklyReview() {
   const confirm = document.getElementById("weeklyConfirm");
   confirm.hidden = review.status === "confirmed" || !review.answered_by_me;
   confirm.disabled = Boolean(own?.confirmed_at);
-  confirm.textContent = own?.confirmed_at ? "已确认，等待 TA" : "确认本周回顾";
+  confirm.textContent = own?.confirmed_at ? `已确认，等待 ${partnerNickname("TA")}` : "确认本周回顾";
 }
 
 function renderDatePlans() {
@@ -2905,7 +2968,7 @@ function renderDatePlans() {
     }).join("");
     let actions = "";
     if (plan.status === "voting" && plan.my_vote) actions = `<button data-action="compose-date" data-date-id="${plan.id}" data-variant-id="${plan.my_vote}">采用我选的方案</button>`;
-    if (plan.status === "pending_confirmation") actions = `<button data-action="confirm-date" data-date-id="${plan.id}" data-version="${plan.version}" ${plan.confirmed_by_me ? "disabled" : ""}>${plan.confirmed_by_me ? "已确认，等待 TA" : "确认最终约会"}</button>`;
+    if (plan.status === "pending_confirmation") actions = `<button data-action="confirm-date" data-date-id="${plan.id}" data-version="${plan.version}" ${plan.confirmed_by_me ? "disabled" : ""}>${plan.confirmed_by_me ? `已确认，等待 ${escapeHtml(partnerNickname("TA"))}` : "确认最终约会"}</button>`;
     if (plan.status === "confirmed") actions = `<button data-action="complete-date" data-date-id="${plan.id}">约会完成，保存回忆</button>`;
     if (plan.status === "completed") actions = `<button data-nav="timeline">已成为恋爱瞬间</button>`;
     const timezoneNote = plan.preferences?.timezone_confirmed === false
@@ -2952,7 +3015,7 @@ function renderDecisions() {
     } else if (decision.status === "confirmed") {
       actions = resolutionIds.map(optionId => `<div class="decision-conversion-choice"><strong>使用“${escapeHtml(labels.get(optionId) || "这个选项")}”</strong><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="meal_wish">预填想吃清单</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="date_plan">预填约会</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="trip">预填旅行</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="hotel_search">预填酒店查询</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="restaurant_search">预填餐厅查询</button><button data-action="convert-decision" data-id="${escapeHtml(decision.id)}" data-option-id="${escapeHtml(optionId)}" data-target="calendar_todo">预填待办</button></div>`).join("");
     }
-    return `<article class="decision-card card" data-decision-id="${escapeHtml(decision.id)}"><header><div><span class="eyebrow ink">${escapeHtml(decisionStatusLabel(decision.status))}</span><h3>${escapeHtml(decision.title)}</h3><p>${decision.selection_mode === "multiple" ? "可多选" : "单选"} · 截止 ${new Date(decision.closes_at).toLocaleString("zh-CN")}</p></div></header><div class="decision-options">${choiceButtons}</div>${!revealed ? `<p class="decision-privacy">${decision.submitted_by_me ? "你已秘密提交" : "你还未提交"} · ${decision.partner_submitted ? "TA 已提交" : "TA 尚未提交"}。揭晓前不会显示任何选择或票数。</p>` : votes}<div class="inline-actions decision-actions">${actions}</div></article>`;
+    return `<article class="decision-card card" data-decision-id="${escapeHtml(decision.id)}"><header><div><span class="eyebrow ink">${escapeHtml(decisionStatusLabel(decision.status))}</span><h3>${escapeHtml(decision.title)}</h3><p>${decision.selection_mode === "multiple" ? "可多选" : "单选"} · 截止 ${new Date(decision.closes_at).toLocaleString("zh-CN")}</p></div></header><div class="decision-options">${choiceButtons}</div>${!revealed ? `<p class="decision-privacy">${decision.submitted_by_me ? "你已秘密提交" : "你还未提交"} · ${escapeHtml(partnerNickname("TA"))}${decision.partner_submitted ? "已提交" : "尚未提交"}。揭晓前不会显示任何选择或票数。</p>` : votes}<div class="inline-actions decision-actions">${actions}</div></article>`;
   }).join("");
 }
 
@@ -3114,7 +3177,7 @@ function renderPlan() {
     const approveButton = document.getElementById("approveTripButton");
     approveButton.hidden = confirmed;
     approveButton.disabled = approval.approved_by_me;
-    approveButton.textContent = approval.approved_by_me ? "已确认，等待 TA" : "确认最终方案";
+    approveButton.textContent = approval.approved_by_me ? `已确认，等待 ${partnerNickname("TA")}` : "确认最终方案";
   }
   document.querySelectorAll(".trip-progress span")[2]?.classList.toggle("active", ["pending_approval", "confirmed"].includes(trip?.status));
   const refreshFoodButton = document.getElementById("refreshFoodButton");
@@ -3697,7 +3760,7 @@ function renderDailyQuestion() {
     answerButton.disabled = true;
   } else if (question.answered_by_me) {
     answerState.innerHTML = `<span>你已回答</span><span class="lock">等待 ${escapeHtml(state.data.partner.nickname)} 回答</span>`;
-    answerButton.textContent = "已提交，等待对方";
+    answerButton.textContent = `已提交，等待${partnerNickname()}`;
     answerButton.disabled = true;
   } else {
     answerState.innerHTML = `<span>${question.partner_answered ? `${escapeHtml(state.data.partner.nickname)}已回答` : "等待双方回答"}</span><span class="lock">回答后解锁</span>`;
@@ -3856,7 +3919,7 @@ async function describeMemory(resourceType, resourceId, { defaultVisibility = "p
   const mine = (current.items || []).find(item => item.author_id === state.data?.user?.id);
   const body = window.prompt("写下你的视角", mine?.body || "");
   if (body === null || !body.trim()) return;
-  const share = defaultVisibility === "shared" || window.confirm("是否让对方也看到这段补充？\n确定：双方可见；取消：仅自己可见");
+  const share = defaultVisibility === "shared" || window.confirm(`是否让${partnerNickname()}也看到这段补充？\n确定：双方可见；取消：仅自己可见`);
   await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions/me`, {
     method: "PUT",
     body: JSON.stringify({ body: body.trim(), visibility: share ? "shared" : "private", expected_version: Number(mine?.version || 0) }),
@@ -3869,7 +3932,7 @@ async function manageMemoryDescriptions(resourceType, resourceId) {
   let current = await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions`);
   const proposal = current.merge_proposal;
   if (proposal?.can_confirm) {
-    if (!window.confirm(`对方提议把双方描述合并为共同正文：\n\n${proposal.body}\n\n确认采用吗？`)) return;
+    if (!window.confirm(`${partnerNickname()}提议把双方描述合并为共同正文：\n\n${proposal.body}\n\n确认采用吗？`)) return;
     await api(`/api/v1/memories/moments/${encodeURIComponent(resourceId)}/merge-confirm`, {
       method: "POST", body: JSON.stringify({ proposal_id: proposal.proposal_id, expected_version: Number(proposal.version) }),
     });
@@ -3878,12 +3941,12 @@ async function manageMemoryDescriptions(resourceType, resourceId) {
     return;
   }
   if (proposal) {
-    toast("合并提议已发送，等待对方确认");
+    toast(`合并提议已发送，等待对方确认（${partnerNickname()}）`);
     return;
   }
   let mine = (current.items || []).find(item => item.author_id === state.data?.user?.id);
   if (!mine || mine.visibility !== "shared") {
-    const body = window.prompt("写下你愿意与对方分享的视角", mine?.body || "");
+    const body = window.prompt(`写下你愿意与${partnerNickname()}分享的视角`, mine?.body || "");
     if (body === null || !body.trim()) return;
     await api(`/api/v1/memories/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}/descriptions/me`, {
       method: "PUT",
@@ -3894,11 +3957,11 @@ async function manageMemoryDescriptions(resourceType, resourceId) {
   const shared = (current.items || []).filter(item => item.visibility === "shared");
   if (resourceType !== "moment" || shared.length < 2) {
     await searchMemories();
-    toast("描述已保存；等对方补充后可以共同合并");
+    toast(`描述已保存；等${partnerNickname()}补充后可以共同合并`);
     return;
   }
   const suggested = shared.map(item => `${item.nickname}：${item.body}`).join("\n");
-  const body = window.prompt("整理成双方共同认可的正文（发送后需由对方确认）", suggested);
+  const body = window.prompt(`整理成双方共同认可的正文（发送后需由${partnerNickname()}确认）`, suggested);
   if (body === null || !body.trim()) return;
   const expectedVersions = Object.fromEntries(shared.map(item => [item.author_id, Number(item.version)]));
   await api(`/api/v1/memories/moments/${encodeURIComponent(resourceId)}/merge-proposal`, {
@@ -3906,7 +3969,7 @@ async function manageMemoryDescriptions(resourceType, resourceId) {
     body: JSON.stringify({ body: body.trim(), expected_parent_version: Number(current.parent_version), expected_versions: expectedVersions }),
   });
   await searchMemories();
-  toast("合并提议已发送，等待对方确认");
+  toast(`合并提议已发送，等待对方确认（${partnerNickname()}）`);
 }
 
 async function completeMemorySuggestion(item) {
@@ -3921,10 +3984,10 @@ async function completeMemorySuggestion(item) {
     if (location === null || !location.trim()) return;
     Object.assign(payload, { location: location.trim(), expected_parent_version: Number(parent.parent_version) });
   } else if (item.suggestion_kind === "provisional_date") {
-    const value = window.prompt("确认发生时间（例如 2024-02-14 18:30）", "");
+    const value = window.prompt("确认发生时间（例如 2026-10-16 18:30）", "");
     if (value === null || !value.trim()) return;
     const parsed = new Date(value.trim().replace(" ", "T"));
-    if (Number.isNaN(parsed.getTime())) throw new Error("时间格式不正确，请按 2024-02-14 18:30 填写");
+    if (Number.isNaN(parsed.getTime())) throw new Error("时间格式不正确，请按 2026-10-16 18:30 填写");
     if (!window.confirm(`确认把回忆时间改为 ${parsed.toLocaleString("zh-CN")}？`)) return;
     Object.assign(payload, { occurred_at: parsed.toISOString(), expected_parent_version: Number(parent.parent_version) });
   }
@@ -4511,7 +4574,7 @@ function renderChatImportDraft(draft) {
   document.getElementById("chatImportForm").hidden = true;
   const host = document.getElementById("chatImportDraft");
   host.hidden = false;
-  host.innerHTML = `<p><span class="mock-badge">${escapeHtml(draft.source_label || (draft.mock ? "演示识别" : "真实 OCR"))} · 请逐条确认</span></p>${draft.items.map(item => `<label class="import-row"><select data-import-speaker="${item.id}"><option value="me" ${item.speaker === "me" ? "selected" : ""}>我</option><option value="partner" ${item.speaker === "partner" ? "selected" : ""}>对方</option></select><input data-import-content="${item.id}" value="${escapeHtml(item.content)}" maxlength="4000"><input data-import-selected="${item.id}" type="checkbox" ${item.selected ? "checked" : ""} aria-label="是否导入"></label>`).join("")}<div class="import-actions"><button class="secondary-button" data-action="cancel-import">取消草稿</button><button class="primary-button" data-action="confirm-import">确认并导入</button></div>`;
+  host.innerHTML = `<p><span class="mock-badge">${escapeHtml(draft.source_label || (draft.mock ? "演示识别" : "真实 OCR"))} · 请逐条确认</span></p>${draft.items.map(item => `<label class="import-row"><select data-import-speaker="${item.id}"><option value="me" ${item.speaker === "me" ? "selected" : ""}>我</option><option value="partner" ${item.speaker === "partner" ? "selected" : ""}>${escapeHtml(partnerNickname())}</option></select><input data-import-content="${item.id}" value="${escapeHtml(item.content)}" maxlength="4000"><input data-import-selected="${item.id}" type="checkbox" ${item.selected ? "checked" : ""} aria-label="是否导入"></label>`).join("")}<div class="import-actions"><button class="secondary-button" data-action="cancel-import">取消草稿</button><button class="primary-button" data-action="confirm-import">确认并导入</button></div>`;
 }
 
 function privacyGrantLabel(value, labels) {
@@ -4657,10 +4720,7 @@ async function loadAccountCenter() {
   renderOfflineSyncStatus(offlineQueue);
   openModal("accountModal");
   refreshPushStatus({ resync: true }).catch(error => renderPushStatus(error.message, "warning"));
-  refreshPushDiagnostics().catch(error => {
-    const host = document.getElementById("pushDiagnostics");
-    if (host) host.innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`;
-  });
+  refreshPushDiagnostics().catch(error => { const host = document.getElementById("pushDiagnostics"); if (host) host.innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`; });
 }
 
 function lifeAssistantCountLabel(key) {
@@ -4748,7 +4808,7 @@ function renderAssistantPlan(plan = state.lifeAssistant.activePlan) {
     + '<div class="assistant-plan-items">' + (plan.items || []).map(assistantPlanItemHtml).join("") + '</div>'
     + '<p class="form-note">这份方案两个人现在都能看到；只有当前版本获得双方确认后，才会一次性写入日历、用餐与采购清单。</p>'
     + (plan.status === "pending_confirmation"
-      ? '<div class="assistant-plan-actions"><button type="button" class="secondary-button" data-action="cancel-assistant-plan" data-id="' + escapeHtml(plan.id) + '">取消方案</button><button type="button" class="primary-button" data-action="confirm-assistant-plan" data-id="' + escapeHtml(plan.id) + '" ' + (!canConfirm || plan.my_confirmed ? "disabled" : "") + '>' + (plan.my_confirmed ? "我已确认，等待 TA" : "确认当前方案") + '</button></div>'
+      ? '<div class="assistant-plan-actions"><button type="button" class="secondary-button" data-action="cancel-assistant-plan" data-id="' + escapeHtml(plan.id) + '">取消方案</button><button type="button" class="primary-button" data-action="confirm-assistant-plan" data-id="' + escapeHtml(plan.id) + '" ' + (!canConfirm || plan.my_confirmed ? "disabled" : "") + '>' + (plan.my_confirmed ? "我已确认，等待 " + escapeHtml(partnerNickname("TA")) : "确认当前方案") + '</button></div>'
       : '<div class="assistant-plan-actions"><button type="button" class="secondary-button" data-action="open-assistant-plans">返回方案记录</button></div>');
 }
 
@@ -4830,7 +4890,7 @@ function renderNotificationCenter() {
     return result;
   }, []);
   host.innerHTML = items.length
-    ? grouped.map(group => '<section class="notification-center-group"><h3>' + group.label + '</h3>' + group.items.map(item => '<article class="notification-center-item ' + (item.read ? "" : "unread") + '"><button type="button" class="notification-center-open" data-action="open-notification" data-id="' + escapeHtml(item.id) + '"><span></span><div><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.body || "") + '</p><small>' + new Date(item.created_at).toLocaleString("zh-CN") + '</small></div></button><button type="button" class="notification-center-archive" data-action="archive-notification" data-id="' + escapeHtml(item.id) + '" aria-label="归档通知">×</button></article>').join("") + '</section>').join("")
+    ? grouped.map(group => '<section class="notification-center-group"><h3>' + group.label + '</h3>' + group.items.map(item => '<article class="notification-center-item ' + (item.read ? "" : "unread") + '"><button type="button" class="notification-center-open" data-action="open-notification" data-id="' + escapeHtml(item.id) + '"><span></span><div><strong>' + escapeHtml(notificationNicknameText(item.title, item)) + '</strong><p>' + escapeHtml(notificationNicknameText(item.body || "", item)) + '</p><small>' + new Date(item.created_at).toLocaleString("zh-CN") + '</small></div></button><button type="button" class="notification-center-archive" data-action="archive-notification" data-id="' + escapeHtml(item.id) + '" aria-label="归档通知">×</button></article>').join("") + '</section>').join("")
     : '<div class="empty-view"><span>◇</span><h3>没有新通知</h3><p>评论、邀请和共同方案变化都会保存在这里。</p></div>';
 }
 
@@ -4886,19 +4946,26 @@ async function loadBootstrap({ quiet = false } = {}) {
     const newPartnerMessages = previousUserId && bootstrap.user?.id === previousUserId
       ? (bootstrap.messages || []).filter(item => !knownMessageIds.has(item.id) && !item.mine)
       : [];
-    if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
-    else if (previousUserId && bootstrap.user?.id !== previousUserId) state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
+    if (previousUserId && bootstrap.user?.id === previousUserId && previousMessages.length) {
+      bootstrap.messages = mergeChatMessages(previousMessages, bootstrap.messages || []);
+    } else if (previousUserId && bootstrap.user?.id !== previousUserId) {
+      state.chatHistory = { initialized: false, hasMore: true, loadingOlder: false, searchOpen: false, searchResults: [], searchQuery: "", newCount: 0, unreadMessageIds: new Set(), latestLockUntil: 0, savedScrollTop: null, highlightId: "", highlightUntil: 0 };
+    }
     state.data = bootstrap;
     state.messageReadState = bootstrap.messageReadState || state.messageReadState;
     if (state.screen === "chat" && newPartnerMessages.length && chatWasNearBottom) {
       try { state.messageReadState = await api("/api/v1/messages/read", { method: "POST", body: "{}" }); }
-      catch (_) { /* The next sync retries the read state. */ }
+      catch (_) { /* The message stays visible and the next sync retries read state. */ }
     }
     if (state.screen === "chat" && !chatWasNearBottom) {
-      state.chatHistory.newCount = Math.max(state.chatHistory.newCount, Number(state.messageReadState?.unread_count || 0));
+      state.chatHistory.newCount = Math.max(
+        state.chatHistory.newCount,
+        Number(state.messageReadState?.unread_count || 0),
+      );
     }
     renderMessageReadState();
     state.online = true;
+    loadThemeArtwork(bootstrap.user?.id);
     if (state.data.needs_pairing) { closeCookingForUnpairedAccount(); showPairing(); return; }
     const requestedTripId = new URLSearchParams(location.search).get("trip_id");
     const preferredTripId = requestedTripId || privateStorage().getItem("love-trip-id");
@@ -5030,6 +5097,8 @@ async function initializeRealtime(userId, generation, signal) {
   try {
     snapshot = await api(`/api/v1/realtime/events?after=${state.realtimeCursor}`, { signal });
   } catch (error) {
+    // Stopping a session cancels only its pending read. Real authentication or
+    // server errors still propagate; they must not become silent successes.
     if (signal.aborted && error?.name === "AbortError" && !error.status) return;
     throw error;
   }
@@ -5038,13 +5107,14 @@ async function initializeRealtime(userId, generation, signal) {
   const source = new EventSource(`/api/v1/realtime/stream?after=${state.realtimeCursor}`, { withCredentials: true });
   state.realtime = source;
   const isCurrent = () => generation === realtimeGeneration && state.data?.user?.id === userId && state.realtime === source;
-  const eventNames = ["message.created", "message.read", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "play.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
+  const eventNames = ["message.created", "message.read", "profile.updated", "presence.changed", "life.updated", "meals.updated", "kitchen.updated", "play.updated", "trip.tools_updated", "trip.assistant_updated", "shared_comment.created", "shared_comment.deleted", "date_vote.updated", "date_plan.created", "date_plan.generated", "date_plan.composed", "date_plan.confirmed", "date_plan.completed", "weekly_review.created", "weekly_review.answered", "weekly_review.confirmed", "moment.created", "moment.trashed", "moment.restored", "media.created", "future_letter.delivered", "trip.created", "calendar.created", "calendar.updated", "calendar.deleted", "preference.created", "preference.updated", "preference.deleted", "ui.invalidated", "notification.created", "assistant.plan_updated", "assistant.daily_summary_created", "call.invited", "call.answered", "call.signal", "call.rejected", "call.cancelled", "call.ended", "call.missed"];
   const receive = event => {
     if (!isCurrent()) return;
     let realtimeEvent = null;
     try { realtimeEvent = JSON.parse(event.data); state.realtimeCursor = Math.max(state.realtimeCursor, Number(realtimeEvent.sequence || event.lastEventId || 0)); } catch (_) {}
     if (document.hidden && realtimeEvent?.actor_id !== state.data?.user?.id && "Notification" in window && Notification.permission === "granted") {
-      const labels = { "message.created": "TA 发来了一条新消息", "presence.changed": "TA 更新了此刻状态", "date_vote.updated": "约会计划有了新投票", "weekly_review.answered": "TA 写好了本周回顾", "call.invited": "TA 正在呼叫你" };
+      const peerName = partnerNickname("TA");
+      const labels = { "message.created": `${peerName}发来了一条新消息`, "presence.changed": `${peerName}更新了此刻状态`, "date_vote.updated": "约会计划有了新投票", "weekly_review.answered": `${peerName}写好了本周回顾`, "call.invited": `${peerName}正在呼叫你` };
       if (labels[realtimeEvent?.event_type] && realtimeEvent.event_type !== "call.invited") new Notification("恋屿", { body: labels[realtimeEvent.event_type], icon: "/static/assets/love-moments-icon-192.png", tag: realtimeEvent.event_type });
     }
     if (realtimeEvent?.event_type?.startsWith("call.")) {
@@ -5058,6 +5128,7 @@ async function initializeRealtime(userId, generation, signal) {
     }
     if (["meals.updated", "kitchen.updated"].includes(realtimeEvent?.event_type)) loadMeals({ quiet: true }).catch(() => {});
     if (realtimeEvent?.event_type === "play.updated" && state.playTool === "wheel") loadCoupleWheel({ quiet: true }).catch(() => {});
+    if (realtimeEvent?.event_type === "play.updated" && state.playTool === "cards") loadCoupleCards({ quiet: true }).catch(() => {});
     if (realtimeEvent?.event_type === "trip.tools_updated" && realtimeEvent?.payload?.resource === "trip_expense"
         && realtimeEvent.resource_id === state.data?.trip?.id && state.tripSection === "tools" && state.tripToolSection === "expenses") {
       loadTripExpenses({ quiet: true }).catch(() => {});
@@ -5108,6 +5179,7 @@ function renderEntryNotice(entry) {
 }
 
 function showAccountAuth(mode = "login") {
+  clearThemeArtwork();
   if (mode === "register" && !state.registrationEnabled) mode = "login";
   state.authMode = mode;
   const gate = document.getElementById("authGate");
@@ -5119,7 +5191,7 @@ function showAccountAuth(mode = "login") {
   document.querySelectorAll('[data-auth-mode="register"]').forEach(btn => { btn.hidden = !state.registrationEnabled; });
   const registrationNote = document.getElementById("registrationNote");
   if (registrationNote) registrationNote.textContent = state.registrationEnabled
-    ? "请使用你们各自注册的账号登录。注册时填写的昵称，会成为你在情侣空间里的名字和头像文字。"
+    ? "注册只需要账号和密码。昵称和头像可以登录后在个人设置中修改。"
     : "这座恋屿已经关闭公开注册，请使用现有的两个账号登录。需要更换账号时，由管理员临时开启注册。";
   document.getElementById("authSubmit").textContent = mode === "register" ? "创建恋屿账号" : "登录";
   document.getElementById("authPassword").autocomplete = mode === "register" ? "new-password" : "current-password";
@@ -5236,7 +5308,7 @@ function renderSharedDetail(detail) {
   document.getElementById("sharedDetailContent").innerHTML = `${media}<h2 id="sharedDetailTitle">${escapeHtml(detail.title)}</h2>${provenance}${detail.summary ? `<p class="shared-detail-summary">${escapeHtml(detail.summary)}</p>` : `<p class="shared-detail-summary">双方可以在下方继续补充想法。</p>`}${transcript}${fields ? `<div class="shared-detail-fields">${fields}</div>` : ""}${actions}`;
   document.getElementById("sharedCommentCount").textContent = `${Number(detail.comment_count || 0)} 条`;
   const comments = detail.comments || [];
-  document.getElementById("sharedCommentList").innerHTML = comments.length ? comments.map(comment => `<article class="shared-comment"><span class="shared-comment-avatar">${escapeHtml(comment.avatar_label || comment.author_name?.slice(0, 1) || "♡")}</span><div><strong>${escapeHtml(comment.author_name)}</strong><small>${new Date(comment.created_at).toLocaleString("zh-CN")}</small><p>${escapeHtml(comment.body)}</p></div>${comment.mine ? `<button data-action="delete-shared-comment" data-id="${escapeHtml(comment.id)}" data-version="${comment.version}" aria-label="删除我的评论">删除</button>` : ""}</article>`).join("") : `<div class="shared-comment-empty">还没有评论。写下第一句话后，对方登录即可看到。</div>`;
+  document.getElementById("sharedCommentList").innerHTML = comments.length ? comments.map(comment => `<article class="shared-comment"><span class="shared-comment-avatar">${escapeHtml(comment.avatar_label || comment.author_name?.slice(0, 1) || "♡")}</span><div><strong>${escapeHtml(comment.author_name)}</strong><small>${new Date(comment.created_at).toLocaleString("zh-CN")}</small><p>${escapeHtml(comment.body)}</p></div>${comment.mine ? `<button data-action="delete-shared-comment" data-id="${escapeHtml(comment.id)}" data-version="${comment.version}" aria-label="删除我的评论">删除</button>` : ""}</article>`).join("") : `<div class="shared-comment-empty">还没有评论。写下第一句话后，${escapeHtml(partnerNickname())}登录即可看到。</div>`;
 }
 
 async function openSharedDetail(resourceType, resourceId, { refresh = false } = {}) {
@@ -5575,18 +5647,18 @@ async function createShengwangCall() {
       setTimeout(updateShengwangAudioDiagnostics, 1200);
       setTimeout(updateShengwangAudioDiagnostics, 3000);
     } catch (_) {
-      document.getElementById("callStatus").textContent = "已连接 · 点一下页面即可播放对方声音";
+      document.getElementById("callStatus").textContent = `已连接 · 点一下页面即可播放${partnerNickname()}的声音`;
     }
   });
   client.on("user-unpublished", user => {
     if (state.agoraRemoteTrack && user.audioTrack === state.agoraRemoteTrack) {
       state.agoraRemoteTrack.stop?.();
       state.agoraRemoteTrack = null;
-      document.getElementById("callStatus").textContent = "对方音频已暂停";
+      document.getElementById("callStatus").textContent = `${partnerNickname()}的音频已暂停`;
     }
   });
   client.on("user-left", () => {
-    document.getElementById("callStatus").textContent = "对方已离开 · 等待通话记录同步";
+    document.getElementById("callStatus").textContent = `${partnerNickname()}已离开 · 等待通话记录同步`;
   });
   client.on("connection-state-change", current => {
     if (current === "RECONNECTING") document.getElementById("callStatus").textContent = "网络波动 · 声网正在重连";
@@ -5603,8 +5675,8 @@ async function createShengwangCall() {
   await client.join(credentials.appId, credentials.channel, credentials.token, credentials.uid);
   await client.publish([localTrack]);
   document.getElementById("callStatus").textContent = state.callRecord?.state === "connected"
-    ? "已接通 · 等待对方音频…"
-    : "正在呼叫，等待 TA 接听…";
+    ? `已接通 · 等待${partnerNickname()}的音频…`
+    : `正在呼叫，等待${partnerNickname("TA")}接听…`;
 }
 
 let agoraSdkPromise = null;
@@ -5652,7 +5724,7 @@ async function createCallPeer() {
     const audio = document.getElementById("remoteCallAudio");
     audio.srcObject = event.streams[0] || new MediaStream([event.track]);
     audio.dataset.remoteTrack = event.track?.readyState || "received";
-    audio.play().catch(() => { document.getElementById("callStatus").textContent = "已连接 · 点一下页面即可播放对方声音"; });
+    audio.play().catch(() => { document.getElementById("callStatus").textContent = `已连接 · 点一下页面即可播放${partnerNickname()}的声音`; });
   };
   peer.onconnectionstatechange = async () => {
     if (peer.connectionState === "connected") {
@@ -5733,7 +5805,7 @@ async function showIncomingCall(record) {
   if (!record || (state.callId && state.callId !== record.id)) return;
   showCallScreen(record, true);
   if (document.hidden && !state.pushSubscribed && "Notification" in window && Notification.permission === "granted") {
-    new Notification("恋屿语音来电", { body: "对方正在呼叫你，点击进入恋屿接听。", icon: "/static/assets/love-moments-icon-192.png", tag: `call:${record.id}` });
+    new Notification("恋屿语音来电", { body: `${partnerNickname()}正在呼叫你，点击进入恋屿接听。`, icon: "/static/assets/love-moments-icon-192.png", tag: `call:${record.id}` });
   }
 }
 
@@ -5778,12 +5850,13 @@ async function handleCallRealtime(event) {
     const active = await api("/api/v1/calls/active");
     if (active.call) state.callRecord = active.call;
     startCallTimer(new Date(state.callRecord?.answered_at || Date.now()).getTime());
-    document.getElementById("callStatus").textContent = state.callProvider === "shengwang" ? "对方已接听 · 等待对方音频…" : "对方已接听 · 正在协商音频…";
+    document.getElementById("callStatus").textContent = state.callProvider === "shengwang" ? `${partnerNickname()}已接听 · 等待音频…` : `${partnerNickname()}已接听 · 正在协商音频…`;
     if (state.callProvider === "webrtc") await processCallSignals();
   } else if (event.event_type === "call.signal") {
     if (state.callProvider === "webrtc") await processCallSignals();
   } else if (["call.rejected", "call.cancelled", "call.ended", "call.missed"].includes(event.event_type) && event.actor_id !== state.data?.user?.id) {
-    const labels = { "call.rejected": "对方拒绝了通话", "call.cancelled": "对方取消了通话", "call.ended": "对方已挂断", "call.missed": "通话无人接听" };
+    const peerName = partnerNickname();
+    const labels = { "call.rejected": `${peerName}拒绝了通话`, "call.cancelled": `${peerName}取消了通话`, "call.ended": `${peerName}已挂断`, "call.missed": "通话无人接听" };
     closeCallScreen(labels[event.event_type]);
     loadBootstrap({ quiet: true });
   }
@@ -6001,55 +6074,181 @@ window.addEventListener("pageshow", () => { if (state.cooking.session) refreshCo
 window.addEventListener("focus", () => { if (state.cooking.session) refreshCookingSession().catch(() => {}); });
 
 const BEAD_STORAGE_KEY = "love-bead-patterns";
+
 function filterEntertainmentFeatures(query = "") {
-  const normalized = String(query).trim().toLocaleLowerCase("zh-CN"); let visible = 0;
-  document.querySelectorAll("[data-play-feature]").forEach(card => { const matches = !normalized || String(card.dataset.playSearch || card.textContent).toLocaleLowerCase("zh-CN").includes(normalized); card.hidden = !matches; if (matches) visible += 1; });
+  const normalized = String(query).trim().toLocaleLowerCase("zh-CN");
+  let visible = 0;
+  document.querySelectorAll("[data-play-feature]").forEach(card => {
+    const matches = !normalized || String(card.dataset.playSearch || card.textContent).toLocaleLowerCase("zh-CN").includes(normalized);
+    card.hidden = !matches; if (matches) visible += 1;
+  });
   const empty = document.getElementById("playSearchEmpty"); if (empty) empty.hidden = visible > 0;
   const clear = document.querySelector('[data-action="clear-play-search"]'); if (clear) clear.hidden = !normalized;
 }
+
 function showEntertainmentHub({ focusSearch = false } = {}) {
-  state.playTool = ""; document.getElementById("playHubPanel").hidden = false;
+  state.playTool = "";
+  document.getElementById("playHubPanel").hidden = false;
   document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = true; });
-  const search = document.getElementById("playSearch"); filterEntertainmentFeatures(search?.value || ""); if (focusSearch) search?.focus();
+  const search = document.getElementById("playSearch"); filterEntertainmentFeatures(search?.value || "");
+  if (focusSearch) search?.focus();
 }
+
 function openEntertainmentTool(tool) {
-  if (!["beads", "wheel"].includes(tool)) { toast("这个娱乐功能还没有开放"); return; }
-  state.playTool = tool; document.getElementById("playHubPanel").hidden = true;
-  document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== (tool === "beads" ? "beadToolPanel" : "wheelToolPanel"); });
+  if (!["beads", "wheel", "cards"].includes(tool)) { toast("这个娱乐功能还没有开放"); return; }
+  state.playTool = tool;
+  document.getElementById("playHubPanel").hidden = true;
+  const panelId = { beads: "beadToolPanel", wheel: "wheelToolPanel", cards: "cardToolPanel" }[tool];
+  document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== panelId; });
   if (tool === "beads") renderSavedBeadPatterns();
-  else loadCoupleWheel().catch(error => toast(error.message));
-  window.scrollTo({ top: 0, behavior: "smooth" }); document.querySelector(".phone-shell")?.scrollTo({ top: 0, behavior: "smooth" });
+  else if (tool === "wheel") loadCoupleWheel().catch(error => toast(error.message));
+  else loadCoupleCards().catch(error => toast(error.message));
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  document.querySelector(".phone-shell")?.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 const WHEEL_COLORS = ["#d52f62", "#f7a7bf", "#fff0f4", "#9f294d", "#ffd4df", "#f27c9e", "#fff8f3", "#c25373"];
-function wheelActiveOptions() { return (state.wheel.data?.options || []).filter(option => state.wheel.selected.has(option.id)); }
+
+function wheelActiveOptions() {
+  return (state.wheel.data?.options || []).filter(option => state.wheel.selected.has(option.id));
+}
+
 function renderCoupleWheel() {
-  const data = state.wheel.data, list = document.getElementById("wheelOptionList"), history = document.getElementById("wheelHistory"), wheel = document.getElementById("coupleWheel");
+  const data = state.wheel.data;
+  const list = document.getElementById("wheelOptionList");
+  const history = document.getElementById("wheelHistory");
+  const wheel = document.getElementById("coupleWheel");
   if (!list || !history || !wheel) return;
-  document.querySelectorAll("[data-wheel-mode]").forEach(button => { const active = button.dataset.wheelMode === state.wheel.mode; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); });
+  document.querySelectorAll("[data-wheel-mode]").forEach(button => {
+    const active = button.dataset.wheelMode === state.wheel.mode;
+    button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active));
+  });
   document.getElementById("wheelConsentNotice").textContent = data?.consent_notice || "任何结果都可以跳过。";
   const options = data?.options || [];
-  list.innerHTML = options.length ? options.map(option => `<label class="wheel-option${option.preset ? " preset" : " custom"}"><input type="checkbox" data-wheel-option="${escapeHtml(option.id)}" ${state.wheel.selected.has(option.id) ? "checked" : ""}><span><strong>${escapeHtml(option.label)}</strong><small>${option.preset ? "内置选项" : "双方自定义"}</small></span>${option.preset ? "" : `<span class="wheel-option-actions"><button type="button" data-action="edit-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}">编辑</button><button type="button" data-action="delete-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}">删除</button></span>`}</label>`).join("") : '<div class="empty-view"><p>还没有可用选项。</p></div>';
+  list.innerHTML = options.length ? options.map(option => `
+    <label class="wheel-option${option.preset ? " preset" : " custom"}">
+      <input type="checkbox" data-wheel-option="${escapeHtml(option.id)}" ${state.wheel.selected.has(option.id) ? "checked" : ""}>
+      <span><strong>${escapeHtml(option.label)}</strong><small>${option.preset ? "内置选项" : "双方自定义"}</small></span>
+      ${option.preset ? "" : `<span class="wheel-option-actions"><button type="button" data-action="edit-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}" aria-label="编辑${escapeHtml(option.label)}">编辑</button><button type="button" data-action="delete-wheel-option" data-id="${escapeHtml(option.id)}" data-version="${option.version}" aria-label="删除${escapeHtml(option.label)}">删除</button></span>`}
+    </label>`).join("") : '<div class="empty-view"><p>还没有可用选项。</p></div>';
   history.innerHTML = data?.history?.length ? data.history.map(item => `<div class="wheel-history-item"><span>♡</span><div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.spun_by_name)} · ${escapeHtml(new Date(item.spun_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</small></div></div>`).join("") : '<div class="empty-view"><p>还没有转动记录。</p></div>';
-  const active = wheelActiveOptions(), count = Math.max(active.length, 1);
-  wheel.style.background = `conic-gradient(from -90deg, ${Array.from({ length: count }, (_, index) => `${WHEEL_COLORS[index % WHEEL_COLORS.length]} ${(index * 100 / count).toFixed(2)}% ${((index + 1) * 100 / count).toFixed(2)}%`).join(",")})`;
-  wheel.style.transform = `rotate(${state.wheel.rotation}deg)`; wheel.setAttribute("aria-label", active.length ? `当前有${active.length}个可转选项` : "还没有选择转盘选项");
-  const spin = document.querySelector('[data-action="spin-couple-wheel"]'); if (spin) { spin.disabled = state.wheel.spinning || active.length < 2; spin.textContent = state.wheel.spinning ? "正在转…" : "转动转盘"; }
+  const active = wheelActiveOptions();
+  const count = Math.max(active.length, 1);
+  const segments = Array.from({ length: count }, (_, index) => `${WHEEL_COLORS[index % WHEEL_COLORS.length]} ${(index * 100 / count).toFixed(2)}% ${((index + 1) * 100 / count).toFixed(2)}%`);
+  wheel.style.background = `conic-gradient(from -90deg, ${segments.join(",")})`;
+  wheel.style.transform = `rotate(${state.wheel.rotation}deg)`;
+  wheel.setAttribute("aria-label", active.length ? `当前有${active.length}个可转选项` : "还没有选择转盘选项");
+  const spin = document.querySelector('[data-action="spin-couple-wheel"]');
+  if (spin) { spin.disabled = state.wheel.spinning || active.length < 2; spin.textContent = state.wheel.spinning ? "正在转…" : "转动转盘"; }
 }
+
 async function loadCoupleWheel({ quiet = false } = {}) {
-  const sequence = ++state.wheel.requestSequence; state.wheel.loading = true;
-  try { const data = await api(`/api/v1/entertainment/wheel?mode=${encodeURIComponent(state.wheel.mode)}`); if (sequence !== state.wheel.requestSequence) return; const prior = state.wheel.selected; state.wheel.data = data; state.wheel.selected = new Set(data.options.filter(option => prior.size ? prior.has(option.id) : true).map(option => option.id)); if (state.wheel.selected.size < 2) state.wheel.selected = new Set(data.options.map(option => option.id)); renderCoupleWheel(); }
-  catch (error) { if (!quiet) throw error; } finally { if (sequence === state.wheel.requestSequence) state.wheel.loading = false; }
+  const sequence = ++state.wheel.requestSequence;
+  state.wheel.loading = true;
+  try {
+    const data = await api(`/api/v1/entertainment/wheel?mode=${encodeURIComponent(state.wheel.mode)}`);
+    if (sequence !== state.wheel.requestSequence) return;
+    const prior = state.wheel.selected;
+    state.wheel.data = data;
+    state.wheel.selected = new Set(data.options.filter(option => prior.size ? prior.has(option.id) : true).map(option => option.id));
+    if (state.wheel.selected.size < 2) state.wheel.selected = new Set(data.options.map(option => option.id));
+    renderCoupleWheel();
+  } catch (error) {
+    if (!quiet) throw error;
+  } finally { if (sequence === state.wheel.requestSequence) state.wheel.loading = false; }
 }
+
 async function spinCoupleWheel() {
-  if (state.wheel.spinning) return; const options = wheelActiveOptions(); if (options.length < 2) { toast("请至少选择两个转盘选项"); return; }
+  if (state.wheel.spinning) return;
+  const options = wheelActiveOptions();
+  if (options.length < 2) { toast("请至少选择两个转盘选项"); return; }
   state.wheel.spinning = true; renderCoupleWheel();
-  try { const result = await api("/api/v1/entertainment/wheel/spin", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, option_ids: options.map(item => item.id) }) }); const index = Math.max(0, options.findIndex(item => item.id === result.option_id)), segment = 360 / options.length, target = 360 - (index * segment + segment / 2); state.wheel.rotation += 1440 + ((target - state.wheel.rotation % 360 + 360) % 360); const wheel = document.getElementById("coupleWheel"); wheel.style.transform = `rotate(${state.wheel.rotation}deg)`; await new Promise(resolve => setTimeout(resolve, matchMedia("(prefers-reduced-motion: reduce)").matches ? 20 : 2500)); document.getElementById("wheelResult").innerHTML = `<small>${escapeHtml(result.spun_by_name)} 转到了</small><strong>${escapeHtml(result.label)}</strong><button type="button" class="quiet" data-action="skip-wheel-result">不合适，跳过再转</button>`; if (state.wheel.data) { state.wheel.data.history = [result, ...(state.wheel.data.history || []).filter(item => item.id !== result.id)].slice(0, 8); renderCoupleWheel(); } loadCoupleWheel({ quiet: true }).catch(() => {}); }
-  finally { state.wheel.spinning = false; renderCoupleWheel(); }
+  try {
+    const result = await api("/api/v1/entertainment/wheel/spin", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, option_ids: options.map(item => item.id) }) });
+    const index = Math.max(0, options.findIndex(item => item.id === result.option_id));
+    const segment = 360 / options.length;
+    const target = 360 - (index * segment + segment / 2);
+    state.wheel.rotation += 1440 + ((target - state.wheel.rotation % 360 + 360) % 360);
+    const wheel = document.getElementById("coupleWheel");
+    wheel.style.transform = `rotate(${state.wheel.rotation}deg)`;
+    const wait = matchMedia("(prefers-reduced-motion: reduce)").matches ? 20 : 2500;
+    await new Promise(resolve => setTimeout(resolve, wait));
+    document.getElementById("wheelResult").innerHTML = `<small>${escapeHtml(result.spun_by_name)} 转到了</small><strong>${escapeHtml(result.label)}</strong><button type="button" class="quiet" data-action="skip-wheel-result">不合适，跳过再转</button>`;
+    if (state.wheel.data) {
+      state.wheel.data.history = [result, ...(state.wheel.data.history || []).filter(item => item.id !== result.id)].slice(0, 8);
+      renderCoupleWheel();
+    }
+    loadCoupleWheel({ quiet: true }).catch(() => {});
+  } finally { state.wheel.spinning = false; renderCoupleWheel(); }
 }
-const beadHex = color => `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
-// Generic colour families avoid claiming that different bead brands use one
-// universal numbering scheme. Expanded colours always include a common fallback.
+
+function applyCardVisual(node, style = {}) {
+  if (!node) return;
+  node.style.setProperty("--card-paper", style.paper || "#fff4f7");
+  node.style.setProperty("--card-accent", style.accent || "#c93465");
+  node.style.setProperty("--card-ink", style.ink || "#3e2830");
+  const sticker = node.matches(".card-kitty-sticker") ? node : node.querySelector(".card-kitty-sticker");
+  if (!sticker) return;
+  const index = Number(style.sticker_index || 0), sheet = Math.max(1, Math.min(4, Math.floor(index / 6) + 1)), local = Math.max(0, Math.min(5, index % 6));
+  sticker.style.backgroundImage = `url("/api/v1/theme-assets/kitty-couple-cards-${sheet}-v2.webp")`;
+  sticker.style.backgroundSize = "300% 200%";
+  sticker.style.backgroundPosition = `${(local % 3) * 50}% ${Math.floor(local / 3) * 100}%`;
+}
+function applyRenderedCardStyles(root = document) {
+  const styles = new Map((state.cards.data?.styles || []).map(item => [item.id, item]));
+  root.querySelectorAll("[data-card-style-id]").forEach(node => applyCardVisual(node, styles.get(node.dataset.cardStyleId) || {}));
+}
+function coupleCardFace({ style = {}, title = "双人卡", message = "", eyebrow = "LOVE MOMENTS · 双人珍藏", status = "等待双方签名", serial = "PREVIEW" } = {}) {
+  const pattern = String(style.pattern || "letter").replace(/[^a-z_]/g, "");
+  return `<div class="signed-card-face" data-card-pattern="${escapeHtml(pattern)}" data-card-style-id="${escapeHtml(style.id || "wish")}"><span class="card-foil-corner" aria-hidden="true">✦</span><span class="card-kitty-sticker" aria-hidden="true">♡</span><header class="card-certificate-head"><small>${escapeHtml(eyebrow)}</small><em>NO. ${escapeHtml(serial)}</em></header><div class="card-ribbon">OUR LITTLE PROMISE</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p><footer class="card-certificate-foot"><b>${escapeHtml(status)}</b><span>♡ 由我们共同签署与珍藏</span></footer></div>`;
+}
+function selectedCardTemplate() { return state.cards.data?.templates?.find(item => item.id === state.cards.templateId); }
+function selectedCardStyle() { return state.cards.data?.styles?.find(item => item.id === state.cards.styleId); }
+function renderCoupleCards() {
+  const data = state.cards.data; if (!data) return;
+  const templates = document.getElementById("cardTemplateGrid"), styles = document.getElementById("cardStyleGrid"), list = document.getElementById("coupleCardList");
+  templates.innerHTML = data.templates.map(item => `<button type="button" class="card-template-choice${item.id === state.cards.templateId ? " active" : ""}" data-card-template="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.prompt)}</small></button>`).join("");
+  styles.innerHTML = data.styles.map(item => `<button type="button" class="card-style-choice${item.id === state.cards.styleId ? " active" : ""}" data-card-style="${escapeHtml(item.id)}" data-card-style-id="${escapeHtml(item.id)}"><span class="card-kitty-sticker" aria-hidden="true">♡</span><strong>${escapeHtml(item.name)}</strong><small>${item.family === "girl" ? "女生系" : item.family === "boy" ? "男生系" : "中性系"}</small></button>`).join("");
+  const template = selectedCardTemplate(), style = selectedCardStyle();
+  document.getElementById("customCardTitleField").hidden = state.cards.templateId !== "custom";
+  const message = document.getElementById("coupleCardMessage"); if (!message.dataset.edited) message.value = template?.prompt || "";
+  document.getElementById("cardLivePreview").innerHTML = coupleCardFace({ style, eyebrow: style?.name || "Kitty 卡面", title: state.cards.templateId === "custom" ? document.getElementById("customCardTitle").value || "自定义卡" : template?.name || "双人卡", message: message.value || template?.prompt || "" });
+  document.getElementById("cardPendingCount").textContent = data.pending_for_me ? `${data.pending_for_me} 张待我签` : "";
+  list.innerHTML = data.cards.length ? data.cards.map(card => `<article class="saved-couple-card">${coupleCardFace({ style: card.style, eyebrow: card.style_name, title: card.title, message: card.message, status: card.status === "signed" ? "双方已签名 · 永久收藏" : card.can_sign ? "等待我签名" : "等待 TA 签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<div class="saved-card-meta"><span>${escapeHtml(card.creator_name)} → ${escapeHtml(card.recipient_name)}</span><span>${escapeHtml(new Date(card.created_at).toLocaleString("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }))}</span></div><p class="card-safety-note">${escapeHtml(card.template_notice)}</p><div class="saved-card-actions">${card.can_sign ? `<button type="button" class="primary-button" data-action="open-card-sign" data-id="${escapeHtml(card.id)}">查看并签名</button>` : ""}${card.can_download ? `<a class="secondary-button" href="/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/pdf" download>下载珍藏版 PDF</a>` : ""}</div></article>`).join("") : '<div class="empty-view"><p>制作第一张卡，等 TA 签名后就能永久收藏。</p></div>';
+  applyRenderedCardStyles(document.getElementById("cardToolPanel"));
+}
+async function loadCoupleCards({ quiet = false } = {}) {
+  try { state.cards.data = await api("/api/v1/entertainment/cards"); if (!state.cards.data.styles.some(item => item.id === state.cards.styleId)) state.cards.styleId = state.cards.data.styles[0]?.id || "wish"; const name = document.getElementById("cardCreatorSignatureName"); if (name && !name.value) name.value = state.data?.user?.nickname || ""; renderCoupleCards(); prepareSignatureCanvas("creator"); }
+  catch (error) { if (!quiet) throw error; }
+}
+function signatureState(kind) { return kind === "recipient" ? state.cards.recipientSignature : state.cards.creatorSignature; }
+function renderSignature(kind) {
+  const canvas = document.getElementById(kind === "recipient" ? "cardRecipientSignature" : "cardCreatorSignature"); if (!canvas) return;
+  const context = canvas.getContext("2d"); context.clearRect(0, 0, canvas.width, canvas.height); context.strokeStyle = "#8b2941"; context.lineWidth = 5; context.lineCap = "round"; context.lineJoin = "round";
+  signatureState(kind).forEach(stroke => { context.beginPath(); stroke.forEach(([x,y], index) => index ? context.lineTo(x * canvas.width, y * canvas.height) : context.moveTo(x * canvas.width, y * canvas.height)); context.stroke(); });
+}
+function prepareSignatureCanvas(kind) {
+  const canvas = document.getElementById(kind === "recipient" ? "cardRecipientSignature" : "cardCreatorSignature"); if (!canvas || canvas.dataset.ready) { renderSignature(kind); return; }
+  canvas.dataset.ready = "1"; let drawing = false;
+  const point = event => { const bounds = canvas.getBoundingClientRect(); return [Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)), Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height))]; };
+  canvas.addEventListener("pointerdown", event => { drawing = true; try { canvas.setPointerCapture(event.pointerId); } catch (_) { /* Older iOS and synthetic touch events can draw without pointer capture. */ } signatureState(kind).push([point(event)]); renderSignature(kind); });
+  canvas.addEventListener("pointermove", event => { if (!drawing) return; signatureState(kind).at(-1).push(point(event)); renderSignature(kind); });
+  const stop = () => { drawing = false; }; canvas.addEventListener("pointerup", stop); canvas.addEventListener("pointercancel", stop); canvas.addEventListener("pointerleave", stop); renderSignature(kind);
+}
+function openCardSign(cardId) {
+  const card = state.cards.data?.cards?.find(item => item.id === cardId); if (!card?.can_sign) { toast("这张卡当前不需要你签名"); return; }
+  state.cards.signingId = cardId; state.cards.recipientSignature = [];
+  document.getElementById("cardSignSummary").innerHTML = `${coupleCardFace({ style: card.style, eyebrow: `${card.creator_name} 发给你`, title: card.title, message: card.message, status: "等待你的珍贵签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<p class="card-safety-note">${escapeHtml(card.template_notice)}</p>`;
+  applyCardVisual(document.querySelector("#cardSignSummary .signed-card-face"), card.style);
+  document.getElementById("cardRecipientSignatureName").value = state.data?.user?.nickname || ""; document.getElementById("cardRecipientConfirmed").checked = false; openModal("coupleCardSignModal"); requestAnimationFrame(() => prepareSignatureCanvas("recipient"));
+}
+
+function beadHex(color) {
+  return `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+// Generic colour families avoid pretending that different bead brands share
+// one number system. Expanded colours remain usable and get a common fallback.
 const BEAD_COLOR_CATALOG = [
   ["W01", "瓷白", "FFFDF7", 1], ["W02", "奶油白", "F4E8D5", 1], ["N01", "黑色", "211D1D", 1], ["N02", "深灰", "4A4648", 1], ["N03", "中灰", "7D797B", 1], ["N04", "浅灰", "B9B5B2", 1],
   ["B01", "深咖", "3A241F", 1], ["B02", "咖啡", "674238", 1], ["B03", "棕色", "8B5D4B", 1], ["B04", "焦糖", "B77A51", 1], ["B05", "浅驼", "D1A47E", 1], ["B06", "米杏", "E9C9A5", 1],
@@ -6057,68 +6256,341 @@ const BEAD_COLOR_CATALOG = [
   ["R01", "酒红", "7A2637", 1], ["R02", "正红", "C93143", 1], ["R03", "珊瑚红", "EB665F", 1], ["O01", "橙色", "EA7A32", 1], ["O02", "浅橙", "F5A35C", 1],
   ["Y01", "深黄", "D5A51E", 1], ["Y02", "亮黄", "F4D739", 1], ["Y03", "奶黄", "FFF09A", 1],
   ["G01", "墨绿", "244E3D", 1], ["G02", "草绿", "4E8A55", 1], ["G03", "亮绿", "7FBD52", 1], ["G04", "浅绿", "B9DB83", 1], ["G05", "薄荷绿", "A8DCC5", 1],
-  ["C01", "深青", "1E5961", 1], ["C02", "湖蓝", "368E9B", 1], ["C03", "浅青", "85CED3", 1], ["U01", "藏蓝", "273B62", 1], ["U02", "宝蓝", "345FA8", 1], ["U03", "天蓝", "67A7DB", 1], ["U04", "浅蓝", "A9D2ED", 1],
-  ["P01", "深紫", "52335F", 1], ["P02", "紫色", "79538D", 1], ["P03", "浅紫", "B69ACB", 1], ["K01", "玫红", "B93669", 1], ["K02", "粉红", "E77FA4", 1], ["K03", "浅粉", "F3B6CB", 1], ["K04", "樱花粉", "F8D4DF", 1],
-  ["X01", "炭黑", "100E12", 0], ["X02", "蓝灰", "687887", 0], ["X03", "雾灰", "9B9294", 0], ["X04", "烟粉", "B98E94", 0], ["X05", "豆沙", "A85E68", 0], ["X06", "灰紫", "88758E", 0], ["X07", "灰绿", "718678", 0], ["X08", "橄榄绿", "788044", 0],
-  ["X09", "荧光绿", "B7E84B", 0], ["X10", "柠檬黄", "F5EE56", 0], ["X11", "蜜桃", "F2A58D", 0], ["X12", "杏粉", "EBC0AF", 0], ["X13", "冰蓝", "C6E7E8", 0], ["X14", "丁香紫", "CDB9D8", 0], ["X15", "莓紫", "9E4778", 0], ["X16", "砖红", "A84A3F", 0],
+  ["C01", "深青", "1E5961", 1], ["C02", "湖蓝", "368E9B", 1], ["C03", "浅青", "85CED3", 1],
+  ["U01", "藏蓝", "273B62", 1], ["U02", "宝蓝", "345FA8", 1], ["U03", "天蓝", "67A7DB", 1], ["U04", "浅蓝", "A9D2ED", 1],
+  ["P01", "深紫", "52335F", 1], ["P02", "紫色", "79538D", 1], ["P03", "浅紫", "B69ACB", 1],
+  ["K01", "玫红", "B93669", 1], ["K02", "粉红", "E77FA4", 1], ["K03", "浅粉", "F3B6CB", 1], ["K04", "樱花粉", "F8D4DF", 1],
+  ["X01", "炭黑", "100E12", 0], ["X02", "蓝灰", "687887", 0], ["X03", "雾灰", "9B9294", 0], ["X04", "烟粉", "B98E94", 0], ["X05", "豆沙", "A85E68", 0], ["X06", "灰紫", "88758E", 0],
+  ["X07", "灰绿", "718678", 0], ["X08", "橄榄绿", "788044", 0], ["X09", "荧光绿", "B7E84B", 0], ["X10", "柠檬黄", "F5EE56", 0], ["X11", "蜜桃", "F2A58D", 0],
+  ["X12", "杏粉", "EBC0AF", 0], ["X13", "冰蓝", "C6E7E8", 0], ["X14", "丁香紫", "CDB9D8", 0], ["X15", "莓紫", "9E4778", 0], ["X16", "砖红", "A84A3F", 0],
 ].map(([code, name, hex, common]) => ({ code, name, rgb: [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16)), common: Boolean(common) }));
-function beadRgbToLab(color) { const linear = color.map(value => { const next = value / 255; return next <= .04045 ? next / 12.92 : ((next + .055) / 1.055) ** 2.4; }); const x = (linear[0] * .4124 + linear[1] * .3576 + linear[2] * .1805) / .95047, y = linear[0] * .2126 + linear[1] * .7152 + linear[2] * .0722, z = (linear[0] * .0193 + linear[1] * .1192 + linear[2] * .9505) / 1.08883, curve = value => value > .008856 ? Math.cbrt(value) : 7.787 * value + 16 / 116, fx = curve(x), fy = curve(y), fz = curve(z); return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]; }
-function beadLabDistance(first, second) { return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2 + (first[2] - second[2]) ** 2; }
+
+function beadRgbToLab(color) {
+  const linear = color.map(value => { const next = value / 255; return next <= .04045 ? next / 12.92 : ((next + .055) / 1.055) ** 2.4; });
+  const x = (linear[0] * .4124 + linear[1] * .3576 + linear[2] * .1805) / .95047;
+  const y = linear[0] * .2126 + linear[1] * .7152 + linear[2] * .0722;
+  const z = (linear[0] * .0193 + linear[1] * .1192 + linear[2] * .9505) / 1.08883;
+  const curve = value => value > .008856 ? Math.cbrt(value) : 7.787 * value + 16 / 116;
+  const fx = curve(x); const fy = curve(y); const fz = curve(z);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+function beadLabDistance(first, second) {
+  return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2 + (first[2] - second[2]) ** 2;
+}
+
 BEAD_COLOR_CATALOG.forEach(color => { color.lab = beadRgbToLab(color.rgb); });
-function beadCommonSubstitute(color) { return BEAD_COLOR_CATALOG.filter(item => item.common).reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best); }
-function beadPaletteMeta(color, fallbackIndex = 0) { const lab = beadRgbToLab(color), entry = BEAD_COLOR_CATALOG.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best), substitute = entry.common ? null : beadCommonSubstitute(entry); return { code: entry.code || `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: entry.name || "自定义色", common: entry.common, substituteCode: substitute?.code || "", substituteName: substitute?.name || "", substituteRgb: substitute?.rgb || null }; }
-function beadDetailWeights(colors, size, detailMode) { const strength = detailMode === "simple" ? .45 : detailMode === "balanced" ? 1.15 : 2.15, luminance = colors.map(color => .2126 * color[0] + .7152 * color[1] + .0722 * color[2]); return colors.map((_, index) => { const x = index % size, y = Math.floor(index / size), neighbors = []; if (x) neighbors.push(index - 1); if (x + 1 < size) neighbors.push(index + 1); if (y) neighbors.push(index - size); if (y + 1 < size) neighbors.push(index + size); const edge = neighbors.reduce((maximum, other) => Math.max(maximum, Math.abs(luminance[index] - luminance[other])), 0) / 255; return 1 + strength * Math.min(1, edge * 3.2); }); }
-function cleanupBeadIndices(indices, colors, palette, size, detailMode) { if (detailMode === "detail" || size < 8) return indices; let current = [...indices]; const passes = detailMode === "simple" ? 2 : 1; for (let pass = 0; pass < passes; pass += 1) { const next = [...current]; for (let y = 1; y < size - 1; y += 1) for (let x = 1; x < size - 1; x += 1) { const index = y * size + x, neighbors = [index - 1, index + 1, index - size, index + size, index - size - 1, index - size + 1, index + size - 1, index + size + 1], counts = new Map(); neighbors.forEach(other => counts.set(current[other], (counts.get(current[other]) || 0) + 1)); const [majority, amount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]; if (majority === current[index] || amount < (detailMode === "simple" ? 5 : 6)) continue; const lab = beadRgbToLab(colors[index]), ownDistance = beadLabDistance(lab, beadRgbToLab(palette[current[index]])), majorityDistance = beadLabDistance(lab, beadRgbToLab(palette[majority])); if (majorityDistance <= ownDistance * 1.25 + 36) next[index] = majority; } current = next; } return current; }
+
+function beadCommonSubstitute(color) {
+  return BEAD_COLOR_CATALOG.filter(item => item.common).reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best);
+}
+
+function beadPaletteMeta(color, fallbackIndex = 0) {
+  const lab = beadRgbToLab(color);
+  const entry = BEAD_COLOR_CATALOG.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best);
+  const substitute = entry.common ? null : beadCommonSubstitute(entry);
+  return { code: entry.code || `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: entry.name || "自定义色", common: entry.common, substituteCode: substitute?.code || "", substituteName: substitute?.name || "", substituteRgb: substitute?.rgb || null };
+}
+
+function beadDetailWeights(colors, size, detailMode) {
+  const strength = detailMode === "simple" ? .45 : detailMode === "balanced" ? 1.15 : 2.15;
+  const luminance = colors.map(color => .2126 * color[0] + .7152 * color[1] + .0722 * color[2]);
+  return colors.map((_, index) => {
+    const x = index % size; const y = Math.floor(index / size);
+    const neighbors = [];
+    if (x) neighbors.push(index - 1); if (x + 1 < size) neighbors.push(index + 1);
+    if (y) neighbors.push(index - size); if (y + 1 < size) neighbors.push(index + size);
+    const edge = neighbors.reduce((maximum, other) => Math.max(maximum, Math.abs(luminance[index] - luminance[other])), 0) / 255;
+    return 1 + strength * Math.min(1, edge * 3.2);
+  });
+}
+
+function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
+  if (detailMode === "detail" || size < 8) return indices;
+  let current = [...indices];
+  const passes = detailMode === "simple" ? 2 : 1;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = [...current];
+    for (let y = 1; y < size - 1; y += 1) for (let x = 1; x < size - 1; x += 1) {
+      const index = y * size + x;
+      const neighbors = [index - 1, index + 1, index - size, index + size, index - size - 1, index - size + 1, index + size - 1, index + size + 1];
+      const counts = new Map(); neighbors.forEach(other => counts.set(current[other], (counts.get(current[other]) || 0) + 1));
+      const [majority, amount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (majority === current[index] || amount < (detailMode === "simple" ? 5 : 6)) continue;
+      const lab = beadRgbToLab(colors[index]);
+      const ownDistance = beadLabDistance(lab, beadRgbToLab(palette[current[index]]));
+      const majorityDistance = beadLabDistance(lab, beadRgbToLab(palette[majority]));
+      if (majorityDistance <= ownDistance * 1.25 + 36) next[index] = majority;
+    }
+    current = next;
+  }
+  return current;
+}
+
 function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqrt(pixels.length / 4)), detailMode = "detail" } = {}) {
   const colors = [];
-  for (let index = 0; index < pixels.length; index += 4) { const alpha = pixels[index + 3] / 255; colors.push([pixels[index], pixels[index + 1], pixels[index + 2]].map(value => Math.round(value * alpha + 255 * (1 - alpha)))); }
-  const labs = colors.map(beadRgbToLab), weights = beadDetailWeights(colors, size, detailMode), count = Math.max(1, Math.min(Number(requestedCount) || 12, BEAD_COLOR_CATALOG.length)), distances = BEAD_COLOR_CATALOG.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab))), selected = []; let bestDistances = new Array(colors.length).fill(Infinity); const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  while (selected.length < count) { let bestCandidate = -1, bestCost = Infinity; BEAD_COLOR_CATALOG.forEach((candidate, candidateIndex) => { if (selected.includes(candidateIndex)) return; let cost = candidate.common ? 0 : totalWeight * 4; for (let pixel = 0; pixel < colors.length; pixel += 1) cost += weights[pixel] * Math.min(bestDistances[pixel], distances[candidateIndex][pixel]); if (cost < bestCost) { bestCost = cost; bestCandidate = candidateIndex; } }); if (bestCandidate < 0) break; selected.push(bestCandidate); bestDistances = bestDistances.map((distance, pixel) => Math.min(distance, distances[bestCandidate][pixel])); }
-  let indices = labs.map((_, pixel) => selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0)), palette = selected.map(index => [...BEAD_COLOR_CATALOG[index].rgb]); indices = cleanupBeadIndices(indices, colors, palette, size, detailMode); const used = [...new Set(indices)], remap = new Map(used.map((oldIndex, newIndex) => [oldIndex, newIndex])); palette = used.map(index => palette[index]); const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(BEAD_COLOR_CATALOG[selected[index]].rgb, paletteIndex)); return { palette, paletteMeta, indices: indices.map(index => remap.get(index)) };
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3] / 255;
+    colors.push([pixels[index], pixels[index + 1], pixels[index + 2]].map(value => Math.round(value * alpha + 255 * (1 - alpha))));
+  }
+  const labs = colors.map(beadRgbToLab);
+  const weights = beadDetailWeights(colors, size, detailMode);
+  const count = Math.max(1, Math.min(Number(requestedCount) || 12, BEAD_COLOR_CATALOG.length));
+  const distances = BEAD_COLOR_CATALOG.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
+  const selected = [];
+  let bestDistances = new Array(colors.length).fill(Infinity);
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  while (selected.length < count) {
+    let bestCandidate = -1; let bestCost = Infinity;
+    BEAD_COLOR_CATALOG.forEach((candidate, candidateIndex) => {
+      if (selected.includes(candidateIndex)) return;
+      let cost = candidate.common ? 0 : totalWeight * 4;
+      for (let pixel = 0; pixel < colors.length; pixel += 1) cost += weights[pixel] * Math.min(bestDistances[pixel], distances[candidateIndex][pixel]);
+      if (cost < bestCost) { bestCost = cost; bestCandidate = candidateIndex; }
+    });
+    if (bestCandidate < 0) break;
+    selected.push(bestCandidate);
+    bestDistances = bestDistances.map((distance, pixel) => Math.min(distance, distances[bestCandidate][pixel]));
+  }
+  let indices = labs.map((_, pixel) => selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0));
+  let palette = selected.map(index => [...BEAD_COLOR_CATALOG[index].rgb]);
+  indices = cleanupBeadIndices(indices, colors, palette, size, detailMode);
+  const used = [...new Set(indices)];
+  const remap = new Map(used.map((oldIndex, newIndex) => [oldIndex, newIndex]));
+  palette = used.map(index => palette[index]);
+  const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(BEAD_COLOR_CATALOG[selected[index]].rgb, paletteIndex));
+  return { palette, paletteMeta, indices: indices.map(index => remap.get(index)) };
 }
+
 function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}) {
-  const canvas = document.createElement("canvas"); canvas.width = size; canvas.height = size;
-  const context = canvas.getContext("2d", { willReadFrequently: true }); context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.fillStyle = "#fff"; context.fillRect(0, 0, size, size);
-  context.filter = detailMode === "detail" ? "contrast(1.08) saturate(1.06)" : detailMode === "simple" ? "contrast(.96) saturate(.92)" : "none"; let scale = cropMode === "contain" ? Math.min(size / image.naturalWidth, size / image.naturalHeight) : Math.max(size / image.naturalWidth, size / image.naturalHeight); if (cropMode !== "contain") scale *= Math.max(1, Number(crop.zoom) || 1);
-  const width = image.naturalWidth * scale, height = image.naturalHeight * scale, rawFocusX = Number(crop.x), rawFocusY = Number(crop.y), focusX = Math.max(0, Math.min(1, Number.isFinite(rawFocusX) ? rawFocusX : .5)), focusY = Math.max(0, Math.min(1, Number.isFinite(rawFocusY) ? rawFocusY : .5)), left = cropMode === "contain" ? (size - width) / 2 : Math.min(0, Math.max(size - width, size / 2 - focusX * width)), top = cropMode === "contain" ? (size - height) / 2 : Math.min(0, Math.max(size - height, size / 2 - focusY * height)); context.drawImage(image, left, top, width, height); context.filter = "none";
+  const canvas = document.createElement("canvas");
+  canvas.width = size; canvas.height = size;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.fillStyle = "#ffffff"; context.fillRect(0, 0, size, size);
+  context.filter = detailMode === "detail" ? "contrast(1.08) saturate(1.06)" : detailMode === "simple" ? "contrast(.96) saturate(.92)" : "none";
+  let scale = cropMode === "contain"
+    ? Math.min(size / image.naturalWidth, size / image.naturalHeight)
+    : Math.max(size / image.naturalWidth, size / image.naturalHeight);
+  if (cropMode !== "contain") scale *= Math.max(1, Number(crop.zoom) || 1);
+  const width = image.naturalWidth * scale;
+  const height = image.naturalHeight * scale;
+  const focusX = Math.max(0, Math.min(1, Number(crop.x) || .5));
+  const focusY = Math.max(0, Math.min(1, Number(crop.y) || .5));
+  const left = cropMode === "contain" ? (size - width) / 2 : Math.min(0, Math.max(size - width, size / 2 - focusX * width));
+  const top = cropMode === "contain" ? (size - height) / 2 : Math.min(0, Math.max(size - height, size / 2 - focusY * height));
+  context.drawImage(image, left, top, width, height);
+  context.filter = "none";
   return context.getImageData(0, 0, size, size).data;
 }
-function beadCounts(pattern = state.bead) { const counts = pattern.palette.map(() => 0); pattern.indices.forEach(index => { if (counts[index] !== undefined) counts[index] += 1; }); return counts; }
+
+function beadCounts(pattern = state.bead) {
+  const counts = pattern.palette.map(() => 0);
+  pattern.indices.forEach(index => { if (counts[index] !== undefined) counts[index] += 1; });
+  return counts;
+}
+
 function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
   if (!canvas || !pattern?.size || !pattern?.indices?.length) return;
-  const side = canvas.width, context = canvas.getContext("2d"), cell = side / pattern.size; canvas.height = side; context.clearRect(0, 0, side, side);
-  pattern.indices.forEach((colorIndex, index) => { const x = (index % pattern.size) * cell, y = Math.floor(index / pattern.size) * cell; context.fillStyle = beadHex(pattern.palette[colorIndex] || [255, 255, 255]); context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell)); });
-  if (!grid) return; context.strokeStyle = pattern.size > 32 ? "rgba(45,31,34,.28)" : "rgba(45,31,34,.42)"; context.lineWidth = pattern.size > 32 ? .55 : .8; context.beginPath();
-  for (let index = 0; index <= pattern.size; index += 1) { const position = Math.round(index * cell) + .5; context.moveTo(position, 0); context.lineTo(position, side); context.moveTo(0, position); context.lineTo(side, position); } context.stroke();
+  const side = canvas.width;
+  canvas.height = side;
+  const context = canvas.getContext("2d");
+  const cell = side / pattern.size;
+  context.clearRect(0, 0, side, side);
+  pattern.indices.forEach((paletteIndex, index) => {
+    const x = (index % pattern.size) * cell;
+    const y = Math.floor(index / pattern.size) * cell;
+    context.fillStyle = beadHex(pattern.palette[paletteIndex] || [255, 255, 255]);
+    context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell));
+  });
+  if (!grid) return;
+  context.strokeStyle = pattern.size > 32 ? "rgba(45,31,34,.28)" : "rgba(45,31,34,.42)";
+  context.lineWidth = pattern.size > 32 ? .55 : .8;
+  context.beginPath();
+  for (let index = 0; index <= pattern.size; index += 1) {
+    const position = Math.round(index * cell) + .5;
+    context.moveTo(position, 0); context.lineTo(position, side);
+    context.moveTo(0, position); context.lineTo(side, position);
+  }
+  context.stroke();
 }
-function renderBeadPalette() { const host = document.getElementById("beadPalette"); if (!host || !state.bead.palette.length) return; const counts = beadCounts(); host.innerHTML = state.bead.palette.map((color, index) => { const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index), alternative = meta.common ? "常用色" : `冷门色 · 可换 ${meta.substituteCode} ${meta.substituteName}`; return `<button type="button" class="${state.bead.selectedColor === index ? "selected" : ""}" data-bead-color="${index}" data-availability="${meta.common ? "common" : "expanded"}" aria-pressed="${state.bead.selectedColor === index}"><i style="--bead-color:${beadHex(color)}"></i><span><b>${escapeHtml(meta.code)} · ${escapeHtml(meta.name)}</b><small>${beadHex(color)} · ${counts[index]} 颗</small><em>${escapeHtml(alternative)}</em></span></button>`; }).join(""); }
-function renderBeadPattern() { paintBeadCanvas(document.getElementById("beadCanvas"), state.bead); renderBeadPalette(); const expanded = state.bead.paletteMeta.filter(item => !item.common).length; document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${state.bead.size ** 2} 颗${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`; const replaceButton = document.querySelector('[data-action="bead-replace-rare"]'); if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; } document.getElementById("beadResult").hidden = false; }
-function beadCropSettings() { return { x: Number(document.getElementById("beadCropX")?.value || 50) / 100, y: Number(document.getElementById("beadCropY")?.value || 50) / 100, zoom: Number(document.getElementById("beadCropZoom")?.value || 100) / 100 }; }
-function updateBeadCropPreview() { const preview = document.getElementById("beadSourcePreview"); if (!preview || preview.hidden) return; const mode = document.getElementById("beadCropMode").value, crop = beadCropSettings(); preview.style.objectFit = mode === "contain" ? "contain" : "cover"; preview.style.objectPosition = `${crop.x * 100}% ${crop.y * 100}%`; preview.style.transformOrigin = `${crop.x * 100}% ${crop.y * 100}%`; preview.style.transform = mode === "contain" ? "none" : `scale(${crop.zoom})`; document.querySelectorAll("[data-bead-crop-output]").forEach(output => { const input = document.getElementById(output.dataset.beadCropOutput); output.textContent = input?.id === "beadCropZoom" ? `${input.value}%` : input?.value || ""; }); }
-function replaceRareBeadColors() { const rareCount = state.bead.paletteMeta.filter(meta => !meta.common).length; if (!rareCount) { toast("当前板图已经全部是常用色"); return; } const palette = [], paletteMeta = [], byCode = new Map(), remap = []; state.bead.palette.forEach((color, index) => { const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index), target = meta.common ? { color, meta } : (() => { const entry = BEAD_COLOR_CATALOG.find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color) }); return { color: [...entry.rgb], meta: beadPaletteMeta(entry.rgb, index) }; })(); if (!byCode.has(target.meta.code)) { byCode.set(target.meta.code, palette.length); palette.push([...target.color]); paletteMeta.push(target.meta); } remap[index] = byCode.get(target.meta.code); }); state.bead.palette = palette; state.bead.paletteMeta = paletteMeta; state.bead.indices = state.bead.indices.map(index => remap[index]); state.bead.selectedColor = 0; renderBeadPattern(); toast(`已将 ${rareCount} 个冷门色替换并合并数量`); }
-function readSavedBeadPatterns() { try { const value = JSON.parse(privateStorage().getItem(BEAD_STORAGE_KEY) || "[]"); return Array.isArray(value) ? value.filter(item => item?.id && Number(item.size) >= 8 && Array.isArray(item.palette) && Array.isArray(item.indices)).slice(0, 12) : []; } catch (_) { privateStorage().removeItem(BEAD_STORAGE_KEY); return []; } }
-function writeSavedBeadPatterns(items) { privateStorage().setItem(BEAD_STORAGE_KEY, JSON.stringify(items.slice(0, 12))); }
+
+function renderBeadPalette() {
+  const host = document.getElementById("beadPalette");
+  if (!host || !state.bead.palette.length) return;
+  const counts = beadCounts();
+  host.innerHTML = state.bead.palette.map((color, index) => {
+    const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
+    const alternative = meta.common ? "常用色" : `冷门色 · 可换 ${meta.substituteCode} ${meta.substituteName}`;
+    return `<button type="button" class="${state.bead.selectedColor === index ? "selected" : ""}" data-bead-color="${index}" data-availability="${meta.common ? "common" : "expanded"}" aria-pressed="${state.bead.selectedColor === index}"><i style="--bead-color:${beadHex(color)}"></i><span><b>${escapeHtml(meta.code)} · ${escapeHtml(meta.name)}</b><small>${beadHex(color)} · ${counts[index]} 颗</small><em>${escapeHtml(alternative)}</em></span></button>`;
+  }).join("");
+}
+
+function renderBeadPattern() {
+  paintBeadCanvas(document.getElementById("beadCanvas"), state.bead);
+  renderBeadPalette();
+  const total = state.bead.size * state.bead.size;
+  const expanded = state.bead.paletteMeta.filter(item => !item.common).length;
+  document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`;
+  const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
+  if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
+  document.getElementById("beadResult").hidden = false;
+}
+
+function beadCropSettings() {
+  return {
+    x: Number(document.getElementById("beadCropX")?.value || 50) / 100,
+    y: Number(document.getElementById("beadCropY")?.value || 50) / 100,
+    zoom: Number(document.getElementById("beadCropZoom")?.value || 100) / 100,
+  };
+}
+
+function updateBeadCropPreview() {
+  const preview = document.getElementById("beadSourcePreview");
+  if (!preview || preview.hidden) return;
+  const mode = document.getElementById("beadCropMode").value;
+  const crop = beadCropSettings();
+  preview.style.objectFit = mode === "contain" ? "contain" : "cover";
+  preview.style.objectPosition = `${crop.x * 100}% ${crop.y * 100}%`;
+  preview.style.transformOrigin = `${crop.x * 100}% ${crop.y * 100}%`;
+  preview.style.transform = mode === "contain" ? "none" : `scale(${crop.zoom})`;
+  document.querySelectorAll("[data-bead-crop-output]").forEach(output => {
+    const input = document.getElementById(output.dataset.beadCropOutput);
+    output.textContent = input?.id === "beadCropZoom" ? `${input.value}%` : input?.value || "";
+  });
+}
+
+function replaceRareBeadColors() {
+  const rareCount = state.bead.paletteMeta.filter(meta => !meta.common).length;
+  if (!rareCount) { toast("当前板图已经全部是常用色"); return; }
+  const palette = []; const paletteMeta = []; const byCode = new Map(); const remap = [];
+  state.bead.palette.forEach((color, index) => {
+    const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
+    const target = meta.common ? { color, meta } : (() => {
+      const entry = BEAD_COLOR_CATALOG.find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color) });
+      return { color: [...entry.rgb], meta: beadPaletteMeta(entry.rgb, index) };
+    })();
+    if (!byCode.has(target.meta.code)) {
+      byCode.set(target.meta.code, palette.length); palette.push([...target.color]); paletteMeta.push(target.meta);
+    }
+    remap[index] = byCode.get(target.meta.code);
+  });
+  state.bead.palette = palette; state.bead.paletteMeta = paletteMeta;
+  state.bead.indices = state.bead.indices.map(index => remap[index]); state.bead.selectedColor = 0;
+  renderBeadPattern(); toast(`已将 ${rareCount} 个冷门色替换并合并数量`);
+}
+
+function readSavedBeadPatterns() {
+  try {
+    const value = JSON.parse(privateStorage().getItem(BEAD_STORAGE_KEY) || "[]");
+    return Array.isArray(value) ? value.filter(item => item?.id && Number(item.size) >= 8 && Array.isArray(item.palette) && Array.isArray(item.indices)).slice(0, 12) : [];
+  } catch (_) { privateStorage().removeItem(BEAD_STORAGE_KEY); return []; }
+}
+
+function writeSavedBeadPatterns(items) {
+  privateStorage().setItem(BEAD_STORAGE_KEY, JSON.stringify(items.slice(0, 12)));
+}
+
 function renderSavedBeadPatterns() {
-  const host = document.getElementById("beadSavedList"); if (!host) return; const items = readSavedBeadPatterns();
+  const host = document.getElementById("beadSavedList");
+  if (!host) return;
+  const items = readSavedBeadPatterns();
   if (!items.length) { host.innerHTML = `<div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div>`; return; }
   host.innerHTML = items.map(item => `<article class="bead-saved-card"><canvas width="116" height="116" data-bead-preview="${escapeHtml(item.id)}" aria-hidden="true"></canvas><div><strong>${escapeHtml(item.title || "拼豆板图")}</strong><small>${Number(item.size)} × ${Number(item.size)} · ${item.palette.length} 色</small><time>${escapeHtml(new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</time></div><div><button type="button" data-action="bead-open" data-id="${escapeHtml(item.id)}">继续编辑</button><button type="button" class="danger-text" data-action="bead-delete" data-id="${escapeHtml(item.id)}">删除</button></div></article>`).join("");
   items.forEach(item => paintBeadCanvas(host.querySelector(`[data-bead-preview="${CSS.escape(item.id)}"]`), item, { grid: false }));
 }
+
 function loadBeadImage(file) {
-  if (!file) return; if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) { toast("请选择 JPG、PNG 或 WebP 图片"); return; } if (file.size > 15 * 1024 * 1024) { toast("照片不能超过 15 MB，请先使用系统相册缩小"); return; }
-  const url = URL.createObjectURL(file), image = new Image();
-  image.onload = () => { if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl); state.bead.image = image; state.bead.sourceUrl = url; const preview = document.getElementById("beadSourcePreview"); preview.src = url; preview.hidden = false; document.getElementById("beadUploadZone").classList.add("has-image"); document.getElementById("beadCropControls").hidden = false; document.querySelector(".bead-upload-button").hidden = true; document.querySelector(".bead-change-image").hidden = false; document.querySelector('[data-action="bead-generate"]').disabled = false; updateBeadCropPreview(); toast("照片已在本机打开，可以调整尺寸后生成"); };
-  image.onerror = () => { URL.revokeObjectURL(url); toast("这张照片无法读取，请换一张重试"); }; image.src = url;
+  if (!file) return;
+  if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) { toast("请选择 JPG、PNG 或 WebP 图片"); return; }
+  if (file.size > 15 * 1024 * 1024) { toast("照片不能超过 15 MB，请先使用系统相册缩小"); return; }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.onload = () => {
+    if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl);
+    state.bead.image = image; state.bead.sourceUrl = url;
+    const preview = document.getElementById("beadSourcePreview");
+    preview.src = url; preview.hidden = false;
+    document.getElementById("beadUploadZone").classList.add("has-image");
+    document.getElementById("beadCropControls").hidden = false;
+    document.querySelector(".bead-upload-button").hidden = true;
+    document.querySelector(".bead-change-image").hidden = false;
+    document.querySelector('[data-action="bead-generate"]').disabled = false;
+    updateBeadCropPreview();
+    toast("照片已在本机打开，可以调整尺寸后生成");
+  };
+  image.onerror = () => { URL.revokeObjectURL(url); toast("这张照片无法读取，请换一张重试"); };
+  image.src = url;
 }
-function generateBeadPattern() { if (!state.bead.image) { toast("请先选择照片"); return; } const size = Number(document.getElementById("beadBoardSize").value), count = Number(document.getElementById("beadColorCount").value), detailMode = document.getElementById("beadDetailMode").value, pixels = beadSourcePixels(state.bead.image, size, document.getElementById("beadCropMode").value, detailMode, beadCropSettings()), result = quantizeBeadPixels(pixels, count, { size, detailMode }); Object.assign(state.bead, { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, generatedPalette: result.palette.map(color => [...color]), generatedPaletteMeta: result.paletteMeta.map(meta => ({ ...meta })), generatedIndices: [...result.indices], selectedColor: 0 }); renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" }); }
-function saveCurrentBeadPattern() { if (!state.bead.indices.length) { toast("请先生成板图"); return; } const now = new Date(), record = { id: globalThis.crypto?.randomUUID?.() || `bead-${Date.now()}`, title: `拼豆作品 · ${now.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`, size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices], createdAt: now.toISOString(), updatedAt: now.toISOString() }; writeSavedBeadPatterns([record, ...readSavedBeadPatterns()]); renderSavedBeadPatterns(); toast("板图已保存在当前账号的这台设备上"); }
-function openSavedBeadPattern(id) { const item = readSavedBeadPatterns().find(entry => entry.id === id); if (!item) { toast("这份本机草稿已经不存在"); return; } const palette = item.palette.map(color => [...color]), paletteMeta = palette.map((color, index) => item.paletteMeta?.[index] || beadPaletteMeta(color, index)); Object.assign(state.bead, { size: Number(item.size), palette, paletteMeta, indices: [...item.indices], generatedPalette: palette.map(color => [...color]), generatedPaletteMeta: paletteMeta.map(meta => ({ ...meta })), generatedIndices: [...item.indices], selectedColor: 0 }); renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" }); }
+
+function generateBeadPattern() {
+  if (!state.bead.image) { toast("请先选择照片"); return; }
+  const size = Number(document.getElementById("beadBoardSize").value);
+  const colorCount = Number(document.getElementById("beadColorCount").value);
+  const cropMode = document.getElementById("beadCropMode").value;
+  const detailMode = document.getElementById("beadDetailMode").value;
+  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings());
+  const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
+  state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;
+  state.bead.generatedPalette = result.palette.map(color => [...color]); state.bead.generatedPaletteMeta = result.paletteMeta.map(meta => ({ ...meta }));
+  state.bead.generatedIndices = [...result.indices]; state.bead.selectedColor = 0;
+  renderBeadPattern();
+  document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function saveCurrentBeadPattern() {
+  if (!state.bead.indices.length) { toast("请先生成板图"); return; }
+  const now = new Date();
+  const record = {
+    id: globalThis.crypto?.randomUUID?.() || `bead-${Date.now()}`,
+    title: `拼豆作品 · ${now.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`,
+    size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices],
+    createdAt: now.toISOString(), updatedAt: now.toISOString(),
+  };
+  writeSavedBeadPatterns([record, ...readSavedBeadPatterns()]);
+  renderSavedBeadPatterns(); toast("板图已保存在当前账号的这台设备上");
+}
+
+function openSavedBeadPattern(id) {
+  const item = readSavedBeadPatterns().find(entry => entry.id === id);
+  if (!item) { toast("这份本机草稿已经不存在"); return; }
+  state.bead.size = Number(item.size); state.bead.palette = item.palette.map(color => [...color]);
+  state.bead.paletteMeta = state.bead.palette.map((color, index) => item.paletteMeta?.[index] || beadPaletteMeta(color, index)); state.bead.indices = [...item.indices];
+  state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
+  state.bead.generatedIndices = [...item.indices]; state.bead.selectedColor = 0;
+  renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function exportBeadPattern() {
-  if (!state.bead.indices.length) { toast("请先生成板图"); return; } const cell = state.bead.size <= 32 ? 24 : 16, boardSide = state.bead.size * cell, counts = beadCounts(), columns = state.bead.palette.length > 18 ? 3 : 2, rows = Math.ceil(state.bead.palette.length / columns);
-  const rowHeight = 43, canvas = document.createElement("canvas"), board = document.createElement("canvas"); canvas.width = boardSide; canvas.height = boardSide + 82 + rows * rowHeight; board.width = boardSide; board.height = boardSide; paintBeadCanvas(board, state.bead);
-  const context = canvas.getContext("2d"); context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0); context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34); context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${state.bead.size ** 2} 颗 · 通用实体色名，购买时请按门店品牌色卡复核`, 18, boardSide + 58);
-  const width = canvas.width / columns; state.bead.palette.forEach((color, index) => { const x = index % columns * width + 18, y = boardSide + 84 + Math.floor(index / columns) * rowHeight, meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index); context.fillStyle = beadHex(color); context.fillRect(x, y, 22, 22); context.strokeStyle = "#8f807d"; context.strokeRect(x, y, 22, 22); context.fillStyle = "#2d1f22"; context.font = "13px sans-serif"; context.fillText(`${meta.code} ${meta.name}  ${counts[index]} 颗`, x + 30, y + 13); context.fillStyle = "#7c6b68"; context.font = "11px sans-serif"; context.fillText(meta.common ? `${beadHex(color)} · 常用色` : `冷门可换 ${meta.substituteCode} ${meta.substituteName}`, x + 30, y + 29); });
-  const link = document.createElement("a"); link.download = `恋屿拼豆-${state.bead.size}x${state.bead.size}-${new Date().toLocaleDateString("sv-SE")}.png`; link.href = canvas.toDataURL("image/png"); link.click();
+  if (!state.bead.indices.length) { toast("请先生成板图"); return; }
+  const cell = state.bead.size <= 32 ? 24 : 16;
+  const boardSide = state.bead.size * cell;
+  const counts = beadCounts();
+  const columns = state.bead.palette.length > 18 ? 3 : 2;
+  const rows = Math.ceil(state.bead.palette.length / columns);
+  const rowHeight = 43;
+  const footer = 82 + rows * rowHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = boardSide; canvas.height = boardSide + footer;
+  const board = document.createElement("canvas"); board.width = boardSide; board.height = boardSide;
+  paintBeadCanvas(board, state.bead);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0);
+  context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34);
+  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${state.bead.size * state.bead.size} 颗 · 通用实体色名，购买时请按门店品牌色卡复核`, 18, boardSide + 58);
+  const columnWidth = canvas.width / columns;
+  state.bead.palette.forEach((color, index) => {
+    const column = index % columns; const row = Math.floor(index / columns);
+    const x = column * columnWidth + 18; const y = boardSide + 84 + row * rowHeight;
+    const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
+    context.fillStyle = beadHex(color); context.fillRect(x, y, 22, 22); context.strokeStyle = "#8f807d"; context.strokeRect(x, y, 22, 22);
+    context.fillStyle = "#2d1f22"; context.font = "13px sans-serif"; context.fillText(`${meta.code} ${meta.name}  ${counts[index]} 颗`, x + 30, y + 13);
+    context.fillStyle = "#7c6b68"; context.font = "11px sans-serif"; context.fillText(meta.common ? `${beadHex(color)} · 常用色` : `冷门可换 ${meta.substituteCode} ${meta.substituteName}`, x + 30, y + 29);
+  });
+  const link = document.createElement("a");
+  link.download = `恋屿拼豆-${state.bead.size}x${state.bead.size}-${new Date().toLocaleDateString("sv-SE")}.png`;
+  link.href = canvas.toDataURL("image/png"); link.click();
 }
 
 document.addEventListener("click", async event => {
@@ -6138,19 +6610,58 @@ document.addEventListener("click", async event => {
   const beadColor = event.target.closest("[data-bead-color]");
   if (beadColor) { state.bead.selectedColor = Number(beadColor.dataset.beadColor); renderBeadPalette(); return; }
   const beadAction = event.target.closest("[data-action^='bead-']");
-  if (beadAction) { const action = beadAction.dataset.action; if (action === "bead-pick-image") document.getElementById("beadImageInput").click(); else if (action === "bead-generate") generateBeadPattern(); else if (action === "bead-reset-edits") { state.bead.palette = state.bead.generatedPalette.map(color => [...color]); state.bead.paletteMeta = state.bead.generatedPaletteMeta.map(meta => ({ ...meta })); state.bead.indices = [...state.bead.generatedIndices]; state.bead.selectedColor = 0; renderBeadPattern(); toast("已恢复刚生成的板图"); } else if (action === "bead-replace-rare") replaceRareBeadColors(); else if (action === "bead-save") saveCurrentBeadPattern(); else if (action === "bead-export") exportBeadPattern(); else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id); else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); } return; }
+  if (beadAction) {
+    const action = beadAction.dataset.action;
+    if (action === "bead-pick-image") document.getElementById("beadImageInput").click();
+    else if (action === "bead-generate") generateBeadPattern();
+    else if (action === "bead-reset-edits") {
+      state.bead.palette = state.bead.generatedPalette.map(color => [...color]); state.bead.paletteMeta = state.bead.generatedPaletteMeta.map(meta => ({ ...meta }));
+      state.bead.indices = [...state.bead.generatedIndices]; state.bead.selectedColor = 0; renderBeadPattern(); toast("已恢复刚生成的板图");
+    }
+    else if (action === "bead-replace-rare") replaceRareBeadColors();
+    else if (action === "bead-save") saveCurrentBeadPattern();
+    else if (action === "bead-export") exportBeadPattern();
+    else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id);
+    else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); }
+    return;
+  }
   const playTool = event.target.closest('[data-action="open-play-tool"]');
   if (playTool) { openEntertainmentTool(playTool.dataset.tool); return; }
   if (event.target.closest('[data-action="back-play-hub"]')) { showEntertainmentHub(); return; }
   if (event.target.closest('[data-action="clear-play-search"]')) { const input = document.getElementById("playSearch"); input.value = ""; filterEntertainmentFeatures(); input.focus(); return; }
+  const cardTemplate = event.target.closest("[data-card-template]");
+  if (cardTemplate) { state.cards.templateId = cardTemplate.dataset.cardTemplate; state.cards.styleId = cardTemplate.dataset.cardTemplate; document.getElementById("coupleCardMessage").dataset.edited = ""; renderCoupleCards(); return; }
+  const cardStyle = event.target.closest("[data-card-style]");
+  if (cardStyle) { state.cards.styleId = cardStyle.dataset.cardStyle; renderCoupleCards(); return; }
+  const signCard = event.target.closest('[data-action="open-card-sign"]');
+  if (signCard) { openCardSign(signCard.dataset.id); return; }
+  const clearSignature = event.target.closest('[data-action="clear-signature"]');
+  if (clearSignature) { if (clearSignature.dataset.signature === "recipient") state.cards.recipientSignature = []; else state.cards.creatorSignature = []; renderSignature(clearSignature.dataset.signature); return; }
   const wheelMode = event.target.closest("[data-wheel-mode]");
-  if (wheelMode) { state.wheel.mode = wheelMode.dataset.wheelMode; state.wheel.selected = new Set(); await loadCoupleWheel().catch(error => toast(error.message)); return; }
-  if (event.target.closest('[data-action="spin-couple-wheel"], [data-action="skip-wheel-result"]')) { await spinCoupleWheel().catch(error => toast(error.message)); return; }
-  if (event.target.closest('[data-action="select-all-wheel-options"]')) { state.wheel.selected = new Set((state.wheel.data?.options || []).map(option => option.id)); renderCoupleWheel(); return; }
+  if (wheelMode) {
+    state.wheel.mode = wheelMode.dataset.wheelMode; state.wheel.selected = new Set();
+    await loadCoupleWheel().catch(error => toast(error.message)); return;
+  }
+  if (event.target.closest('[data-action="spin-couple-wheel"], [data-action="skip-wheel-result"]')) {
+    await spinCoupleWheel().catch(error => toast(error.message)); return;
+  }
+  if (event.target.closest('[data-action="select-all-wheel-options"]')) {
+    state.wheel.selected = new Set((state.wheel.data?.options || []).map(option => option.id)); renderCoupleWheel(); return;
+  }
   const editWheel = event.target.closest('[data-action="edit-wheel-option"]');
-  if (editWheel) { const current = state.wheel.data?.options?.find(option => option.id === editWheel.dataset.id), label = window.prompt("修改双方都能看到的转盘选项", current?.label || ""); if (label == null) return; try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(editWheel.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ label, expected_version: Number(editWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已更新"); } catch (error) { toast(error.message); } return; }
+  if (editWheel) {
+    const current = state.wheel.data?.options?.find(option => option.id === editWheel.dataset.id);
+    const label = window.prompt("修改双方都能看到的转盘选项", current?.label || "");
+    if (label == null) return;
+    try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(editWheel.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ label, expected_version: Number(editWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已更新"); } catch (error) { toast(error.message); }
+    return;
+  }
   const deleteWheel = event.target.closest('[data-action="delete-wheel-option"]');
-  if (deleteWheel) { if (!window.confirm("删除这个双方共享的转盘选项？")) return; try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(deleteWheel.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(deleteWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已删除"); } catch (error) { toast(error.message); } return; }
+  if (deleteWheel) {
+    if (!window.confirm("删除这个双方共享的转盘选项？")) return;
+    try { await api(`/api/v1/entertainment/wheel/options/${encodeURIComponent(deleteWheel.dataset.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: Number(deleteWheel.dataset.version) }) }); await loadCoupleWheel(); toast("转盘选项已删除"); } catch (error) { toast(error.message); }
+    return;
+  }
   const plan = event.target.closest("[data-plan]");
   if (plan) {
     state.plan = plan.dataset.plan; privateStorage().setItem("love-plan", state.plan); renderPlan();
@@ -6288,7 +6799,7 @@ document.addEventListener("click", async event => {
   }
   if (action === "open-cooking") {
     try { await startCookingFromElement(actionEl); }
-    catch (error) { toast(error.status === 409 ? "菜单已被对方更新，请刷新后再开始" : error.message); }
+    catch (error) { toast(error.status === 409 ? `菜单已被${partnerNickname()}更新，请刷新后再开始` : error.message); }
     return;
   }
   if (action === "close-cooking") { closeCookingScreen(); return; }
@@ -6598,7 +7109,7 @@ document.addEventListener("click", async event => {
       });
       updateTripAssistantCard("trip_recap", draftId, updated);
       toast("回忆草稿已更新，另一方也能看到");
-    } catch (error) { toast(error.status === 409 ? "对方已修改草稿，请刷新后再编辑" : error.message); }
+    } catch (error) { toast(error.status === 409 ? `${partnerNickname()}已修改草稿，请刷新后再编辑` : error.message); }
     finally { actionEl.disabled = false; }
     return;
   }
@@ -6740,7 +7251,7 @@ document.addEventListener("click", async event => {
       await api(`/api/v1/trips/${encodeURIComponent(state.data.trip.id)}/assistant/actions/${encodeURIComponent(actionEl.dataset.draftId)}/confirm`, { method: "POST", body: JSON.stringify({ idempotency_key: `assistant-confirm-${crypto.randomUUID?.() || Date.now()}` }) });
       await loadBootstrap({ quiet: true }); await loadTripAssistant({ quiet: true }); setTripSection("assistant", { scroll: false });
       toast("行程修改已保存为新版本");
-    } catch (error) { toast(error.status === 409 ? "对方已经修改旅行，请重新提出调整" : error.message); }
+    } catch (error) { toast(error.status === 409 ? `${partnerNickname()}已经修改旅行，请重新提出调整` : error.message); }
     finally { actionEl.disabled = false; }
     return;
   }
@@ -7027,7 +7538,7 @@ document.addEventListener("click", async event => {
     try {
       state.meals.weeklyPlan = await api(`/api/v1/weekly-meal-plans/drafts/${encodeURIComponent(actionEl.dataset.id)}/${verb}`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version), idempotency_key: clientKey(`weekly-${verb}`) }) });
       await loadMeals({ quiet: true });
-      toast(verb === "confirm" ? (state.meals.weeklyPlan.status === "applied" ? "双方已确认，菜单和采购清单已生效" : "已确认，等待对方") : "周菜单已取消");
+      toast(verb === "confirm" ? (state.meals.weeklyPlan.status === "applied" ? "双方已确认，菜单和采购清单已生效" : `已确认，等待${partnerNickname()}`) : "周菜单已取消");
     } catch (error) { toast(error.message); }
     return;
   }
@@ -7303,7 +7814,7 @@ document.addEventListener("click", async event => {
     try {
       await api(`/api/v1/moments/${encodeURIComponent(actionEl.dataset.id)}/reaction`, { method: "POST", body: JSON.stringify({ reaction: actionEl.dataset.reaction }) });
       await loadBootstrap({ quiet: true });
-      toast(actionEl.dataset.reaction === "none" ? "已取消回应" : "回应已同步给对方");
+      toast(actionEl.dataset.reaction === "none" ? "已取消回应" : `回应已同步给${partnerNickname()}`);
     } catch (error) { toast(error.message); }
   }
   if (action === "send-heart") {
@@ -7337,7 +7848,7 @@ document.addEventListener("click", async event => {
   }
   if (action === "open-weekly") { renderWeeklyReview(); openModal("weeklyModal"); }
   if (action === "confirm-weekly") {
-    try { state.data.weeklyReview = await api(`/api/v1/weekly-reviews/${state.data.weeklyReview.id}/confirm`, { method: "POST", body: "{}" }); renderWeeklyReview(); if (state.data.weeklyReview.status === "confirmed") await loadBootstrap({ quiet: true }); toast(state.data.weeklyReview.status === "confirmed" ? "本周回顾已进入时光轴" : "已确认，等待 TA"); } catch (error) { toast(error.message); }
+    try { state.data.weeklyReview = await api(`/api/v1/weekly-reviews/${state.data.weeklyReview.id}/confirm`, { method: "POST", body: "{}" }); renderWeeklyReview(); if (state.data.weeklyReview.status === "confirmed") await loadBootstrap({ quiet: true }); toast(state.data.weeklyReview.status === "confirmed" ? "本周回顾已进入时光轴" : `已确认，等待${partnerNickname("TA")}`); } catch (error) { toast(error.message); }
   }
   if (action === "new-date") {
     navigate("life"); setLifeSection("dates", { scroll: false });
@@ -7359,7 +7870,7 @@ document.addEventListener("click", async event => {
       const updated = await api(`/api/v1/decisions/${encodeURIComponent(decision.id)}/vote`, { method: "PUT", body: JSON.stringify({ option_ids: selected, expected_version: decision.version, idempotency_key: `web:decision:${crypto.randomUUID?.() || Date.now()}` }) });
       state.data.decisions = (state.data.decisions || []).map(item => item.id === updated.id ? updated : item);
       state.decisionSelections.delete(updated.id); renderDecisions();
-      toast(updated.status === "revealed" ? "双方选择已经揭晓" : "已秘密提交，等待 TA 完成");
+      toast(updated.status === "revealed" ? "双方选择已经揭晓" : `已秘密提交，等待${partnerNickname("TA")}完成`);
     } catch (error) { toast(error.status === 409 ? "决策已经变化，请刷新后重新选择" : error.message); }
     return;
   }
@@ -7368,7 +7879,7 @@ document.addEventListener("click", async event => {
     try {
       const updated = await api(`/api/v1/decisions/${encodeURIComponent(actionEl.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: "confirm", option_id: actionEl.dataset.optionId, expected_version: Number(actionEl.dataset.version) }) });
       state.data.decisions = (state.data.decisions || []).map(item => item.id === updated.id ? updated : item); renderDecisions();
-      toast(updated.status === "confirmed" ? "双方已经确认这个结果" : "你已确认，等待 TA");
+      toast(updated.status === "confirmed" ? "双方已经确认这个结果" : `你已确认，等待${partnerNickname("TA")}`);
     } catch (error) { toast(error.status === 409 ? "确认结果已经变化，请刷新后重试" : error.message); }
     return;
   }
@@ -8043,7 +8554,7 @@ document.addEventListener("click", async event => {
   if (action === "vote-date") {
     try {
       const updated = await api(`/api/v1/date-plans/${actionEl.dataset.dateId}/vote`, { method: "PUT", body: JSON.stringify({ variant_id: actionEl.dataset.variantId }) });
-      const index = state.data.datePlans.findIndex(item => item.id === updated.id); state.data.datePlans[index] = updated; renderDatePlans(); toast(updated.both_voted ? "双方投票已揭晓" : "已秘密投票，等待 TA");
+      const index = state.data.datePlans.findIndex(item => item.id === updated.id); state.data.datePlans[index] = updated; renderDatePlans(); toast(updated.both_voted ? "双方投票已揭晓" : `已秘密投票，等待${partnerNickname("TA")}`);
     } catch (error) { toast(error.message); }
   }
   if (action === "compose-date") {
@@ -8055,7 +8566,7 @@ document.addEventListener("click", async event => {
   if (action === "confirm-date") {
     try {
       const updated = await api(`/api/v1/date-plans/${actionEl.dataset.dateId}/confirm`, { method: "POST", body: JSON.stringify({ version: Number(actionEl.dataset.version) }) });
-      const index = state.data.datePlans.findIndex(item => item.id === updated.id); state.data.datePlans[index] = updated; renderDatePlans(); toast(updated.status === "confirmed" ? "约会已由双方确认" : "你已确认，等待 TA");
+      const index = state.data.datePlans.findIndex(item => item.id === updated.id); state.data.datePlans[index] = updated; renderDatePlans(); toast(updated.status === "confirmed" ? "约会已由双方确认" : `你已确认，等待${partnerNickname("TA")}`);
     } catch (error) { toast(error.status === 409 ? "方案已变化，请重新确认" : error.message); }
   }
   if (action === "complete-date") {
@@ -8122,7 +8633,11 @@ document.addEventListener("click", async event => {
 
 document.addEventListener("change", async event => {
   const wheelOption = event.target.closest?.("[data-wheel-option]");
-  if (wheelOption) { if (wheelOption.checked) state.wheel.selected.add(wheelOption.dataset.wheelOption); else state.wheel.selected.delete(wheelOption.dataset.wheelOption); renderCoupleWheel(); return; }
+  if (wheelOption) {
+    if (wheelOption.checked) state.wheel.selected.add(wheelOption.dataset.wheelOption);
+    else state.wheel.selected.delete(wheelOption.dataset.wheelOption);
+    renderCoupleWheel(); return;
+  }
   const expenseSettle = event.target.closest?.("[data-expense-settle]");
   if (expenseSettle) {
     if (!requireOnlineMutation("trip_expenses", "选择待结清花费")) { expenseSettle.checked = !expenseSettle.checked; return; }
@@ -8243,6 +8758,10 @@ document.addEventListener("input", event => {
   }
   const form = event.target.closest?.("[data-smart-form]");
   if (form && event.target.matches("input")) state.smartIntentDrafts[form.dataset.smartForm] = event.target.value;
+  if (["coupleCardMessage", "customCardTitle"].includes(event.target.id)) {
+    if (event.target.id === "coupleCardMessage") event.target.dataset.edited = "1";
+    if (state.cards.data) renderCoupleCards();
+  }
 });
 
 document.addEventListener("keydown", event => {
@@ -8432,7 +8951,7 @@ document.getElementById("sharedCommentForm").addEventListener("submit", async ev
     await api(`/api/v1/shared-content/${encodeURIComponent(detail.resource_type)}/${encodeURIComponent(detail.resource_id)}/comments`, { method: "POST", body: JSON.stringify({ body }) });
     input.value = "";
     await openSharedDetail(detail.resource_type, detail.resource_id, { refresh: true });
-    toast("评论已同步给对方");
+    toast(`评论已同步给${partnerNickname()}`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });
@@ -8483,8 +9002,7 @@ document.getElementById("authForm").addEventListener("submit", async event => {
   event.preventDefault();
   const payload = {
     username: document.getElementById("authUsername").value,
-    password: document.getElementById("authPassword").value,
-    nickname: document.getElementById("authNickname").value
+    password: document.getElementById("authPassword").value
   };
   try {
     setAuthProgress(18, "正在安全验证账号…");
@@ -8566,7 +9084,7 @@ document.getElementById("avatarProfileForm").addEventListener("submit", async ev
     renderIdentity();
     resetProfileDraft(result.user);
     await loadAccountCenter();
-    toast(result.nickname_matches_partner ? "资料已保存；你们现在使用相同昵称" : "你的昵称和头像已经更新，对方刷新后也会看到");
+    toast(result.nickname_matches_partner ? "资料已保存；你们现在使用相同昵称" : `你的昵称和头像已经更新，${partnerNickname()}也会看到`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });
@@ -8607,7 +9125,7 @@ document.getElementById("answerForm").addEventListener("submit", async event => 
   submit.disabled = true;
   try {
     state.data.dailyQuestion = await api("/api/v1/daily-question/answer", { method: "POST", body: JSON.stringify({ answer }) });
-    closeModals(); renderDailyQuestion(); toast(state.data.dailyQuestion.partner_answered ? "双方答案已解锁" : "答案已保存，等待对方");
+    closeModals(); renderDailyQuestion(); toast(state.data.dailyQuestion.partner_answered ? "双方答案已解锁" : `答案已保存，等待${partnerNickname()}`);
   } catch (error) { toast(error.message); }
   finally { submit.disabled = false; }
 });
@@ -8631,7 +9149,7 @@ document.getElementById("statusForm").addEventListener("submit", async event => 
   const text = document.getElementById("statusText").value.trim() || presets[statusCode];
   try {
     await api("/api/v1/me/status", { method: "PUT", body: JSON.stringify({ status_code: statusCode, text, duration_minutes: durationMinutes }) });
-    closeModals(); await loadBootstrap({ quiet: true }); toast("你的状态已经同步给 TA");
+    closeModals(); await loadBootstrap({ quiet: true }); toast(`你的状态已经同步给${partnerNickname("TA")}`);
   } catch (error) { toast(error.message); }
 });
 
@@ -8674,7 +9192,7 @@ document.getElementById("weeklyForm").addEventListener("submit", async event => 
   if (!review) return;
   try {
     state.data.weeklyReview = await api(`/api/v1/weekly-reviews/${review.id}/answer`, { method: "PUT", body: JSON.stringify({ favorite: document.getElementById("weeklyFavorite").value, gratitude: document.getElementById("weeklyGratitude").value, next_week: document.getElementById("weeklyNext").value }) });
-    renderWeeklyReview(); toast(state.data.weeklyReview.both_revealed ? "双方答案已经揭晓" : "已保存，等待 TA 写完");
+    renderWeeklyReview(); toast(state.data.weeklyReview.both_revealed ? "双方答案已经揭晓" : `已保存，等待${partnerNickname("TA")}写完`);
   } catch (error) { toast(error.message); }
 });
 
@@ -9001,18 +9519,63 @@ document.getElementById("pantryForm").addEventListener("submit", async event => 
 });
 
 document.getElementById("wheelOptionForm").addEventListener("submit", async event => {
-  event.preventDefault(); const input = document.getElementById("wheelOptionInput"), label = input.value.trim(); if (!label) return;
-  try { const created = await api("/api/v1/entertainment/wheel/options", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, label }) }); state.wheel.selected.add(created.id); input.value = ""; await loadCoupleWheel(); toast("已加入双方共享转盘"); } catch (error) { toast(error.message); }
+  event.preventDefault();
+  const input = document.getElementById("wheelOptionInput");
+  const label = input.value.trim();
+  if (!label) return;
+  try {
+    const created = await api("/api/v1/entertainment/wheel/options", { method: "POST", body: JSON.stringify({ mode: state.wheel.mode, label }) });
+    state.wheel.selected.add(created.id);
+    input.value = ""; await loadCoupleWheel(); toast("已加入双方共享转盘");
+  } catch (error) { toast(error.message); }
 });
 
-document.getElementById("beadImageInput").addEventListener("change", event => { loadBeadImage(event.target.files?.[0]); event.target.value = ""; });
+document.getElementById("coupleCardForm").addEventListener("submit", async event => {
+  event.preventDefault(); const button = event.submitter; button.disabled = true;
+  try {
+    const result = await api("/api/v1/entertainment/cards", { method: "POST", body: JSON.stringify({ template_id: state.cards.templateId, style_id: state.cards.styleId, title: document.getElementById("customCardTitle").value.trim(), message: document.getElementById("coupleCardMessage").value.trim(), signature_name: document.getElementById("cardCreatorSignatureName").value.trim(), signature: state.cards.creatorSignature, confirmed: document.getElementById("cardCreatorConfirmed").checked }) });
+    state.cards.creatorSignature = []; document.getElementById("cardCreatorConfirmed").checked = false; document.getElementById("coupleCardMessage").dataset.edited = ""; await loadCoupleCards(); toast(`已签名并发送${result.template_name}`);
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+
+document.getElementById("coupleCardSignForm").addEventListener("submit", async event => {
+  event.preventDefault(); const card = state.cards.data?.cards?.find(item => item.id === state.cards.signingId); if (!card) return; const button = event.submitter; button.disabled = true;
+  try {
+    await api(`/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/sign`, { method: "POST", body: JSON.stringify({ signature_name: document.getElementById("cardRecipientSignatureName").value.trim(), signature: state.cards.recipientSignature, confirmed: document.getElementById("cardRecipientConfirmed").checked, expected_version: card.version }) });
+    closeModals({ force: true }); state.cards.recipientSignature = []; state.cards.signingId = null; await loadCoupleCards(); toast("双方签名已完成，现在可以下载 PDF");
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+
+document.getElementById("beadImageInput").addEventListener("change", event => {
+  loadBeadImage(event.target.files?.[0]);
+  event.target.value = "";
+});
 for (const id of ["beadCropX", "beadCropY", "beadCropZoom"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
-document.getElementById("beadCropMode")?.addEventListener("change", event => { if (event.target.value === "portrait") { document.getElementById("beadCropZoom").value = "118"; document.getElementById("beadCropY").value = "43"; } else if (event.target.value === "cover") { document.getElementById("beadCropZoom").value = "100"; document.getElementById("beadCropY").value = "50"; } updateBeadCropPreview(); });
+document.getElementById("beadCropMode")?.addEventListener("change", event => {
+  if (event.target.value === "portrait") {
+    document.getElementById("beadCropZoom").value = "118";
+    document.getElementById("beadCropY").value = "43";
+  } else if (event.target.value === "cover") {
+    document.getElementById("beadCropZoom").value = "100";
+    document.getElementById("beadCropY").value = "50";
+  }
+  updateBeadCropPreview();
+});
 document.getElementById("playSearch").addEventListener("input", event => filterEntertainmentFeatures(event.target.value));
 document.getElementById("beadUploadZone").addEventListener("dragover", event => { event.preventDefault(); event.currentTarget.classList.add("dragging"); });
 document.getElementById("beadUploadZone").addEventListener("dragleave", event => event.currentTarget.classList.remove("dragging"));
-document.getElementById("beadUploadZone").addEventListener("drop", event => { event.preventDefault(); event.currentTarget.classList.remove("dragging"); loadBeadImage(event.dataTransfer?.files?.[0]); });
-document.getElementById("beadCanvas").addEventListener("click", event => { if (!state.bead.indices.length) return; const bounds = event.currentTarget.getBoundingClientRect(), x = Math.floor((event.clientX - bounds.left) / bounds.width * state.bead.size), y = Math.floor((event.clientY - bounds.top) / bounds.height * state.bead.size); if (x < 0 || y < 0 || x >= state.bead.size || y >= state.bead.size) return; state.bead.indices[y * state.bead.size + x] = state.bead.selectedColor; renderBeadPattern(); });
+document.getElementById("beadUploadZone").addEventListener("drop", event => {
+  event.preventDefault(); event.currentTarget.classList.remove("dragging"); loadBeadImage(event.dataTransfer?.files?.[0]);
+});
+document.getElementById("beadCanvas").addEventListener("click", event => {
+  if (!state.bead.indices.length) return;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const x = Math.floor((event.clientX - bounds.left) / bounds.width * state.bead.size);
+  const y = Math.floor((event.clientY - bounds.top) / bounds.height * state.bead.size);
+  if (x < 0 || y < 0 || x >= state.bead.size || y >= state.bead.size) return;
+  state.bead.indices[y * state.bead.size + x] = state.bead.selectedColor;
+  renderBeadPattern();
+});
 
 document.querySelectorAll(".modal").forEach(modal => modal.addEventListener("click", event => { if (event.target === modal) closeModals(); }));
 document.addEventListener("error", event => {
@@ -9021,6 +9584,7 @@ document.addEventListener("error", event => {
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeModals(); });
 window.addEventListener("pagehide", () => stopVoiceResources({ discard: true }));
 
+installThemeDecorations();
 renderPlan();
 navigate(state.screen);
 initializeAuth();
