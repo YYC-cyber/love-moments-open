@@ -29,6 +29,7 @@ from love_moments.ocr import real_ocr_configured
 from love_moments.quota import QuotaExceededError
 from love_moments.webpush import WebPushService
 from love_moments.life_assistant import life_assistant_from_env
+from love_moments.bead_ai import BailianBeadProvider, bead_ai_status
 
 
 ROOT = Path(__file__).resolve().parent
@@ -138,6 +139,7 @@ class RequestLimiter:
 
 AUTH_LIMITER = RequestLimiter()
 PUSH_TEST_LIMITER = RequestLimiter(limit=3, window_seconds=60)
+BEAD_AI_LIMITER = RequestLimiter(limit=6, window_seconds=600)
 
 
 class ProviderFailureTracker:
@@ -1369,6 +1371,14 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.list_couple_cards(user["id"]), headers={"Cache-Control": "no-store"})
             return
+        elif path == "/api/v1/entertainment/beads/ai-status":
+            self._require_user()
+            self._send_json(bead_ai_status(), headers={"Cache-Control": "no-store"})
+            return
+        elif path == "/api/v1/entertainment/beads/ai-previews":
+            user = self._require_user()
+            self._send_json(STORE.list_bead_ai_previews(user["id"]), headers={"Cache-Control": "no-store"})
+            return
         elif match := re.fullmatch(r"/api/v1/entertainment/cards/([^/]+)/pdf", path):
             self._send_couple_card_pdf(match.group(1), self._require_user())
             return
@@ -1420,6 +1430,38 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     user_id=user["id"],
                 )
                 self._send_json(result, 201)
+                return
+            elif path == "/api/v1/entertainment/beads/ai-preview":
+                user = self._require_user()
+                if not BEAD_AI_LIMITER.allow(f"bead-ai:{user['id']}"):
+                    self._send_json({"error": "生成得太频繁，请十分钟后再试", "code": "BEAD_AI_RATE_LIMIT"}, 429)
+                    return
+                mime_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                try:
+                    attempt = int(self.headers.get("X-Bead-Attempt", "1") or 1)
+                except ValueError as error:
+                    raise ValueError("重试次数格式无效") from error
+                final_quality = self.headers.get("X-Bead-Quality", "preview").strip().lower() == "final"
+                result = BailianBeadProvider().enhance(
+                    self._read_bytes(10 * 1024 * 1024),
+                    mime_type,
+                    attempt=attempt,
+                    final_quality=final_quality,
+                )
+                preview = STORE.save_bead_ai_preview(
+                    result.image,
+                    result.mime_type,
+                    result.model,
+                    result.attempt,
+                    user["id"],
+                )
+                self._send_json({
+                    "model": result.model,
+                    "attempt": result.attempt,
+                    "source": "真实百炼图片编辑",
+                    "stored": True,
+                    "preview": preview,
+                })
                 return
             payload = self._read_json()
             if path == "/api/v1/auth/register":
@@ -2277,6 +2319,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             if match := re.fullmatch(r"/api/v1/entertainment/wheel/options/([^/]+)", path):
                 self._send_json(STORE.delete_wheel_option(match.group(1), payload.get("expected_version"), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/entertainment/beads/ai-previews/([^/]+)", path):
+                self._send_json(STORE.delete_bead_ai_preview(match.group(1), user["id"]))
             elif match := re.fullmatch(r"/api/v1/media/uploads/([^/]+)", path):
                 self._send_json(STORE.cancel_media_upload(match.group(1), user["id"]))
             elif path == "/api/v1/push/subscriptions":

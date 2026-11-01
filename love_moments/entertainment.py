@@ -98,6 +98,60 @@ def _id(prefix: str) -> str:
 
 
 class EntertainmentMixin:
+    def save_bead_ai_preview(self, image: bytes, mime_type: str, model: str, attempt: int, user_id: str) -> dict:
+        """Persist only the generated preview; the uploaded source is never stored."""
+        safe_model = "".join(character for character in str(model) if character.isalnum() or character in {"-", "_", "."})[:60] or "image-model"
+        attempt_value = max(1, min(999, int(attempt or 1)))
+        filename = f"bead-ai__{safe_model}__a{attempt_value}__{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jpg"
+        media = self.save_media(image, filename, mime_type, "private", user_id=user_id)
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT * FROM media_assets WHERE id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'",
+                (media["id"], user_id),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("AI 拼豆版本保存失败")
+            db.execute("UPDATE media_assets SET source_type='ai' WHERE id=?", (media["id"],))
+            row = db.execute("SELECT * FROM media_assets WHERE id=?", (media["id"],)).fetchone()
+        item = self._media_public(row)
+        item.update({"model": safe_model, "attempt": attempt_value, "source": "真实百炼图片编辑"})
+        return item
+
+    def list_bead_ai_previews(self, user_id: str) -> dict:
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            rows = db.execute(
+                """SELECT * FROM media_assets
+                   WHERE couple_id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'
+                     AND status='ready' AND purged_at IS NULL
+                   ORDER BY created_at DESC""",
+                (couple["id"], user_id),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = self._media_public(row)
+            parts = str(row["original_name"]).split("__")
+            item["model"] = parts[1] if len(parts) > 1 else "图片模型"
+            attempt_text = parts[2] if len(parts) > 2 else "a1"
+            item["attempt"] = int(attempt_text[1:]) if attempt_text.startswith("a") and attempt_text[1:].isdigit() else 1
+            item["source"] = "真实百炼图片编辑"
+            items.append(item)
+        return {"items": items}
+
+    def delete_bead_ai_preview(self, media_id: str, user_id: str) -> dict:
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            row = db.execute(
+                """SELECT id FROM media_assets
+                   WHERE id=? AND couple_id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'
+                     AND status='ready' AND purged_at IS NULL""",
+                (media_id, couple["id"], user_id),
+            ).fetchone()
+            if not row:
+                raise KeyError("AI 拼豆版本不存在")
+        self.trash_media(media_id, user_id)
+        return self.purge_media(media_id, user_id)
+
     @staticmethod
     def _wheel_mode(value: object) -> str:
         mode = str(value or "normal").strip().lower()

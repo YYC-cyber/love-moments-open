@@ -38,6 +38,19 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("if (median < 145)", self.javascript)
         self.assertIn('mode === "bright"', self.javascript)
 
+    def test_ai_mode_is_optional_and_retryable(self):
+        self.assertIn('id="beadGenerationMode"', self.html)
+        self.assertIn("AI 精修 · 人像效果更好", self.html)
+        self.assertIn('data-action="bead-ai-retry"', self.html)
+        self.assertIn("requestAiBeadPreview", self.javascript)
+        self.assertIn("X-Bead-Attempt", self.javascript)
+        self.assertIn("每次重试会产生一次百炼图片费用", self.html)
+        self.assertIn('id="beadAiVersionList"', self.html)
+        self.assertIn("旧版会一直保留", self.html)
+        self.assertIn('data-action="bead-ai-use"', self.javascript)
+        self.assertIn('data-action="bead-ai-delete"', self.javascript)
+        self.assertIn("loadBeadAiVersions", self.javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

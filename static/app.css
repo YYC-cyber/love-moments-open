@@ -1548,6 +1548,26 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-crop-controls output { color: var(--muted); font-weight: 500; }
 .bead-crop-controls input { width: 100%; accent-color: var(--wine); }
 .bead-generate { width: 100%; }
+.bead-ai-progress { position: relative; display: grid; gap: 4px; margin-top: 10px; padding: 13px 14px 13px 48px; overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(135deg,var(--cream),var(--blush)); }
+.bead-ai-progress[hidden] { display: none; }
+.bead-ai-progress span { position: absolute; left: 15px; top: 50%; width: 20px; height: 20px; margin-top: -10px; border: 3px solid color-mix(in srgb,var(--wine) 20%,transparent); border-top-color: var(--wine); border-radius: 50%; animation: bead-ai-spin .8s linear infinite; }
+.bead-ai-progress strong { color: var(--wine-dark); font-size: 11px; }
+.bead-ai-progress small { color: var(--muted); font-size: 9px; }
+.bead-ai-actions { display: grid; gap: 9px; margin: 10px 0; padding: 12px; border: 1px dashed var(--line); border-radius: 15px; background: var(--cream); }
+.bead-ai-actions[hidden] { display: none; }
+.bead-ai-actions p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.bead-ai-actions button { width: 100%; }
+.bead-ai-library { padding: 18px; }
+.bead-ai-version-list { display: grid; gap: 10px; margin-top: 14px; }
+.bead-ai-version-card { display: grid; grid-template-columns: 76px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 16px; background: linear-gradient(135deg,var(--cream),var(--paper)); }
+.bead-ai-version-card img { width: 76px; height: 92px; border-radius: 11px; object-fit: cover; background: var(--blush); }
+.bead-ai-version-card strong,.bead-ai-version-card small,.bead-ai-version-card em { display: block; }
+.bead-ai-version-card strong { color: var(--wine-dark); font-size: 11px; }
+.bead-ai-version-card small { margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.bead-ai-version-card em { margin-top: 5px; color: #5c7a56; font-size: 8px; font-style: normal; }
+.bead-ai-version-card > div:last-child { display: grid; gap: 5px; }
+.bead-ai-version-card button { min-height: 34px; padding: 6px 9px; border: 0; border-radius: 10px; color: var(--wine-dark); background: var(--blush); font-size: 9px; }
+@keyframes bead-ai-spin { to { transform: rotate(360deg); } }
 .bead-canvas-wrap { margin-top: 15px; padding: 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
 #beadCanvas { display: block; width: 100%; height: auto; image-rendering: pixelated; border-radius: 10px; touch-action: manipulation; cursor: crosshair; }
 .bead-edit-hint { margin: 10px 0; color: var(--muted); font-size: 10px; text-align: center; }
@@ -1748,6 +1768,9 @@ body[data-card-art-ready="kitty-couple"] .card-kitty-sticker { color: transparen
   .bead-saved-card { grid-template-columns: 68px minmax(0,1fr); }
   .bead-saved-card canvas { width: 68px; height: 68px; }
   .bead-saved-card > div:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+  .bead-ai-version-card { grid-template-columns: 68px minmax(0,1fr); }
+  .bead-ai-version-card img { width: 68px; height: 84px; }
+  .bead-ai-version-card > div:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
   .theme-choice { grid-template-columns: 50px 1fr; }
   .display-preference-options { grid-template-columns: 1fr; }
   .display-preference-options label { min-height: 48px; }

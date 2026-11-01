@@ -311,7 +311,7 @@ const state = {
   data: null,
   selectedItemIds: new Set(),
   playTool: "",
-  bead: { image: null, sourceUrl: "", size: 29, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
+  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], size: 29, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
@@ -6100,7 +6100,7 @@ function openEntertainmentTool(tool) {
   document.getElementById("playHubPanel").hidden = true;
   const panelId = { beads: "beadToolPanel", wheel: "wheelToolPanel", cards: "cardToolPanel" }[tool];
   document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== panelId; });
-  if (tool === "beads") renderSavedBeadPatterns();
+  if (tool === "beads") { renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); }
   else if (tool === "wheel") loadCoupleWheel().catch(error => toast(error.message));
   else loadCoupleCards().catch(error => toast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -6596,7 +6596,8 @@ function loadBeadImage(file) {
   const image = new Image();
   image.onload = () => {
     if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl);
-    state.bead.image = image; state.bead.sourceUrl = url;
+    if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+    state.bead.image = image; state.bead.originalImage = image; state.bead.sourceFile = file; state.bead.sourceUrl = url; state.bead.aiUrl = ""; state.bead.aiAttempt = 0;
     const preview = document.getElementById("beadSourcePreview");
     preview.src = url; preview.hidden = false;
     document.getElementById("beadUploadZone").classList.add("has-image");
@@ -6604,6 +6605,7 @@ function loadBeadImage(file) {
     document.querySelector(".bead-upload-button").hidden = true;
     document.querySelector(".bead-change-image").hidden = false;
     document.querySelector('[data-action="bead-generate"]').disabled = false;
+    document.getElementById("beadAiActions").hidden = true;
     updateBeadCropPreview();
     toast("照片已在本机打开，可以调整尺寸后生成");
   };
@@ -6611,13 +6613,106 @@ function loadBeadImage(file) {
   image.src = url;
 }
 
-async function generateBeadPattern() {
-  if (!state.bead.image) { toast("请先选择照片"); return; }
-  const generateButton = document.querySelector('[data-action="bead-generate"]');
-  const originalLabel = generateButton?.textContent || "生成拼豆板图";
-  if (generateButton) { generateButton.disabled = true; generateButton.textContent = "正在计算明暗与拼豆位置…"; }
-  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+async function beadImageFromBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("AI 生成的照片无法读取")); };
+    image.src = url;
+  });
+}
+
+function renderBeadAiVersions() {
+  const section = document.getElementById("beadAiLibrary");
+  const host = document.getElementById("beadAiVersionList");
+  if (!section || !host) return;
+  const items = state.bead.aiVersions || [];
+  section.hidden = !state.bead.aiConfigured && !items.length;
+  if (!items.length) {
+    host.innerHTML = `<div class="empty-view"><p>还没有 AI 精修版本。生成后会自动保存在这里。</p></div>`;
+    return;
+  }
+  host.innerHTML = items.map((item, index) => `<article class="bead-ai-version-card">
+    <img src="${escapeHtml(item.thumbnail_url || item.url)}" alt="AI 精修历史版本预览" loading="lazy">
+    <div><strong>精修版本 · ${escapeHtml(new Date(item.created_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</strong><small>${escapeHtml(item.model || "百炼图片模型")} · 本次第 ${Number(item.attempt || index + 1)} 次生成</small><em>仅自己可见</em></div>
+    <div><button type="button" data-action="bead-ai-use" data-id="${escapeHtml(item.id)}">使用这一版</button><button type="button" class="danger-text" data-action="bead-ai-delete" data-id="${escapeHtml(item.id)}">删除</button></div>
+  </article>`).join("");
+}
+
+async function loadBeadAiVersions({ quiet = false } = {}) {
   try {
+    const result = await api("/api/v1/entertainment/beads/ai-previews");
+    state.bead.aiVersions = Array.isArray(result.items) ? result.items : [];
+    renderBeadAiVersions();
+  } catch (error) {
+    if (!quiet) toast(error.message);
+    throw error;
+  }
+}
+
+async function loadBeadAiVersion(mediaId) {
+  const item = state.bead.aiVersions.find(version => version.id === mediaId);
+  if (!item) throw new Error("这个 AI 版本已经不存在，请刷新后重试");
+  const response = await fetch(item.url, { cache: "no-store", credentials: "same-origin" });
+  if (!response.ok) throw new Error("无法读取这个 AI 版本");
+  const loaded = await beadImageFromBlob(await response.blob());
+  if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+  state.bead.aiUrl = loaded.url; state.bead.image = loaded.image; state.bead.aiAttempt = Number(item.attempt || 1);
+  const preview = document.getElementById("beadSourcePreview");
+  preview.src = loaded.url; preview.hidden = false;
+  document.getElementById("beadUploadZone").classList.add("has-image");
+  document.getElementById("beadCropControls").hidden = false;
+  document.querySelector(".bead-upload-button").hidden = true;
+  document.querySelector(".bead-change-image").hidden = false;
+  document.querySelector('[data-action="bead-generate"]').disabled = false;
+  document.getElementById("beadAiActions").hidden = !state.bead.sourceFile;
+  updateBeadCropPreview();
+  buildBeadPatternFromCurrentImage();
+  toast("已恢复这一版，并重新生成可编辑网格");
+}
+
+async function requestAiBeadPreview({ retry = false } = {}) {
+  if (!state.bead.sourceFile) throw new Error("请重新选择原始照片");
+  const attempt = retry ? state.bead.aiAttempt + 1 : 1;
+  const progress = document.getElementById("beadAiProgress");
+  const strong = progress.querySelector("strong"); const small = progress.querySelector("small");
+  progress.hidden = false; let seconds = 0;
+  strong.textContent = retry ? `AI 正在重新生成第 ${attempt} 版` : "AI 正在精修照片";
+  small.textContent = "已等待 0 秒 · 一般需要 20～60 秒，请保持页面打开。";
+  const timer = setInterval(() => { seconds += 1; small.textContent = `已等待 ${seconds} 秒 · 正在保留人物特征并简化背景。`; }, 1000);
+  try {
+    const uploadFile = await compressImageForUpload(state.bead.sourceFile);
+    if (uploadFile.size > 10 * 1024 * 1024) throw new Error("照片仍超过 10 MB，请先在系统相册中缩小后重试");
+    const response = await fetch("/api/v1/entertainment/beads/ai-preview", {
+      method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: {
+        "Content-Type": uploadFile.type || "image/jpeg",
+        "X-Bead-Attempt": String(attempt),
+        "X-Bead-Quality": "preview",
+      },
+      body: uploadFile,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw Object.assign(new Error(result.error || `AI 生成失败 (${response.status})`), { status: response.status, code: result.code });
+    if (!result.preview?.url) throw new Error("AI 结果没有保存成功");
+    const generatedResponse = await fetch(result.preview.url, { cache: "no-store", credentials: "same-origin" });
+    if (!generatedResponse.ok) throw new Error("AI 结果已生成，但读取保存版本失败");
+    const loaded = await beadImageFromBlob(await generatedResponse.blob());
+    if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+    state.bead.aiUrl = loaded.url; state.bead.image = loaded.image; state.bead.aiAttempt = attempt;
+    const preview = document.getElementById("beadSourcePreview"); preview.src = loaded.url;
+    document.getElementById("beadAiActions").hidden = false;
+    state.bead.aiVersions = [result.preview, ...state.bead.aiVersions.filter(item => item.id !== result.preview.id)];
+    renderBeadAiVersions();
+    toast(`AI 第 ${attempt} 版已生成，正在转换成实体拼豆色`);
+    return result;
+  } finally {
+    clearInterval(timer); progress.hidden = true;
+  }
+}
+
+function buildBeadPatternFromCurrentImage() {
   const size = Number(document.getElementById("beadBoardSize").value);
   const colorCount = Number(document.getElementById("beadColorCount").value);
   const cropMode = document.getElementById("beadCropMode").value;
@@ -6627,14 +6722,32 @@ async function generateBeadPattern() {
   const toneMode = document.getElementById("beadToneMode")?.value || "auto";
   const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
-  if (!result.palette.length) { toast("背景去除范围过大，已没有可生成的主体；请降低去背景力度"); return; }
+  if (!result.palette.length) throw new Error("背景去除范围过大，已没有可生成的主体；请降低去背景力度");
   state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;
   state.bead.generatedPalette = result.palette.map(color => [...color]); state.bead.generatedPaletteMeta = result.paletteMeta.map(meta => ({ ...meta }));
   state.bead.generatedIndices = [...result.indices]; state.bead.selectedColor = 0;
   renderBeadPattern();
   document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function generateBeadPattern({ retryAi = false } = {}) {
+  if (!state.bead.image) { toast("请先选择照片"); return; }
+  const generateButton = document.querySelector('[data-action="bead-generate"]');
+  const retryButton = document.querySelector('[data-action="bead-ai-retry"]');
+  const originalLabel = generateButton?.textContent || "生成拼豆板图";
+  const mode = document.getElementById("beadGenerationMode")?.value || "local";
+  if (generateButton) { generateButton.disabled = true; generateButton.textContent = mode === "ai" ? "AI 正在精修，请稍候…" : "正在计算明暗与拼豆位置…"; }
+  if (retryButton) retryButton.disabled = true;
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  try {
+    if (mode === "ai") await requestAiBeadPreview({ retry: retryAi });
+    else { state.bead.image = state.bead.originalImage || state.bead.image; document.getElementById("beadSourcePreview").src = state.bead.sourceUrl; document.getElementById("beadAiActions").hidden = true; }
+    buildBeadPatternFromCurrentImage();
+  } catch (error) {
+    toast(error.message || "拼豆板图生成失败");
   } finally {
     if (generateButton) { generateButton.disabled = false; generateButton.textContent = originalLabel; }
+    if (retryButton) retryButton.disabled = false;
   }
 }
 
@@ -6714,6 +6827,7 @@ document.addEventListener("click", async event => {
     const action = beadAction.dataset.action;
     if (action === "bead-pick-image") document.getElementById("beadImageInput").click();
     else if (action === "bead-generate") generateBeadPattern();
+    else if (action === "bead-ai-retry") generateBeadPattern({ retryAi: true });
     else if (action === "bead-reset-edits") {
       state.bead.palette = state.bead.generatedPalette.map(color => [...color]); state.bead.paletteMeta = state.bead.generatedPaletteMeta.map(meta => ({ ...meta }));
       state.bead.indices = [...state.bead.generatedIndices]; state.bead.selectedColor = 0; renderBeadPattern(); toast("已恢复刚生成的板图");
@@ -6723,6 +6837,15 @@ document.addEventListener("click", async event => {
     else if (action === "bead-export") exportBeadPattern();
     else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id);
     else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); }
+    else if (action === "bead-ai-use") { try { await loadBeadAiVersion(beadAction.dataset.id); } catch (error) { toast(error.message); } }
+    else if (action === "bead-ai-delete") {
+      if (!window.confirm("确定永久删除这一版 AI 精修图吗？其他版本不会受影响。")) return;
+      try {
+        await api(`/api/v1/entertainment/beads/ai-previews/${encodeURIComponent(beadAction.dataset.id)}`, { method: "DELETE", body: "{}" });
+        state.bead.aiVersions = state.bead.aiVersions.filter(item => item.id !== beadAction.dataset.id);
+        renderBeadAiVersions(); toast("这一版已删除，其他版本仍保留");
+      } catch (error) { toast(error.message); }
+    }
     return;
   }
   const playTool = event.target.closest('[data-action="open-play-tool"]');
@@ -9653,6 +9776,25 @@ document.getElementById("cardRecipientMessage").addEventListener("input", () => 
 document.getElementById("beadImageInput").addEventListener("change", event => {
   loadBeadImage(event.target.files?.[0]);
   event.target.value = "";
+});
+document.getElementById("beadGenerationMode")?.addEventListener("change", async event => {
+  const ai = event.target.value === "ai";
+  const note = document.getElementById("beadModeNote");
+  if (!ai) {
+    note.textContent = "本机模式不会上传照片，也不产生外部接口费用；适合图标、卡通图和已经精修好的图片。";
+    return;
+  }
+  note.textContent = "AI 模式会在你点击生成后，将本次照片发送给阿里云百炼精修。原图不保存；每次生成的精修版会仅对当前账号保存，旧版不会覆盖，需由你明确删除。每次重试会产生一次图片费用。";
+  try {
+    const status = await api("/api/v1/entertainment/beads/ai-status");
+    state.bead.aiConfigured = Boolean(status.configured);
+    if (!status.configured) throw new Error("服务器尚未配置百炼图片服务");
+    renderBeadAiVersions();
+    toast(`AI 人像精修可用 · ${status.model}`);
+  } catch (error) {
+    state.bead.aiConfigured = false; event.target.value = "local";
+    note.textContent = `AI 模式暂不可用：${error.message}。已切回本机生成。`;
+  }
 });
 for (const id of ["beadCropX", "beadCropY", "beadCropZoom", "beadBackgroundSensitivity"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
 document.getElementById("beadBackgroundMode")?.addEventListener("change", event => {

@@ -530,7 +530,7 @@
 
         <article class="bead-maker card" aria-labelledby="beadMakerTitle">
           <div class="bead-maker-heading">
-            <div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div>
+            <div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>本机模式不上传照片；只有你主动选择 AI 精修并点击生成时，才会按次发送给百炼。板图草稿仍只保存在当前账号和设备。</p></div>
             <span class="bead-mascot" aria-hidden="true">▦</span>
           </div>
 
@@ -546,6 +546,7 @@
           </div>
 
           <div class="bead-settings">
+            <label><span>生成方式</span><select id="beadGenerationMode"><option value="local">本机生成 · 免费快速</option><option value="ai">AI 精修 · 人像效果更好</option></select></label>
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option><option value="58">58 × 58 · 四块 29 板</option><option value="87">87 × 87 · 九块 29 板</option></select></label>
             <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24" selected>24 色 · 日常推荐</option><option value="36">36 色 · 细节丰富</option><option value="48">48 色 · 明暗更细</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
@@ -560,7 +561,8 @@
             <label id="beadBackgroundSensitivityRow" hidden><span>去背景力度 <output data-bead-crop-output="beadBackgroundSensitivity">42</output></span><input id="beadBackgroundSensitivity" type="range" min="18" max="90" value="42"></label>
           </div>
           <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
-          <p class="form-note">清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光；配合去背景时只处理保留下来的主体像素。去背景在本机完成，纯色背景效果最好。</p>
+          <div class="bead-ai-progress" id="beadAiProgress" hidden role="status" aria-live="polite"><span></span><strong>AI 正在精修照片</strong><small>一般需要 20～60 秒，请保持页面打开。</small></div>
+          <p class="form-note" id="beadModeNote">清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光；配合去背景时只处理保留下来的主体像素。去背景在本机完成，纯色背景效果最好。</p>
         </article>
 
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
@@ -568,11 +570,18 @@
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
           <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>
+          <div class="bead-ai-actions" id="beadAiActions" hidden><p>不满意可以从原始照片重新生成，不会反复加工上一版。每次重试会产生一次百炼图片费用。</p><button type="button" class="secondary-button" data-action="bead-ai-retry">AI 重新生成一版</button></div>
           <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
           <div class="bead-result-actions">
             <button type="button" class="secondary-button" data-action="bead-save">保存到本机</button>
             <button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button>
           </div>
+        </section>
+
+        <section class="bead-ai-library card" id="beadAiLibrary" hidden aria-labelledby="beadAiLibraryTitle">
+          <div class="bead-library-heading"><div><span class="eyebrow ink">AI VERSIONS</span><h2 id="beadAiLibraryTitle">AI 精修版本</h2></div><small>仅自己可见 · 不会自动删除</small></div>
+          <p class="form-note">每次生成和重试都会保存成独立版本。旧版会一直保留，只有你明确点击“删除”才会移除。</p>
+          <div id="beadAiVersionList" class="bead-ai-version-list"><div class="empty-view"><p>还没有 AI 精修版本。</p></div></div>
         </section>
 
         <section class="bead-library card" aria-labelledby="beadLibraryTitle">
