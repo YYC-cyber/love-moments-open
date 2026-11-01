@@ -112,6 +112,7 @@ function installThemeDecorations() {
     ["chat", "把想念，慢慢说给你听", "chat"],
     ["trip", "下一站，也要一起去", "map"],
     ["timeline", "认真收藏我们的每一天", "album"],
+    ["play", "把喜欢的照片，变成一起完成的小作品", "gift"],
     ["life", "和你一起，把日子过可爱", "gift"],
   ]) {
     const title = document.querySelector(`[data-screen="${surface}"] .page-title-row`);
@@ -275,7 +276,7 @@ const requestedLifeSection = initialParams.get("life_section");
 const requestedMealSection = initialParams.get("meal_section");
 
 const state = {
-  screen: ["home", "chat", "trip", "timeline", "life"].includes(new URLSearchParams(location.search).get("screen")) ? new URLSearchParams(location.search).get("screen") : (privateStorage().getItem("love-screen") || "home"),
+  screen: ["home", "chat", "trip", "timeline", "play", "life"].includes(new URLSearchParams(location.search).get("screen")) ? new URLSearchParams(location.search).get("screen") : (privateStorage().getItem("love-screen") || "home"),
   plan: privateStorage().getItem("love-plan") || "slow",
   privacy: "双方可见",
   callStartedAt: null,
@@ -298,6 +299,7 @@ const state = {
   agoraRemoteTrack: null,
   data: null,
   selectedItemIds: new Set(),
+  bead: { image: null, sourceUrl: "", size: 29, palette: [], indices: [], generatedIndices: [], selectedColor: 0 },
   editingItemId: null,
   itineraryDetailItemId: null,
   sharedDetail: null,
@@ -1012,7 +1014,8 @@ function navigate(screen, { restoreTimeline = true, markRead = true } = {}) {
     state.chatHistory.savedScrollTop = null;
     state.chatHistory.initialized = true;
   });
-  if (state.data) loadSmartSurface(screen, { quiet: true });
+  if (state.data && screen !== "play") loadSmartSurface(screen, { quiet: true });
+  if (screen === "play") renderSavedBeadPatterns();
   if (screen === "chat" && state.data && markRead) api("/api/v1/messages/read", { method: "POST", body: "{}" }).then(result => { state.messageReadState = result; renderMessageReadState(); }).catch(() => {});
 }
 
@@ -5933,6 +5936,67 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("pageshow", () => { if (state.cooking.session) refreshCookingSession().then(() => { if (!state.cooking.tick) state.cooking.tick = setInterval(renderCookingSession, 1000); return acquireCookingWakeLock(); }).catch(() => {}); });
 window.addEventListener("focus", () => { if (state.cooking.session) refreshCookingSession().catch(() => {}); });
 
+const BEAD_STORAGE_KEY = "love-bead-patterns";
+const beadHex = color => `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+function beadColorDistance(a, b) { const mean = (a[0] + b[0]) / 2, red = a[0] - b[0], green = a[1] - b[1], blue = a[2] - b[2]; return (2 + mean / 256) * red * red + 4 * green * green + (2 + (255 - mean) / 256) * blue * blue; }
+function quantizeBeadPixels(pixels, requestedCount) {
+  const colors = [];
+  for (let index = 0; index < pixels.length; index += 4) { const alpha = pixels[index + 3] / 255; colors.push([Math.round(pixels[index] * alpha + 255 * (1 - alpha)), Math.round(pixels[index + 1] * alpha + 255 * (1 - alpha)), Math.round(pixels[index + 2] * alpha + 255 * (1 - alpha))]); }
+  const unique = [...new Map(colors.map(color => [color.join(","), color])).values()];
+  const count = Math.max(1, Math.min(Number(requestedCount) || 12, unique.length));
+  const average = colors.reduce((sum, color) => sum.map((value, channel) => value + color[channel]), [0, 0, 0]).map(value => value / colors.length);
+  const palette = [average];
+  while (palette.length < count) { let candidate = unique[0], farthest = -1; for (const color of unique) { const distance = Math.min(...palette.map(entry => beadColorDistance(color, entry))); if (distance > farthest) { candidate = color; farthest = distance; } } palette.push([...candidate]); }
+  let indices = new Array(colors.length).fill(0);
+  for (let iteration = 0; iteration < 7; iteration += 1) {
+    const sums = palette.map(() => [0, 0, 0, 0]);
+    indices = colors.map(color => { let nearest = 0, distance = Infinity; palette.forEach((entry, paletteIndex) => { const next = beadColorDistance(color, entry); if (next < distance) { nearest = paletteIndex; distance = next; } }); sums[nearest][0] += color[0]; sums[nearest][1] += color[1]; sums[nearest][2] += color[2]; sums[nearest][3] += 1; return nearest; });
+    sums.forEach((sum, index) => { if (sum[3]) palette[index] = [sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3]]; });
+  }
+  return { palette: palette.map(color => color.map(Math.round)), indices };
+}
+function beadSourcePixels(image, size, cropMode) {
+  const canvas = document.createElement("canvas"); canvas.width = size; canvas.height = size;
+  const context = canvas.getContext("2d", { willReadFrequently: true }); context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.fillStyle = "#fff"; context.fillRect(0, 0, size, size);
+  const scale = cropMode === "contain" ? Math.min(size / image.naturalWidth, size / image.naturalHeight) : Math.max(size / image.naturalWidth, size / image.naturalHeight);
+  const width = image.naturalWidth * scale, height = image.naturalHeight * scale; context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
+  return context.getImageData(0, 0, size, size).data;
+}
+function beadCounts(pattern = state.bead) { const counts = pattern.palette.map(() => 0); pattern.indices.forEach(index => { if (counts[index] !== undefined) counts[index] += 1; }); return counts; }
+function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
+  if (!canvas || !pattern?.size || !pattern?.indices?.length) return;
+  const side = canvas.width, context = canvas.getContext("2d"), cell = side / pattern.size; canvas.height = side; context.clearRect(0, 0, side, side);
+  pattern.indices.forEach((colorIndex, index) => { const x = (index % pattern.size) * cell, y = Math.floor(index / pattern.size) * cell; context.fillStyle = beadHex(pattern.palette[colorIndex] || [255, 255, 255]); context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell)); });
+  if (!grid) return; context.strokeStyle = pattern.size > 32 ? "rgba(45,31,34,.28)" : "rgba(45,31,34,.42)"; context.lineWidth = pattern.size > 32 ? .55 : .8; context.beginPath();
+  for (let index = 0; index <= pattern.size; index += 1) { const position = Math.round(index * cell) + .5; context.moveTo(position, 0); context.lineTo(position, side); context.moveTo(0, position); context.lineTo(side, position); } context.stroke();
+}
+function renderBeadPalette() { const host = document.getElementById("beadPalette"); if (!host || !state.bead.palette.length) return; const counts = beadCounts(); host.innerHTML = state.bead.palette.map((color, index) => `<button type="button" class="${state.bead.selectedColor === index ? "selected" : ""}" data-bead-color="${index}" aria-pressed="${state.bead.selectedColor === index}"><i style="--bead-color:${beadHex(color)}"></i><span><b>C${String(index + 1).padStart(2, "0")}</b><small>${beadHex(color)} · ${counts[index]} 颗</small></span></button>`).join(""); }
+function renderBeadPattern() { paintBeadCanvas(document.getElementById("beadCanvas"), state.bead); renderBeadPalette(); document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种颜色 · 共 ${state.bead.size ** 2} 颗（通用色号）`; document.getElementById("beadResult").hidden = false; }
+function readSavedBeadPatterns() { try { const value = JSON.parse(privateStorage().getItem(BEAD_STORAGE_KEY) || "[]"); return Array.isArray(value) ? value.filter(item => item?.id && Number(item.size) >= 8 && Array.isArray(item.palette) && Array.isArray(item.indices)).slice(0, 12) : []; } catch (_) { privateStorage().removeItem(BEAD_STORAGE_KEY); return []; } }
+function writeSavedBeadPatterns(items) { privateStorage().setItem(BEAD_STORAGE_KEY, JSON.stringify(items.slice(0, 12))); }
+function renderSavedBeadPatterns() {
+  const host = document.getElementById("beadSavedList"); if (!host) return; const items = readSavedBeadPatterns();
+  if (!items.length) { host.innerHTML = `<div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div>`; return; }
+  host.innerHTML = items.map(item => `<article class="bead-saved-card"><canvas width="116" height="116" data-bead-preview="${escapeHtml(item.id)}" aria-hidden="true"></canvas><div><strong>${escapeHtml(item.title || "拼豆板图")}</strong><small>${Number(item.size)} × ${Number(item.size)} · ${item.palette.length} 色</small><time>${escapeHtml(new Date(item.updatedAt || item.createdAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</time></div><div><button type="button" data-action="bead-open" data-id="${escapeHtml(item.id)}">继续编辑</button><button type="button" class="danger-text" data-action="bead-delete" data-id="${escapeHtml(item.id)}">删除</button></div></article>`).join("");
+  items.forEach(item => paintBeadCanvas(host.querySelector(`[data-bead-preview="${CSS.escape(item.id)}"]`), item, { grid: false }));
+}
+function loadBeadImage(file) {
+  if (!file) return; if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) { toast("请选择 JPG、PNG 或 WebP 图片"); return; } if (file.size > 15 * 1024 * 1024) { toast("照片不能超过 15 MB，请先使用系统相册缩小"); return; }
+  const url = URL.createObjectURL(file), image = new Image();
+  image.onload = () => { if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl); state.bead.image = image; state.bead.sourceUrl = url; const preview = document.getElementById("beadSourcePreview"); preview.src = url; preview.hidden = false; document.querySelector(".bead-upload-button").hidden = true; document.querySelector(".bead-change-image").hidden = false; document.querySelector('[data-action="bead-generate"]').disabled = false; toast("照片已在本机打开，可以调整尺寸后生成"); };
+  image.onerror = () => { URL.revokeObjectURL(url); toast("这张照片无法读取，请换一张重试"); }; image.src = url;
+}
+function generateBeadPattern() { if (!state.bead.image) { toast("请先选择照片"); return; } const size = Number(document.getElementById("beadBoardSize").value), count = Number(document.getElementById("beadColorCount").value), pixels = beadSourcePixels(state.bead.image, size, document.getElementById("beadCropMode").value), result = quantizeBeadPixels(pixels, count); Object.assign(state.bead, { size, palette: result.palette, indices: result.indices, generatedIndices: [...result.indices], selectedColor: 0 }); renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" }); }
+function saveCurrentBeadPattern() { if (!state.bead.indices.length) { toast("请先生成板图"); return; } const now = new Date(), record = { id: globalThis.crypto?.randomUUID?.() || `bead-${Date.now()}`, title: `拼豆作品 · ${now.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`, size: state.bead.size, palette: state.bead.palette.map(color => [...color]), indices: [...state.bead.indices], createdAt: now.toISOString(), updatedAt: now.toISOString() }; writeSavedBeadPatterns([record, ...readSavedBeadPatterns()]); renderSavedBeadPatterns(); toast("板图已保存在当前账号的这台设备上"); }
+function openSavedBeadPattern(id) { const item = readSavedBeadPatterns().find(entry => entry.id === id); if (!item) { toast("这份本机草稿已经不存在"); return; } Object.assign(state.bead, { size: Number(item.size), palette: item.palette.map(color => [...color]), indices: [...item.indices], generatedIndices: [...item.indices], selectedColor: 0 }); renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" }); }
+function exportBeadPattern() {
+  if (!state.bead.indices.length) { toast("请先生成板图"); return; } const cell = state.bead.size <= 32 ? 24 : 16, boardSide = state.bead.size * cell, counts = beadCounts(), columns = state.bead.palette.length > 18 ? 3 : 2, rows = Math.ceil(state.bead.palette.length / columns);
+  const canvas = document.createElement("canvas"), board = document.createElement("canvas"); canvas.width = boardSide; canvas.height = boardSide + 82 + rows * 34; board.width = boardSide; board.height = boardSide; paintBeadCanvas(board, state.bead);
+  const context = canvas.getContext("2d"); context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0); context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34); context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${state.bead.size ** 2} 颗 · 通用色号请按实物品牌色卡复核`, 18, boardSide + 58);
+  const width = canvas.width / columns; state.bead.palette.forEach((color, index) => { const x = index % columns * width + 18, y = boardSide + 84 + Math.floor(index / columns) * 34; context.fillStyle = beadHex(color); context.fillRect(x, y, 22, 22); context.strokeStyle = "#8f807d"; context.strokeRect(x, y, 22, 22); context.fillStyle = "#2d1f22"; context.font = "13px sans-serif"; context.fillText(`C${String(index + 1).padStart(2, "0")}  ${beadHex(color)}  ${counts[index]} 颗`, x + 30, y + 16); });
+  const link = document.createElement("a"); link.download = `恋屿拼豆-${state.bead.size}x${state.bead.size}-${new Date().toLocaleDateString("sv-SE")}.png`; link.href = canvas.toDataURL("image/png"); link.click();
+}
+
 document.addEventListener("click", async event => {
   const authMode = event.target.closest("[data-auth-mode]");
   if (authMode) { showAccountAuth(authMode.dataset.authMode); return; }
@@ -5947,6 +6011,10 @@ document.addEventListener("click", async event => {
     }
     navigate(nav.dataset.nav); return;
   }
+  const beadColor = event.target.closest("[data-bead-color]");
+  if (beadColor) { state.bead.selectedColor = Number(beadColor.dataset.beadColor); renderBeadPalette(); return; }
+  const beadAction = event.target.closest("[data-action^='bead-']");
+  if (beadAction) { const action = beadAction.dataset.action; if (action === "bead-pick-image") document.getElementById("beadImageInput").click(); else if (action === "bead-generate") generateBeadPattern(); else if (action === "bead-reset-edits") { state.bead.indices = [...state.bead.generatedIndices]; renderBeadPattern(); toast("已恢复刚生成的板图"); } else if (action === "bead-save") saveCurrentBeadPattern(); else if (action === "bead-export") exportBeadPattern(); else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id); else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); } return; }
   const plan = event.target.closest("[data-plan]");
   if (plan) {
     state.plan = plan.dataset.plan; privateStorage().setItem("love-plan", state.plan); renderPlan();
@@ -8772,6 +8840,12 @@ document.getElementById("pantryForm").addEventListener("submit", async event => 
     event.target.reset(); await loadMeals({ quiet: true }); toast("家中食材状态已同步");
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
+
+document.getElementById("beadImageInput").addEventListener("change", event => { loadBeadImage(event.target.files?.[0]); event.target.value = ""; });
+document.getElementById("beadUploadZone").addEventListener("dragover", event => { event.preventDefault(); event.currentTarget.classList.add("dragging"); });
+document.getElementById("beadUploadZone").addEventListener("dragleave", event => event.currentTarget.classList.remove("dragging"));
+document.getElementById("beadUploadZone").addEventListener("drop", event => { event.preventDefault(); event.currentTarget.classList.remove("dragging"); loadBeadImage(event.dataTransfer?.files?.[0]); });
+document.getElementById("beadCanvas").addEventListener("click", event => { if (!state.bead.indices.length) return; const bounds = event.currentTarget.getBoundingClientRect(), x = Math.floor((event.clientX - bounds.left) / bounds.width * state.bead.size), y = Math.floor((event.clientY - bounds.top) / bounds.height * state.bead.size); if (x < 0 || y < 0 || x >= state.bead.size || y >= state.bead.size) return; state.bead.indices[y * state.bead.size + x] = state.bead.selectedColor; renderBeadPattern(); });
 
 document.querySelectorAll(".modal").forEach(modal => modal.addEventListener("click", event => { if (event.target === modal) closeModals(); }));
 document.addEventListener("error", event => {

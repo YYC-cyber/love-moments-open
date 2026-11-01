@@ -162,7 +162,7 @@ function shouldIgnoreConsoleError(message) {
       { width: 1440, height: 900 },
     ];
     for (const viewport of viewports) {
-      for (const surface of ["home", "chat", "trip", "timeline", "life"]) {
+      for (const surface of ["home", "chat", "trip", "timeline", "play", "life"]) {
         await checkSurface(pageA, surface, viewport);
       }
     }

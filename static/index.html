@@ -496,11 +496,49 @@
       </div>
     </section>
 
+    <section class="screen" data-screen="play">
+      <div class="content play-content">
+        <div class="page-title-row play-title">
+          <div><span class="eyebrow ink">CREATE TOGETHER</span><h1>娱乐工坊</h1><p>把喜欢的照片变成可以照着制作的拼豆板图。</p></div>
+          <span class="play-title-mark" aria-hidden="true">✿</span>
+        </div>
+        <article class="bead-maker card" aria-labelledby="beadMakerTitle">
+          <div class="bead-maker-heading"><div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div><span class="bead-mascot" aria-hidden="true">▦</span></div>
+          <div class="bead-workflow" aria-label="拼豆生成步骤"><span class="active">1 选照片</span><i></i><span>2 调参数</span><i></i><span>3 生成制作</span></div>
+          <div class="bead-upload" id="beadUploadZone">
+            <input id="beadImageInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+            <button type="button" class="bead-upload-button" data-action="bead-pick-image"><b>＋</b><span>选择一张照片</span><small>支持 JPG、PNG、WebP，原图不离开本机</small></button>
+            <img id="beadSourcePreview" alt="待转换的照片预览" hidden>
+            <button type="button" class="quiet bead-change-image" data-action="bead-pick-image" hidden>更换照片</button>
+          </div>
+          <div class="bead-settings">
+            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option></select></label>
+            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12" selected>12 色 · 清晰易做</option><option value="24">24 色 · 细节丰富</option><option value="36">36 色 · 接近原图</option></select></label>
+            <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="contain">保留完整照片</option></select></label>
+          </div>
+          <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
+          <p class="form-note">建议人像先选择主体清楚、背景简单的照片。小尺寸会主动合并相近颜色，实际拼豆更容易购买和制作。</p>
+        </article>
+        <section class="bead-result card" id="beadResult" hidden aria-live="polite">
+          <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
+          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
+          <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
+          <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
+          <div class="bead-result-actions"><button type="button" class="secondary-button" data-action="bead-save">保存到本机</button><button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button></div>
+        </section>
+        <section class="bead-library card" aria-labelledby="beadLibraryTitle">
+          <div class="bead-library-heading"><div><span class="eyebrow ink">MY PATTERNS</span><h2 id="beadLibraryTitle">我的拼豆作品</h2></div><small>最多保留 12 份本机草稿</small></div>
+          <div id="beadSavedList" class="bead-saved-list"><div class="empty-view"><p>生成板图后可以保存，下一次继续修改。</p></div></div>
+        </section>
+      </div>
+    </section>
+
     <nav class="bottom-nav" aria-label="主导航">
       <button class="active" data-nav="home"><span>⌂</span><small>首页</small></button>
       <button data-nav="chat"><span>◌</span><small>消息</small><i class="nav-dot" id="chatUnreadBadge" hidden>0</i></button>
       <button data-nav="trip"><span>⌁</span><small>旅行</small></button>
       <button data-nav="timeline"><span>◇</span><small>时光</small></button>
+      <button data-nav="play"><span>♟</span><small>娱乐</small></button>
       <button data-nav="life"><span>♡</span><small>我们</small></button>
     </nav>
   </main>

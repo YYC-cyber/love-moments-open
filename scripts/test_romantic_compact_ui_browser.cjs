@@ -57,7 +57,7 @@ async function assertNoOverflow(page, label) {
 }
 
 async function navigateAllSurfaces(page, label) {
-  for (const surface of ["home", "chat", "trip", "timeline", "life"]) {
+  for (const surface of ["home", "chat", "trip", "timeline", "play", "life"]) {
     await page.locator('.bottom-nav [data-nav="' + surface + '"]').click();
     await page.locator('[data-screen="' + surface + '"].active').waitFor();
     await assertNoOverflow(page, label + " / " + surface);
@@ -162,7 +162,7 @@ async function navigateAllSurfaces(page, label) {
     await phone.setViewportSize({ width: 1440, height: 900 });
     await navigateAllSurfaces(phone, "1440×900");
     assert(errors.length === 0, "页面脚本错误：" + errors.join(" | "));
-    console.log("浪漫紧凑版浏览器验收通过：五页、双账号消息、渐进披露、固定输入区、手机/平板/桌面布局");
+    console.log("浪漫紧凑版浏览器验收通过：六个主板块、双账号消息、渐进披露、固定输入区、手机/平板/桌面布局");
   } catch (error) {
     if (logs.trim()) console.error(logs.slice(-8000));
     throw error;
