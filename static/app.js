@@ -370,6 +370,7 @@ const state = {
   messageReadState: { unread_count: 0, first_unread_message_id: null, latest_message_id: null },
   serviceWorkerRegistration: null,
   serviceWorkerUpdate: null,
+  serviceWorkerUpdateVersion: "",
   serviceWorkerUpdateApplying: false,
   profileDraft: { baseline: "", avatarFile: null, previewUrl: "", removePhoto: false },
   cooking: { session: null, tick: null, wakeLock: null, deepLinked: false, restoreChecked: false, serverOffsetMs: 0, capabilityNotice: "", pantryReceipts: [] },
@@ -622,9 +623,34 @@ async function serviceWorkerRegistration() {
   return state.serviceWorkerRegistration;
 }
 
-function offerServiceWorkerUpdate(worker) {
+function serviceWorkerVersion(worker, timeout = 1200) {
+  if (!worker || typeof MessageChannel === "undefined") return Promise.resolve("");
+  return new Promise(resolve => {
+    const channel = new MessageChannel();
+    const timer = window.setTimeout(() => resolve(""), timeout);
+    channel.port1.onmessage = event => {
+      window.clearTimeout(timer);
+      resolve(String(event.data?.version || ""));
+    };
+    try { worker.postMessage({ type: "GET_VERSION" }, [channel.port2]); }
+    catch (_) { window.clearTimeout(timer); resolve(""); }
+  });
+}
+
+async function offerServiceWorkerUpdate(worker) {
   if (!worker || !navigator.serviceWorker.controller) return;
+  const [waitingVersion, activeVersion] = await Promise.all([
+    serviceWorkerVersion(worker),
+    serviceWorkerVersion(navigator.serviceWorker.controller),
+  ]);
+  if (waitingVersion && waitingVersion === activeVersion) return;
+  const appliedVersion = sessionStorage.getItem("love-sw-applied-version") || "";
+  if (waitingVersion && waitingVersion === appliedVersion) {
+    worker.postMessage({ type: "SKIP_WAITING" });
+    return;
+  }
   state.serviceWorkerUpdate = worker;
+  state.serviceWorkerUpdateVersion = waitingVersion;
   const banner = document.getElementById("appUpdateBanner");
   if (banner) banner.hidden = false;
 }
@@ -632,16 +658,25 @@ function offerServiceWorkerUpdate(worker) {
 function watchServiceWorkerUpdates(registration) {
   if (registration.datasetUpdateWatched) return;
   registration.datasetUpdateWatched = "1";
-  if (registration.waiting) offerServiceWorkerUpdate(registration.waiting);
+  if (registration.waiting) offerServiceWorkerUpdate(registration.waiting).catch(() => {});
   registration.addEventListener("updatefound", () => {
     const worker = registration.installing;
     worker?.addEventListener("statechange", () => {
-      if (worker.state === "installed") offerServiceWorkerUpdate(registration.waiting || worker);
+      if (worker.state === "installed" && registration.waiting) offerServiceWorkerUpdate(registration.waiting).catch(() => {});
     });
   });
   navigator.serviceWorker.addEventListener("controllerchange", () => {
+    state.serviceWorkerUpdate = null;
+    state.serviceWorkerUpdateVersion = "";
+    const banner = document.getElementById("appUpdateBanner");
+    if (banner) banner.hidden = true;
     if (state.serviceWorkerUpdateApplying) window.location.reload();
   }, { once: true });
+  serviceWorkerVersion(navigator.serviceWorker.controller).then(version => {
+    if (version && sessionStorage.getItem("love-sw-applied-version") === version) {
+      sessionStorage.removeItem("love-sw-applied-version");
+    }
+  }).catch(() => {});
 }
 
 function renderPushStatus(message, status = "") {
@@ -6013,7 +6048,13 @@ document.addEventListener("click", async event => {
     actionEl.disabled = true;
     actionEl.textContent = "正在更新…";
     const worker = state.serviceWorkerUpdate || state.serviceWorkerRegistration?.waiting;
-    if (worker) worker.postMessage({ type: "SKIP_WAITING" });
+    if (state.serviceWorkerUpdateVersion) sessionStorage.setItem("love-sw-applied-version", state.serviceWorkerUpdateVersion);
+    const banner = document.getElementById("appUpdateBanner");
+    if (banner) banner.hidden = true;
+    if (worker) {
+      worker.postMessage({ type: "SKIP_WAITING" });
+      window.setTimeout(() => window.location.reload(), 1800);
+    }
     else window.location.reload();
     return;
   }

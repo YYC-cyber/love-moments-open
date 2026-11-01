@@ -1,4 +1,4 @@
-const CACHE = "love-moments-open-v58";
+const CACHE = "love-moments-open-v59";
 const ASSETS = [
   "/",
   "/static/index.html",
@@ -18,6 +18,10 @@ self.addEventListener("install", event => {
 });
 
 self.addEventListener("message", event => {
+  if (event.data?.type === "GET_VERSION") {
+    event.ports?.[0]?.postMessage({ version: CACHE });
+    return;
+  }
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 

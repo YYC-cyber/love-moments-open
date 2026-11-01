@@ -15,6 +15,7 @@ const cacheEntries = new Map([
 const cachePuts = [];
 let fetchMode = "fail";
 let focused = false;
+let skippedWaiting = false;
 const existingClient = {
   url: "https://love.example/?screen=home",
   async navigate(url) { navigation.push(url); this.url = url; return this; },
@@ -62,16 +63,25 @@ const context = {
       async openWindow(url) { navigation.push(url); return { url }; }
     },
     addEventListener(name, handler) { listeners[name] = handler; },
-    skipWaiting() {}
+    skipWaiting() { skippedWaiting = true; }
   }
 };
 context.self.clients.claim = async () => {};
 
 const source = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 vm.runInNewContext(source, context, { filename: "sw.js" });
-for (const name of ["install", "activate", "fetch", "push", "notificationclick"]) {
+for (const name of ["install", "activate", "message", "fetch", "push", "notificationclick"]) {
   assert.equal(typeof listeners[name], "function", `missing ${name} listener`);
 }
+
+let workerVersion = "";
+listeners.message({
+  data: { type: "GET_VERSION" },
+  ports: [{ postMessage(payload) { workerVersion = payload.version; } }],
+});
+assert.match(workerVersion, /^love-moments(?:-open)?-v\d+$/);
+listeners.message({ data: { type: "SKIP_WAITING" }, ports: [] });
+assert.equal(skippedWaiting, true);
 
 // Offline shortcut URLs are documents for the public shell. Private APIs,
 // media and mutations remain completely outside the worker fetch pipeline.
@@ -192,7 +202,7 @@ Promise.resolve(pushWork).then(async () => {
   });
   await unsafeWork;
   assert.equal(navigation[2], "https://love.example/?screen=chat");
-  process.stdout.write(JSON.stringify({ ok: true, checks: ["call and shared notification", "app badge", "same-origin detail click routing", "unsafe URL fallback"] }) + "\n");
+  process.stdout.write(JSON.stringify({ ok: true, checks: ["worker version handshake", "skip waiting", "call and shared notification", "app badge", "same-origin detail click routing", "unsafe URL fallback"] }) + "\n");
 }).catch(error => {
   console.error(error.stack || error.message);
   process.exitCode = 1;
