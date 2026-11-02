@@ -6605,13 +6605,14 @@ function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true } = {}
     context.moveTo(0, position); context.lineTo(side, position);
   }
   context.stroke();
-  context.strokeStyle = "rgba(78,38,48,.62)"; context.lineWidth = Math.max(1.5, side / 696); context.beginPath();
+  const guideWidth = Math.max(2, Math.round(side / 522));
+  context.fillStyle = "rgba(78,38,48,.62)"; context.beginPath();
   for (let index = 5; index < pattern.size; index += 5) {
-    const position = Math.round(index * cell) + .5;
-    context.moveTo(position, 0); context.lineTo(position, side);
-    context.moveTo(0, position); context.lineTo(side, position);
+    const position = Math.round(index * cell) - Math.floor(guideWidth / 2);
+    context.rect(position, 0, guideWidth, side);
+    context.rect(0, position, side, guideWidth);
   }
-  context.stroke();
+  context.fill();
 }
 
 function beadPatternQuality(pattern) {
@@ -6627,9 +6628,20 @@ function beadPatternQuality(pattern) {
   const rare = pattern.paletteMeta.filter(meta => !meta.common).length;
   const detail = Math.min(24, Math.round(pattern.size / 4));
   const coveragePenalty = coverage < .18 ? 24 : coverage < .3 ? 12 : 0;
-  const noisePenalty = Math.min(18, Math.round(isolated / Math.max(1, filled) * 160));
-  const rarePenalty = Math.min(10, rare * 2);
-  return Math.max(40, Math.min(99, 72 + detail - coveragePenalty - noisePenalty - rarePenalty));
+  const noisePenalty = Math.min(10, Math.round(isolated / Math.max(1, filled) * 90));
+  const rarePenalty = Math.min(6, rare);
+  return Math.max(40, Math.min(99, 82 + detail - coveragePenalty - noisePenalty - rarePenalty));
+}
+
+function beadIroningAdvice(pattern = state.bead) {
+  const chosen = state.bead.variants.find(item => item.id === state.bead.selectedVariant);
+  const large = pattern.size >= 58;
+  const easy = chosen?.id === "easy";
+  const finish = easy ? "留孔半融 · 双面轻定型" : "留孔半融 · 单面主烫";
+  const setup = large
+    ? "大画面建议先用耐热美纹胶带分区固定、扎排气孔，再移出底板烫；可减少底板变形和整幅翘曲。"
+    : "小画面可留在底板上覆专用烫纸，先轻烫一面定型，再按需要补烫背面。";
+  return `<strong>推荐烫法：${finish}</strong><p>${setup}</p><ol><li>使用拼豆烫纸或无蜡烘焙纸；不要让熨斗直接接触豆子，也不要垫软毛巾烫，软面容易受力不均。</li><li>熨斗关闭蒸汽，用中低温小范围画圈；看到孔洞缩小约三分之一、豆子刚连在一起就停。</li><li>趁温热夹在平整重物下冷却 10～15 分钟，确认完全冷却后再揭纸。</li></ol><small>亮闪、透明、夜光等特殊豆通常比普通豆更怕久烫：先用同批豆做 5×5 试片，降低一档温度并缩短停留时间。想要亮面可在最后隔烫纸极短补烫，不建议把人像正面烫到完全无孔，否则五官容易糊成一片。</small>`;
 }
 
 function renderBeadVariantChoices() {
@@ -6664,6 +6676,8 @@ function renderBeadPattern() {
   const physical = catalog?.boardPitchMm ? ` · 成品约 ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} × ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} cm` : "";
   const catalogText = catalog ? ` · ${catalog.brand} ${catalog.series || catalog.name} ${catalog.beadSizeMm}mm${catalog.verified ? "（已校准）" : "（参考色）"}` : "";
   document.getElementById("beadResultSummary").textContent = `${chosen ? `${chosen.label} · ` : ""}${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${physical}${catalogText}${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}${chosen ? ` · 质量 ${chosen.quality} 分` : ""}`;
+  const ironing = document.getElementById("beadIroningAdvice");
+  if (ironing) ironing.innerHTML = beadIroningAdvice(state.bead);
   const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
@@ -6925,7 +6939,7 @@ function smartBeadPlans() {
   ]);
   return finish([
     { id: "recommended", label: "专业拼豆版", description: "清晰整理五官、毛发、轮廓与互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
-    { id: "easy", label: "易制作版", description: "同尺寸减少色号，只合并孤立杂色，保留五官和轮廓", size: 87, colorCount: 36, detailMode: "easy", backgroundMode: "keep" },
+    { id: "easy", label: "易制作版", description: "58 格实体双板规格，减少豆量和色号，保留五官与轮廓", size: 58, colorCount: 36, detailMode: "easy", backgroundMode: "keep" },
     { id: "clean", label: "净背景版", description: "保守清理边缘背景，不再切伤人物或宠物主体", size: 87, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 24 },
   ]);
 }

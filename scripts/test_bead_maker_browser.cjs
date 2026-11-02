@@ -79,7 +79,17 @@ async function waitForHealth(origin, child) {
     if (process.env.BEAD_TEST_INITIAL_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_INITIAL_SCREENSHOT, fullPage: true });
     await page.locator('#beadVariantChoices [data-id="easy"]').click();
     assert((await page.locator("#beadResultSummary").textContent()).includes("易制作版"), "三套方案之间无法切换");
-    assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "易制作版不应通过降低画板尺寸牺牲主体清晰度");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("58 × 58"), "易制作版没有使用国内常见的 58 格实体双板规格");
+    const guideColours = await page.evaluate(() => {
+      const canvas = document.createElement("canvas"); canvas.width = 580; canvas.height = 580;
+      const pattern = { size: 58, palette: [[255, 255, 255]], indices: new Array(58 * 58).fill(0) };
+      paintBeadCanvas(canvas, pattern);
+      const context = canvas.getContext("2d");
+      return [5, 10, 15, 20].map(step => [...context.getImageData(step * 10, 23, 1, 1).data]);
+    });
+    assert(guideColours.every(colour => JSON.stringify(colour) === JSON.stringify(guideColours[0])), `每 5 格定位线的颜色或粗细不一致：${JSON.stringify(guideColours)}`);
+    await page.locator(".bead-ironing-guide summary").click();
+    assert((await page.locator("#beadIroningAdvice").textContent()).includes("亮闪"), "没有提供特殊拼豆的烫制提示");
     const removalSafety = await page.evaluate(() => {
       const sample = new ImageData(40, 40);
       for (let y = 0; y < 40; y += 1) for (let x = 0; x < 40; x += 1) {

@@ -73,10 +73,17 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("safeRemoval", self.javascript)
         self.assertIn("#eee9e5", self.javascript)
 
-    def test_easy_variant_keeps_professional_resolution(self):
+    def test_easy_variant_uses_practical_double_board_resolution(self):
         self.assertIn('label: "易制作版"', self.javascript)
-        self.assertIn('size: 87, colorCount: 36, detailMode: "easy"', self.javascript)
-        self.assertIn("同尺寸减少色号", self.javascript)
+        self.assertIn('size: 58, colorCount: 36, detailMode: "easy"', self.javascript)
+        self.assertIn("58 格实体双板规格", self.javascript)
+
+    def test_ironing_guidance_covers_large_portraits_and_special_beads(self):
+        self.assertIn('id="beadIroningAdvice"', self.html)
+        self.assertIn("function beadIroningAdvice", self.javascript)
+        self.assertIn("不要垫软毛巾烫", self.javascript)
+        self.assertIn("亮闪、透明、夜光", self.javascript)
+        self.assertIn("5×5 试片", self.javascript)
 
     def test_subject_tone_is_analysed_locally(self):
         self.assertIn('id="beadToneMode"', self.html)
