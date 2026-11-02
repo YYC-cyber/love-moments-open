@@ -547,8 +547,8 @@
 
           <div class="bead-settings">
             <label><span>生成方式</span><select id="beadGenerationMode"><option value="local">本机生成 · 免费快速</option><option value="ai">AI 精修 · 人像效果更好</option></select></label>
-            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option><option value="58">58 × 58 · 四块 29 板</option><option value="87">87 × 87 · 九块 29 板</option></select></label>
-            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24" selected>24 色 · 日常推荐</option><option value="36">36 色 · 细节丰富</option><option value="48">48 色 · 明暗更细</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
+            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29">29 × 29 · 图标/单板</option><option value="32">32 × 32 · 简单头像</option><option value="50">50 × 50 · 中等作品</option><option value="58" selected>58 × 58 · 人像推荐</option><option value="87">87 × 87 · 高清人像</option></select></label>
+            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24">24 色 · 卡通推荐</option><option value="36">36 色 · 细节丰富</option><option value="48" selected>48 色 · 人像推荐</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
             <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
             <label><span>人物明暗</span><select id="beadToneMode"><option value="auto" selected>主体整体提亮 · 推荐</option><option value="bright">强力提亮暗部</option><option value="original">保持原图明暗</option></select></label>
@@ -562,7 +562,7 @@
           </div>
           <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
           <div class="bead-ai-progress" id="beadAiProgress" hidden role="status" aria-live="polite"><span></span><strong>AI 正在精修照片</strong><small>一般需要 20～60 秒，请保持页面打开。</small></div>
-          <p class="form-note" id="beadModeNote">清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光；配合去背景时只处理保留下来的主体像素。去背景在本机完成，纯色背景效果最好。</p>
+          <p class="form-note" id="beadModeNote">人像建议至少使用 58 × 58 和 48 色；29 × 29 只适合图标或小挂件。清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光。</p>
         </article>
 
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">

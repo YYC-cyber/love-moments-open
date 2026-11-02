@@ -51,6 +51,8 @@ async function waitForHealth(origin, child) {
     assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索无法找到拼豆功能");
     await page.locator('[data-play-feature="beads"]').click();
     await page.locator("#beadToolPanel:not([hidden])").waitFor();
+    assert(await page.locator("#beadBoardSize").inputValue() === "58", "人像默认画板不是 58 × 58");
+    assert(await page.locator("#beadColorCount").inputValue() === "48", "人像默认颜色不是 48 色");
     const toneCheck = await page.evaluate(() => {
       const dark = new ImageData(12, 12); for (let offset = 0; offset < dark.data.length; offset += 4) { dark.data[offset] = 45; dark.data[offset + 1] = 38; dark.data[offset + 2] = 34; dark.data[offset + 3] = 255; }
       const normal = new ImageData(12, 12); for (let offset = 0; offset < normal.data.length; offset += 4) { normal.data[offset] = 140; normal.data[offset + 1] = 132; normal.data[offset + 2] = 126; normal.data[offset + 3] = 255; }

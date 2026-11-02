@@ -13,8 +13,13 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         cls.javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     def test_large_physical_board_options_are_available(self):
-        self.assertIn('<option value="58">58 × 58 · 四块 29 板</option>', self.html)
-        self.assertIn('<option value="87">87 × 87 · 九块 29 板</option>', self.html)
+        self.assertIn('<option value="58" selected>58 × 58 · 人像推荐</option>', self.html)
+        self.assertIn('<option value="87">87 × 87 · 高清人像</option>', self.html)
+
+    def test_ai_portrait_mode_prevents_low_resolution_defaults(self):
+        self.assertIn('<option value="48" selected>48 色 · 人像推荐</option>', self.html)
+        self.assertIn('if (Number(boardSize?.value || 0) < 58)', self.javascript)
+        self.assertIn('if (Number(colorCount?.value || 0) < 48)', self.javascript)
 
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)

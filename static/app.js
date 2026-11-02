@@ -311,7 +311,7 @@ const state = {
   data: null,
   selectedItemIds: new Set(),
   playTool: "",
-  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], size: 29, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
+  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
@@ -6736,6 +6736,14 @@ async function generateBeadPattern({ retryAi = false } = {}) {
   const retryButton = document.querySelector('[data-action="bead-ai-retry"]');
   const originalLabel = generateButton?.textContent || "生成拼豆板图";
   const mode = document.getElementById("beadGenerationMode")?.value || "local";
+  if (mode === "ai") {
+    const boardSize = document.getElementById("beadBoardSize");
+    const colorCount = document.getElementById("beadColorCount");
+    const adjusted = [];
+    if (Number(boardSize?.value || 0) < 58) { boardSize.value = "58"; adjusted.push("58 × 58 画板"); }
+    if (Number(colorCount?.value || 0) < 48) { colorCount.value = "48"; adjusted.push("48 色"); }
+    if (adjusted.length) toast(`为避免人像糊成大色块，已自动调整为 ${adjusted.join(" + ")}`);
+  }
   if (generateButton) { generateButton.disabled = true; generateButton.textContent = mode === "ai" ? "AI 正在精修，请稍候…" : "正在计算明暗与拼豆位置…"; }
   if (retryButton) retryButton.disabled = true;
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -9784,6 +9792,10 @@ document.getElementById("beadGenerationMode")?.addEventListener("change", async 
     note.textContent = "本机模式不会上传照片，也不产生外部接口费用；适合图标、卡通图和已经精修好的图片。";
     return;
   }
+  const boardSize = document.getElementById("beadBoardSize");
+  const colorCount = document.getElementById("beadColorCount");
+  if (Number(boardSize?.value || 0) < 58) boardSize.value = "58";
+  if (Number(colorCount?.value || 0) < 48) colorCount.value = "48";
   note.textContent = "AI 模式会在你点击生成后，将本次照片发送给阿里云百炼精修。原图不保存；每次生成的精修版会仅对当前账号保存，旧版不会覆盖，需由你明确删除。每次重试会产生一次图片费用。";
   try {
     const status = await api("/api/v1/entertainment/beads/ai-status");
