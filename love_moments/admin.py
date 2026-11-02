@@ -72,6 +72,9 @@ class AdminService:
         self._release_cache: dict[str, Any] | None = None
         self._release_cache_until = datetime.min.replace(tzinfo=timezone.utc)
         self._release_lock = threading.Lock()
+        self._deepseek_balance_cache: dict[str, Any] | None = None
+        self._deepseek_balance_cache_until = datetime.min.replace(tzinfo=timezone.utc)
+        self._deepseek_balance_lock = threading.Lock()
 
     @property
     def store(self) -> LoveMomentsStore:
@@ -93,6 +96,43 @@ class AdminService:
         configured = os.getenv("MAINTENANCE_STATE_ROOT", "").strip()
         path = Path(configured) if configured else self.root / "data" / "maintenance"
         return path if path.is_absolute() else self.root / path
+
+    def _deepseek_balance(self) -> dict[str, Any] | None:
+        """Read the official DeepSeek balance without exposing its API key."""
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        base_url = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
+        if not api_key or "api.deepseek.com" not in base_url.lower():
+            return None
+        now = datetime.now(timezone.utc)
+        with self._deepseek_balance_lock:
+            if self._deepseek_balance_cache_until > now:
+                return self._deepseek_balance_cache
+            req = urllib.request.Request(
+                "https://api.deepseek.com/user/balance",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                method="GET",
+            )
+            result: dict[str, Any] | None = None
+            try:
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                for item in payload.get("balance_infos", []):
+                    if str(item.get("currency", "")).upper() != "CNY":
+                        continue
+                    result = {
+                        "available": bool(payload.get("is_available")),
+                        "currency": "CNY",
+                        "total_balance": round(float(item.get("total_balance", 0)), 6),
+                        "topped_up_balance": round(float(item.get("topped_up_balance", 0)), 6),
+                        "granted_balance": round(float(item.get("granted_balance", 0)), 6),
+                        "source": "provider",
+                    }
+                    break
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                result = None
+            self._deepseek_balance_cache = result
+            self._deepseek_balance_cache_until = now + timedelta(minutes=5)
+            return result
 
     @staticmethod
     def _local_notification(title: str, message: str) -> None:
@@ -786,6 +826,13 @@ class AdminService:
                 "calls": int(wallet_usage[key]["calls"]),
                 "configured_key": configured_key,
             })
+        deepseek_balance = self._deepseek_balance()
+        if deepseek_balance:
+            for wallet in ai_wallets:
+                if wallet["provider"] == "deepseek":
+                    wallet["provider_balance"] = deepseek_balance
+                    wallet["estimated_remaining_cny"] = deepseek_balance["total_balance"]
+                    break
         configured = {
             "large_model": bool(os.getenv("LLM_API_KEY", "").strip()),
             "bailian_image": bool(os.getenv("DASHSCOPE_API_KEY", "").strip() and os.getenv("DASHSCOPE_BASE_URL", "").strip()),

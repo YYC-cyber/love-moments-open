@@ -113,7 +113,12 @@ function render(data) {
     const unknown = Number(item.unknown_cost_calls || 0);
     const remaining = item.estimated_remaining_cny == null ? "暂不能准确计算" : `约 ¥${Number(item.estimated_remaining_cny).toFixed(2)}`;
     const detail = `${Number(item.calls || 0)} 次真实调用 · 已核算支出 ¥${spent.toFixed(4)}${unknown ? ` · ${unknown} 次费用待核对` : ""}`;
-    return `<article class="quota-card ${unknown ? "warning" : ""}"><div><strong>${escapeHtml(item.label)}</strong><span>${item.configured ? "已配置" : "未启用"}</span></div><b>充值 ¥${credited.toFixed(2)}</b><small>${escapeHtml(detail)}</small><small>估算剩余：${escapeHtml(remaining)} · 实际余额以供应商后台为准</small></article>`;
+    const provider = item.provider_balance;
+    const balance = provider
+      ? `<b>实时余额 ¥${Number(provider.total_balance || 0).toFixed(4)}</b><small>充值余额 ¥${Number(provider.topped_up_balance || 0).toFixed(4)} · 赠送余额 ¥${Number(provider.granted_balance || 0).toFixed(4)}</small>`
+      : `<b>充值 ¥${credited.toFixed(2)}</b>`;
+    const remainder = provider ? "余额来自供应商官方接口，最多缓存 5 分钟" : `估算剩余：${escapeHtml(remaining)} · 实际余额以供应商后台为准`;
+    return `<article class="quota-card ${unknown && !provider ? "warning" : ""}"><div><strong>${escapeHtml(item.label)}</strong><span>${item.configured ? "已配置" : "未启用"}</span></div>${balance}<small>${escapeHtml(detail)}</small><small>${remainder}</small></article>`;
   }).join("");
 
   const vault = data.data_vault;
