@@ -24,15 +24,15 @@
         <span class="eyebrow ink">PRIVATE SPACE FOR TWO</span>
         <h1>登录你们的<br>共同小岛</h1>
         <p class="auth-lead">使用恋屿账号和密码登录，不连接微信或其他社交账号。</p>
-        <div class="auth-tabs"><button class="active" data-auth-mode="login">登录</button><button data-auth-mode="register">注册</button></div>
+        <div class="auth-tabs"><button class="active" data-auth-mode="login" disabled>登录</button><button data-auth-mode="register" disabled>注册</button></div>
         <form id="authForm">
-          <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required></label>
-          <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required></label>
-          <button class="primary-button" id="authSubmit">登录</button>
+          <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required disabled></label>
+          <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required disabled></label>
+          <button class="primary-button" id="authSubmit" disabled>登录</button>
         </form>
-        <div class="auth-progress" id="authProgress" role="status" aria-live="polite" hidden>
-          <div class="auth-progress-track"><i id="authProgressBar"></i></div>
-          <span id="authProgressText">正在准备登录…</span>
+        <div class="auth-progress" id="authProgress" role="status" aria-live="polite">
+          <div class="auth-progress-track"><i id="authProgressBar" style="width:12%"></i></div>
+          <span id="authProgressText">正在确认页面版本…</span>
         </div>
         <a class="entry-notice" id="entryNotice" href="#" hidden>
           <strong>当前打开的是备用入口</strong><span>备用入口目前暂停，请前往正在使用的正式地址。</span>

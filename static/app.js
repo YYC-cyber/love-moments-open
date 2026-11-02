@@ -405,6 +405,7 @@ const state = {
   serviceWorkerUpdate: null,
   serviceWorkerUpdateVersion: "",
   serviceWorkerUpdateApplying: false,
+  authSubmitting: false,
   profileDraft: { baseline: "", avatarFile: null, previewUrl: "", removePhoto: false },
   cooking: { session: null, tick: null, wakeLock: null, deepLinked: false, restoreChecked: false, serverOffsetMs: 0, capabilityNotice: "", pantryReceipts: [] },
   destinationCandidates: [],
@@ -655,12 +656,53 @@ function pushSubscriptionPayload(subscription) {
 async function serviceWorkerRegistration() {
   if (!("serviceWorker" in navigator)) throw new Error("当前浏览器不支持后台通知");
   if (!state.serviceWorkerRegistration) {
-    state.serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js");
-    await navigator.serviceWorker.ready;
+    state.serviceWorkerRegistration = await Promise.race([
+      navigator.serviceWorker.register("/sw.js"),
+      new Promise((_, reject) => window.setTimeout(() => reject(new Error("页面版本检查超时")), 1200)),
+    ]);
+    await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(resolve => window.setTimeout(resolve, 800)),
+    ]);
     watchServiceWorkerUpdates(state.serviceWorkerRegistration);
     state.serviceWorkerRegistration.update().catch(() => {});
   }
   return state.serviceWorkerRegistration;
+}
+
+function waitForServiceWorkerInstall(registration, timeout = 1600) {
+  const worker = registration?.installing;
+  if (!worker || ["installed", "activated", "redundant"].includes(worker.state)) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = window.setTimeout(resolve, timeout);
+    worker.addEventListener("statechange", () => {
+      if (!["installed", "activated", "redundant"].includes(worker.state)) return;
+      window.clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
+async function prepareLatestAppShell() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return false;
+  setAuthProgress(12, "正在确认页面版本…");
+  const registration = await serviceWorkerRegistration();
+  await Promise.race([
+    registration.update().catch(() => undefined),
+    new Promise(resolve => window.setTimeout(resolve, 1200)),
+  ]);
+  await waitForServiceWorkerInstall(registration);
+  const worker = registration.waiting;
+  if (!worker || !navigator.serviceWorker.controller) return false;
+  const waitingVersion = await serviceWorkerVersion(worker);
+  if (waitingVersion) sessionStorage.setItem("love-sw-applied-version", waitingVersion);
+  state.serviceWorkerUpdate = worker;
+  state.serviceWorkerUpdateVersion = waitingVersion;
+  state.serviceWorkerUpdateApplying = true;
+  setAuthProgress(28, "发现新版本，正在切换后继续登录…");
+  worker.postMessage({ type: "SKIP_WAITING" });
+  window.setTimeout(() => window.location.reload(), 1800);
+  return true;
 }
 
 function serviceWorkerVersion(worker, timeout = 1200) {
@@ -5161,7 +5203,9 @@ function setAuthProgress(percent, message, { busy = true } = {}) {
   progress.hidden = !busy;
   bar.style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
   label.textContent = message || "正在打开共同空间…";
-  submit.disabled = busy;
+  document.querySelectorAll("#authForm input, #authSubmit, [data-auth-mode]").forEach(control => {
+    control.disabled = busy;
+  });
   submit.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
@@ -5195,6 +5239,7 @@ function showAccountAuth(mode = "login") {
     : "这座恋屿已经关闭公开注册，请使用现有的两个账号登录。需要更换账号时，由管理员临时开启注册。";
   document.getElementById("authSubmit").textContent = mode === "register" ? "创建恋屿账号" : "登录";
   document.getElementById("authPassword").autocomplete = mode === "register" ? "new-password" : "current-password";
+  setAuthProgress(0, "", { busy: false });
 }
 
 function showPairing() {
@@ -5216,6 +5261,7 @@ function hideAuth() {
 
 async function initializeAuth() {
   try {
+    setAuthProgress(36, "正在确认登录状态…");
     const result = await api("/api/v1/auth/me");
     renderEntryNotice(result.entry);
     state.registrationEnabled = result.registration_enabled !== false;
@@ -5227,6 +5273,27 @@ async function initializeAuth() {
     if (!restored) showAccountAuth();
     toast(restored ? "当前显示最近保存的离旅行程" : error.message);
   }
+}
+
+async function confirmAuthenticatedSession(expectedUserId) {
+  let lastError = null;
+  for (const delay of [0, 80, 180]) {
+    if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
+    try {
+      const session = await api("/api/v1/auth/me");
+      if (session.authenticated && session.user?.id === expectedUserId) return session;
+    } catch (error) { lastError = error; }
+  }
+  throw lastError || new Error("登录状态没有保存成功，请检查网络后重试");
+}
+
+async function initializeApplication() {
+  try {
+    if (await prepareLatestAppShell()) return;
+  } catch (_) {
+    // Version checks must never prevent an offline-capable login attempt.
+  }
+  await initializeAuth();
 }
 
 function toast(message, action = null) {
@@ -9487,6 +9554,8 @@ document.getElementById("messages").addEventListener("scroll", event => {
 
 document.getElementById("authForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (state.authSubmitting) return;
+  state.authSubmitting = true;
   const payload = {
     username: document.getElementById("authUsername").value,
     password: document.getElementById("authPassword").value
@@ -9496,17 +9565,22 @@ document.getElementById("authForm").addEventListener("submit", async event => {
     const endpoint = state.authMode === "register" ? "/api/v1/auth/register" : "/api/v1/auth/login";
     const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
     setAuthProgress(48, "账号验证成功，正在打开共同空间…");
+    await confirmAuthenticatedSession(result.user?.id);
     await clearMealOfflineData();
     setAuthProgress(62, "正在读取消息、回忆和旅行…");
     resetTripLive();
     state.pushSynced = false;
     document.getElementById("authPassword").value = "";
-    if (!result.pairing?.paired) showPairing(); else await loadBootstrap({ quiet: true });
+    if (!result.pairing?.paired) showPairing();
+    else {
+      await loadBootstrap({ quiet: true });
+      if (state.data?.user?.id !== result.user?.id) throw new Error("共同空间尚未读取完成，请检查网络后重试");
+    }
     setAuthProgress(100, "共同空间已准备好");
     broadcastAuthChange(state.authMode, result.user?.username || payload.username);
     toast(state.authMode === "register" ? "账号创建成功" : "登录成功");
   } catch (error) { toast(error.message); }
-  finally { setAuthProgress(0, "", { busy: false }); }
+  finally { state.authSubmitting = false; setAuthProgress(0, "", { busy: false }); }
 });
 
 document.getElementById("changePasswordForm").addEventListener("submit", async event => {
@@ -10114,7 +10188,7 @@ window.addEventListener("pagehide", () => stopVoiceResources({ discard: true }))
 installThemeDecorations();
 renderPlan();
 navigate(state.screen);
-initializeAuth();
+initializeApplication();
 
 // Lightweight same-origin sync for the local MVP. Production can replace this
 // polling loop with the WebSocket events defined in SRS.md.
@@ -10135,5 +10209,3 @@ setInterval(async () => {
     // Preserve the last usable local view during transient network failures.
   }
 }, 5000);
-
-if ("serviceWorker" in navigator && window.isSecureContext) serviceWorkerRegistration().catch(() => {});

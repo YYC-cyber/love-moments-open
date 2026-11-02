@@ -11,6 +11,11 @@ function assert(value, message) {
 }
 
 async function login(page, origin, username, password) {
+  let loginRequests = 0;
+  const countLogin = request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/auth/login") loginRequests += 1;
+  };
+  page.on("request", countLogin);
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.locator("#authUsername").fill(username);
   await page.locator("#authPassword").fill(password);
@@ -41,6 +46,8 @@ async function login(page, origin, username, password) {
     null,
     { timeout: 60_000 },
   );
+  page.off("request", countLogin);
+  assert(loginRequests === 1, `${username} 一次进入共同空间时产生了 ${loginRequests} 次登录请求`);
 }
 
 async function logout(page) {
