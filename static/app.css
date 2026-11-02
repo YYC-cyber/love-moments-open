@@ -1584,6 +1584,7 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-variant-choices span,.bead-variant-choices strong,.bead-variant-choices small,.bead-variant-choices em,.bead-variant-choices b { display: block; min-width: 0; }
 .bead-variant-choices strong { color: var(--wine-dark); font-size: 10px; }.bead-variant-choices small { margin-top: 2px; color: var(--muted); font-size: 8px; }.bead-variant-choices em { min-height: 30px; margin-top: 4px; color: var(--muted); font-size: 8px; font-style: normal; line-height: 1.35; }.bead-variant-choices b { margin-top: 4px; color: #5c7a56; font-size: 8px; }
 .bead-board-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 9px; }
+.bead-board-toolbar span { min-width: 0; line-height: 1.5; }
 .bead-board-toolbar button { min-height: 34px; padding: 7px 12px; white-space: nowrap; }
 .bead-ironing-guide { margin: 12px 0; border: 1px solid color-mix(in srgb,var(--wine) 22%,var(--line)); border-radius: 16px; background: color-mix(in srgb,var(--blush) 58%,var(--paper)); }
 .bead-ironing-guide > summary { padding: 12px 14px; color: var(--wine-dark); font-size: 11px; font-weight: 800; cursor: pointer; }
@@ -1591,7 +1592,7 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-ironing-guide strong { display: block; margin-bottom: 5px; color: var(--ink); font-size: 11px; }.bead-ironing-guide p { margin: 0 0 7px; }.bead-ironing-guide ol { margin: 0 0 7px; padding-left: 18px; }.bead-ironing-guide small { display: block; color: var(--wine-dark); line-height: 1.55; }
 .bead-canvas-wrap { margin-top: 8px; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 18px; background: #fff; overscroll-behavior: contain; }
 #beadCanvas { display: block; width: 100%; max-width: none; height: auto; image-rendering: pixelated; border-radius: 10px; touch-action: manipulation; cursor: crosshair; transition: width .18s ease; }
-.bead-canvas-wrap.zoomed #beadCanvas { width: 230%; }
+.bead-canvas-wrap.zoomed #beadCanvas { width: 500%; }
 .bead-edit-hint { margin: 10px 0; color: var(--muted); font-size: 10px; text-align: center; }
 .bead-quick-actions { display: flex; justify-content: flex-end; margin: -2px 0 8px; }
 .bead-quick-actions button { min-height: 34px; color: #9a5724; background: #fff0df; }

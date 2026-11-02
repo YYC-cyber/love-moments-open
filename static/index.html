@@ -575,8 +575,8 @@
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
-          <div class="bead-board-toolbar"><span>每 5 格一条定位线，按小区块对照更容易拼；每个细格代表 1 颗豆</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
-          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1044" height="1044" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
+          <div class="bead-board-toolbar"><span id="beadCellInspector">每格已标色号；放大后点格子可查看坐标和颜色</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大看色号</button></div>
+          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1740" height="1740" aria-label="逐格标注色号的拼豆网格图；放大后可点格子查看坐标与颜色"></canvas></div>
           <details class="bead-ironing-guide"><summary>这张图怎么烫最好看</summary><div id="beadIroningAdvice"></div></details>
           <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>

@@ -38,14 +38,23 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("人与宠物互动合照", prompt)
         self.assertIn("动物的物种、毛色、斑纹", prompt)
         self.assertIn("适配重绘底图", prompt)
+        self.assertIn("半透明毛边", prompt)
+        self.assertIn("不要靠模糊、磨皮或抹除五官", prompt)
 
     def test_professional_board_has_sharpening_and_five_cell_guides(self):
-        self.assertIn('id="beadCanvas" width="1044" height="1044"', self.html)
+        self.assertIn('id="beadCanvas" width="1740" height="1740"', self.html)
         self.assertIn('data-action="bead-toggle-zoom"', self.html)
         self.assertIn("function sharpenBeadDetails", self.javascript)
         self.assertIn("imageData = sharpenBeadDetails", self.javascript)
         self.assertIn("for (let index = 5; index < pattern.size; index += 5)", self.javascript)
         self.assertNotIn('drawGuide(10', self.javascript)
+
+    def test_every_grid_cell_can_show_a_physical_colour_code(self):
+        self.assertIn('id="beadCellInspector"', self.html)
+        self.assertIn("放大看色号", self.html)
+        self.assertIn("pattern.paletteMeta[paletteIndex]?.code", self.javascript)
+        self.assertIn("第 ${y + 1} 行 · 第 ${x + 1} 列", self.javascript)
+        self.assertIn("if (!document.querySelector(\".bead-result-advanced\")?.open) return", self.javascript)
 
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)
@@ -60,7 +69,7 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("loadBeadPaletteCatalogs", self.javascript)
         self.assertIn("/api/v1/entertainment/beads/palettes", self.javascript)
         self.assertIn("BEAD_PALETTE_ROOT", (ROOT / "love_moments" / "bead_palettes.py").read_text(encoding="utf-8"))
-        self.assertIn("每 5 格一条定位线", self.html)
+        self.assertIn("每格已标色号", self.html)
         self.assertIn("for (let index = 5; index < pattern.size; index += 5)", self.javascript)
 
     def test_local_background_removal_creates_empty_cells(self):
@@ -69,14 +78,16 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("function removeBeadBackground", self.javascript)
         self.assertIn("index < 0 ? -1", self.javascript)
         self.assertIn("去除背景 ${empty} 格", self.javascript)
-        self.assertIn("protectedSubject", self.javascript)
-        self.assertIn("safeRemoval", self.javascript)
+        self.assertIn("subjectPrior", self.javascript)
+        self.assertIn("backgroundMask", self.javascript)
+        self.assertNotIn("safeRemoval", self.javascript)
         self.assertIn("#eee9e5", self.javascript)
 
     def test_easy_variant_uses_practical_double_board_resolution(self):
         self.assertIn('label: "易制作版"', self.javascript)
-        self.assertIn('size: 58, colorCount: 36, detailMode: "easy"', self.javascript)
+        self.assertIn('size: 58, colorCount: 42, detailMode: "easy"', self.javascript)
         self.assertIn("58 格实体双板规格", self.javascript)
+        self.assertIn("不再模糊五官和轮廓", self.javascript)
 
     def test_ironing_guidance_covers_large_portraits_and_special_beads(self):
         self.assertIn('id="beadIroningAdvice"', self.html)

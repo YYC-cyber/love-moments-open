@@ -72,14 +72,34 @@ async function waitForHealth(origin, child) {
     assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "高清收藏画没有自动使用高清人像标准");
     assert((await page.locator("#beadResultSummary").textContent()).includes("5mm"), "生成结果没有锁定实体豆规格");
     assert((await page.locator("#beadResultSummary").textContent()).includes("cm"), "生成结果没有给出物理成品尺寸");
-    assert(await page.locator("#beadCanvas").getAttribute("width") === "1044", "主板图没有使用高清网格画布");
+    assert(await page.locator("#beadCanvas").getAttribute("width") === "1740", "主板图没有使用高清逐格色号画布");
+    const labelInk = await page.evaluate(() => {
+      const canvas = document.createElement("canvas"); canvas.width = 180; canvas.height = 180;
+      const pattern = { size: 3, palette: [[245, 230, 220]], paletteMeta: [{ code: "A12", name: "测试色" }], indices: new Array(9).fill(0) };
+      paintBeadCanvas(canvas, pattern, { grid: true, labels: true });
+      const context = canvas.getContext("2d"); const base = [245, 230, 220]; let changed = 0;
+      for (let y = 20; y < 40; y += 1) for (let x = 20; x < 40; x += 1) {
+        const pixel = context.getImageData(x, y, 1, 1).data;
+        if (pixel[0] !== base[0] || pixel[1] !== base[1] || pixel[2] !== base[2]) changed += 1;
+      }
+      return changed;
+    });
+    assert(labelInk > 0, "逐格色号没有绘制到板图上");
     await page.locator('[data-action="bead-toggle-zoom"]').click();
     assert(await page.locator(".bead-canvas-wrap").evaluate(node => node.classList.contains("zoomed")), "板图无法放大查看单格");
+    await page.locator("#beadCanvas").click({ position: { x: 20, y: 20 } });
+    assert((await page.locator("#beadCellInspector").textContent()).includes("第 "), "点击格子没有显示坐标和色号");
+    if (process.env.BEAD_TEST_CODE_SCREENSHOT) await page.locator("#beadCanvas").screenshot({ path: process.env.BEAD_TEST_CODE_SCREENSHOT });
     await page.locator('[data-action="bead-toggle-zoom"]').click();
     if (process.env.BEAD_TEST_INITIAL_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_INITIAL_SCREENSHOT, fullPage: true });
+    if (process.env.BEAD_TEST_CLEAN_SCREENSHOT) {
+      await page.locator('#beadVariantChoices [data-id="clean"]').click();
+      await page.screenshot({ path: process.env.BEAD_TEST_CLEAN_SCREENSHOT, fullPage: true });
+    }
     await page.locator('#beadVariantChoices [data-id="easy"]').click();
     assert((await page.locator("#beadResultSummary").textContent()).includes("易制作版"), "三套方案之间无法切换");
     assert((await page.locator("#beadResultSummary").textContent()).includes("58 × 58"), "易制作版没有使用国内常见的 58 格实体双板规格");
+    if (process.env.BEAD_TEST_EASY_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_EASY_SCREENSHOT, fullPage: true });
     const guideColours = await page.evaluate(() => {
       const canvas = document.createElement("canvas"); canvas.width = 580; canvas.height = 580;
       const pattern = { size: 58, palette: [[255, 255, 255]], indices: new Array(58 * 58).fill(0) };
@@ -94,13 +114,14 @@ async function waitForHealth(origin, child) {
       const sample = new ImageData(40, 40);
       for (let y = 0; y < 40; y += 1) for (let x = 0; x < 40; x += 1) {
         const offset = (y * 40 + x) * 4; const subject = x >= 12 && x <= 28 && y >= 7 && y <= 38;
-        sample.data[offset] = subject ? 239 : 245; sample.data[offset + 1] = subject ? 217 : 230;
-        sample.data[offset + 2] = subject ? 205 : 212; sample.data[offset + 3] = 255;
+        sample.data[offset] = subject ? 185 : 245; sample.data[offset + 1] = subject ? 105 : 230;
+        sample.data[offset + 2] = subject ? 95 : 212; sample.data[offset + 3] = 255;
       }
       const removed = removeBeadBackground(sample, 40, 24);
-      return { corner: removed.data[3], face: removed.data[(17 * 40 + 20) * 4 + 3], torso: removed.data[(32 * 40 + 20) * 4 + 3] };
+      return { corner: removed.data[3], halo: removed.data[(18 * 40 + 11) * 4 + 3], face: removed.data[(17 * 40 + 20) * 4 + 3], torso: removed.data[(32 * 40 + 20) * 4 + 3] };
     });
     assert(removalSafety.corner === 0, `净背景版没有去除边缘背景：${JSON.stringify(removalSafety)}`);
+    assert(removalSafety.halo === 0, `净背景版仍保留了一格背景毛边：${JSON.stringify(removalSafety)}`);
     assert(removalSafety.face === 255 && removalSafety.torso === 255, `净背景版损伤了中心主体：${JSON.stringify(removalSafety)}`);
     await page.locator("#beadAdvancedSettings summary").click();
     await page.locator("#beadCropControls:not([hidden])").waitFor();
