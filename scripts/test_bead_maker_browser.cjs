@@ -79,6 +79,19 @@ async function waitForHealth(origin, child) {
     if (process.env.BEAD_TEST_INITIAL_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_INITIAL_SCREENSHOT, fullPage: true });
     await page.locator('#beadVariantChoices [data-id="easy"]').click();
     assert((await page.locator("#beadResultSummary").textContent()).includes("易制作版"), "三套方案之间无法切换");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "易制作版不应通过降低画板尺寸牺牲主体清晰度");
+    const removalSafety = await page.evaluate(() => {
+      const sample = new ImageData(40, 40);
+      for (let y = 0; y < 40; y += 1) for (let x = 0; x < 40; x += 1) {
+        const offset = (y * 40 + x) * 4; const subject = x >= 12 && x <= 28 && y >= 7 && y <= 38;
+        sample.data[offset] = subject ? 239 : 245; sample.data[offset + 1] = subject ? 217 : 230;
+        sample.data[offset + 2] = subject ? 205 : 212; sample.data[offset + 3] = 255;
+      }
+      const removed = removeBeadBackground(sample, 40, 24);
+      return { corner: removed.data[3], face: removed.data[(17 * 40 + 20) * 4 + 3], torso: removed.data[(32 * 40 + 20) * 4 + 3] };
+    });
+    assert(removalSafety.corner === 0, `净背景版没有去除边缘背景：${JSON.stringify(removalSafety)}`);
+    assert(removalSafety.face === 255 && removalSafety.torso === 255, `净背景版损伤了中心主体：${JSON.stringify(removalSafety)}`);
     await page.locator("#beadAdvancedSettings summary").click();
     await page.locator("#beadCropControls:not([hidden])").waitFor();
     await page.locator("#beadCropZoom").fill("125");

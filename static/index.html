@@ -555,7 +555,7 @@
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29">29 × 29 · 图标/单板</option><option value="32">32 × 32 · 简单头像</option><option value="50">50 × 50 · 中等作品</option><option value="58" selected>58 × 58 · 人像推荐</option><option value="87">87 × 87 · 高清人像</option></select></label>
             <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24">24 色 · 卡通推荐</option><option value="36">36 色 · 细节丰富</option><option value="48" selected>48 色 · 人像推荐</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
-            <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
+            <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="easy">易制作 · 保轮廓少碎色</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
             <label><span>人物明暗</span><select id="beadToneMode"><option value="auto" selected>主体整体提亮 · 推荐</option><option value="bright">强力提亮暗部</option><option value="original">保持原图明暗</option></select></label>
             <label><span>照片背景</span><select id="beadBackgroundMode"><option value="keep" selected>保留原背景</option><option value="remove">本机智能去背景</option></select></label>
           </div>
@@ -575,7 +575,7 @@
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
-          <div class="bead-board-toolbar"><span>5 格辅助线、10 格定位线；深色粗线表示每块 29 × 29 实体底板边界</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
+          <div class="bead-board-toolbar"><span>每 5 格一条定位线，按小区块对照更容易拼；每个细格代表 1 颗豆</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1044" height="1044" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
