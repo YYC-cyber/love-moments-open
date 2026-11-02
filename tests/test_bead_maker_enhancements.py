@@ -51,7 +51,7 @@ class BeadMakerEnhancementTests(unittest.TestCase):
 
     def test_every_grid_cell_can_show_a_physical_colour_code(self):
         self.assertIn('id="beadCellInspector"', self.html)
-        self.assertIn("放大看色号", self.html)
+        self.assertIn("放大查看全部色号", self.html)
         self.assertIn("pattern.paletteMeta[paletteIndex]?.code", self.javascript)
         self.assertIn("第 ${y + 1} 行 · 第 ${x + 1} 列", self.javascript)
         self.assertIn("if (!document.querySelector(\".bead-result-advanced\")?.open) return", self.javascript)
@@ -69,7 +69,11 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("loadBeadPaletteCatalogs", self.javascript)
         self.assertIn("/api/v1/entertainment/beads/palettes", self.javascript)
         self.assertIn("BEAD_PALETTE_ROOT", (ROOT / "love_moments" / "bead_palettes.py").read_text(encoding="utf-8"))
-        self.assertIn("每格已标色号", self.html)
+        self.assertIn("三版每格都写入色号", self.html)
+        self.assertIn('paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true })', self.javascript)
+        self.assertIn('id="beadLegend"', self.html)
+        self.assertIn("function renderBeadLegend", self.javascript)
+        self.assertIn("coordinateMargin", self.javascript)
         self.assertIn("for (let index = 5; index < pattern.size; index += 5)", self.javascript)
 
     def test_local_background_removal_creates_empty_cells(self):
@@ -78,16 +82,17 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("function removeBeadBackground", self.javascript)
         self.assertIn("index < 0 ? -1", self.javascript)
         self.assertIn("去除背景 ${empty} 格", self.javascript)
-        self.assertIn("subjectPrior", self.javascript)
-        self.assertIn("backgroundMask", self.javascript)
-        self.assertNotIn("safeRemoval", self.javascript)
+        self.assertNotIn("subjectPrior", self.javascript)
+        self.assertIn("beadBackgroundDiagnostics", self.javascript)
+        self.assertIn("salientRetention", self.javascript)
+        self.assertIn("主体与背景边界不够可靠，已保留原背景", self.javascript)
         self.assertIn("#eee9e5", self.javascript)
 
-    def test_easy_variant_uses_practical_double_board_resolution(self):
+    def test_easy_variant_preserves_professional_spatial_resolution(self):
         self.assertIn('label: "易制作版"', self.javascript)
-        self.assertIn('size: 58, colorCount: 42, detailMode: "easy"', self.javascript)
-        self.assertIn("58 格实体双板规格", self.javascript)
-        self.assertIn("不再模糊五官和轮廓", self.javascript)
+        self.assertIn('size: 87, colorCount: 36, detailMode: "detail"', self.javascript)
+        self.assertIn("与专业版同为 87 格", self.javascript)
+        self.assertIn("不牺牲五官和轮廓清晰度", self.javascript)
 
     def test_ironing_guidance_covers_large_portraits_and_special_beads(self):
         self.assertIn('id="beadIroningAdvice"', self.html)

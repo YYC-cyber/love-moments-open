@@ -6493,118 +6493,93 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
   return { palette, paletteMeta, indices: indices.map(index => index < 0 ? -1 : remap.get(index)) };
 }
 
-function removeBeadBackground(imageData, size, sensitivity = 26) {
+function removeBeadBackground(imageData, size, sensitivity = 26, maxRemoval = .84) {
   const data = imageData.data;
   const original = new Uint8ClampedArray(data);
-  const border = [];
-  for (let x = 0; x < size; x += 1) border.push(x, (size - 1) * size + x);
-  for (let y = 1; y < size - 1; y += 1) border.push(y * size, y * size + size - 1);
+  const total = size * size; const borderEntries = [];
+  for (let x = 0; x < size; x += 1) borderEntries.push([x, 0], [(size - 1) * size + x, 2]);
+  for (let y = 1; y < size - 1; y += 1) borderEntries.push([y * size, 3], [y * size + size - 1, 1]);
+  const colourStep = (first, second) => {
+    const a = first * 4; const b = second * 4;
+    return Math.sqrt((original[a] - original[b]) ** 2 + (original[a + 1] - original[b + 1]) ** 2 + (original[a + 2] - original[b + 2]) ** 2);
+  };
+  const neighbours = pixel => {
+    const x = pixel % size; const y = Math.floor(pixel / size); const result = [];
+    if (x) result.push(pixel - 1); if (x + 1 < size) result.push(pixel + 1);
+    if (y) result.push(pixel - size); if (y + 1 < size) result.push(pixel + size);
+    return result;
+  };
+  const localEdge = new Float32Array(total);
+  for (let pixel = 0; pixel < total; pixel += 1) localEdge[pixel] = neighbours(pixel).reduce((maximum, other) => Math.max(maximum, colourStep(pixel, other)), 0);
   const bins = new Map();
-  border.forEach(pixel => {
-    const offset = pixel * 4;
-    if (data[offset + 3] < 32) return;
-    const key = `${data[offset] >> 5}-${data[offset + 1] >> 5}-${data[offset + 2] >> 5}`;
-    const item = bins.get(key) || { count: 0, r: 0, g: 0, b: 0 };
-    item.count += 1; item.r += data[offset]; item.g += data[offset + 1]; item.b += data[offset + 2]; bins.set(key, item);
+  borderEntries.forEach(([pixel, side]) => {
+    const offset = pixel * 4; if (original[offset + 3] < 32) return;
+    const key = `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`;
+    const item = bins.get(key) || { key, pixels: [], sides: new Set() };
+    item.pixels.push(pixel); item.sides.add(side); bins.set(key, item);
   });
-  const references = [...bins.values()].sort((first, second) => second.count - first.count).slice(0, 6)
-    .map(item => [item.r / item.count, item.g / item.count, item.b / item.count]);
-  if (!references.length) return imageData;
-  const safeSensitivity = Math.max(14, Math.min(64, Number(sensitivity) || 26));
-  const limit = safeSensitivity ** 2 * 3;
-  const visited = new Uint8Array(size * size); const queue = new Int32Array(size * size); let head = 0; let tail = 0;
-  const subjectPrior = pixel => {
-    const x = (pixel % size + .5) / size; const y = (Math.floor(pixel / size) + .5) / size;
-    const headArea = ((x - .5) / .31) ** 2 + ((y - .36) / .34) ** 2 <= 1;
-    const bodyArea = ((x - .5) / .38) ** 2 + ((y - .72) / .48) ** 2 <= 1;
-    return headArea || bodyArea;
-  };
-  const colourDistance = (offset, reference) => (data[offset] - reference[0]) ** 2 + (data[offset + 1] - reference[1]) ** 2 + (data[offset + 2] - reference[2]) ** 2;
-  const localTexture = pixel => {
-    const x = pixel % size; const y = Math.floor(pixel / size); const offset = pixel * 4;
-    const neighbors = [];
-    if (x) neighbors.push(pixel - 1); if (x + 1 < size) neighbors.push(pixel + 1);
-    if (y) neighbors.push(pixel - size); if (y + 1 < size) neighbors.push(pixel + size);
-    return neighbors.reduce((maximum, other) => {
-      const otherOffset = other * 4;
-      const distance = (data[offset] - data[otherOffset]) ** 2 + (data[offset + 1] - data[otherOffset + 1]) ** 2 + (data[offset + 2] - data[otherOffset + 2]) ** 2;
-      return Math.max(maximum, distance);
-    }, 0);
-  };
-  const stepLimit = Math.max(6, safeSensitivity * .38) ** 2 * 3;
-  const pixelDistance = (first, second) => {
-    const firstOffset = first * 4; const secondOffset = second * 4;
-    return (data[firstOffset] - data[secondOffset]) ** 2 + (data[firstOffset + 1] - data[secondOffset + 1]) ** 2 + (data[firstOffset + 2] - data[secondOffset + 2]) ** 2;
-  };
-  const matches = (pixel, parent = -1) => {
-    const offset = pixel * 4;
-    if (data[offset + 3] < 32) return true;
-    const distance = Math.min(...references.map(reference => colourDistance(offset, reference)));
-    const textureLimit = Math.max(12, safeSensitivity * .7) ** 2 * 3;
-    const smoothBackgroundStep = parent >= 0 && pixelDistance(pixel, parent) <= stepLimit && localTexture(pixel) <= stepLimit * 2;
-    if (distance > limit && !smoothBackgroundStep) return false;
-    // Inside the likely portrait area even a modest colour change can be a
-    // pale hat, skin or light clothing.  Preserve that change; pixels that
-    // truly match the sampled border background still remain removable. A
-    // very smooth colour ramp may continue through the prior so curved studio
-    // backdrops do not survive as large islands behind the person.
-    if (subjectPrior(pixel) && distance > limit * .28 && !smoothBackgroundStep) return false;
-    return smoothBackgroundStep || distance <= limit * .58 || localTexture(pixel) <= textureLimit;
-  };
-  const enqueue = (pixel, parent = -1) => { if (!visited[pixel] && matches(pixel, parent)) { visited[pixel] = 1; queue[tail++] = pixel; } };
-  border.forEach(pixel => enqueue(pixel));
-  while (head < tail) {
-    const pixel = queue[head++]; const x = pixel % size; const y = Math.floor(pixel / size);
-    if (x) enqueue(pixel - 1, pixel); if (x + 1 < size) enqueue(pixel + 1, pixel); if (y) enqueue(pixel - size, pixel); if (y + 1 < size) enqueue(pixel + size, pixel);
-  }
-  const backgroundMask = new Uint8Array(visited);
-  // Close tiny foreground pinholes left inside an otherwise continuous
-  // background.  This removes the salt-and-pepper residue visible around
-  // hats, hair and shoulders without eroding a real subject edge.
-  for (let pass = 0; pass < 2; pass += 1) {
-    const next = new Uint8Array(backgroundMask);
-    for (let pixel = 0; pixel < backgroundMask.length; pixel += 1) {
-      if (backgroundMask[pixel]) continue;
-    const x = pixel % size; const y = Math.floor(pixel / size);
-    const neighbors = [];
-      for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
-        if (!dx && !dy) continue;
-        const nx = x + dx; const ny = y + dy;
-        if (nx >= 0 && ny >= 0 && nx < size && ny < size) neighbors.push(ny * size + nx);
-      }
-      const surrounding = neighbors.reduce((total, other) => total + backgroundMask[other], 0);
-      const distance = Math.min(...references.map(reference => colourDistance(pixel * 4, reference)));
-      if (surrounding >= 7 && (!subjectPrior(pixel) || distance <= limit * .7)) next[pixel] = 1;
-    }
-    backgroundMask.set(next);
-  }
+  const opaqueBorder = borderEntries.filter(([pixel]) => original[pixel * 4 + 3] >= 32).length;
+  const candidates = [...bins.values()].filter(item => item.sides.size >= 2 || item.pixels.length >= opaqueBorder * .16).sort((a, b) => b.pixels.length - a.pixels.length);
+  const selectedBins = new Set(); let covered = 0;
+  for (const item of candidates) { selectedBins.add(item.key); covered += item.pixels.length; if (covered >= opaqueBorder * .72) break; }
+  if (!selectedBins.size) { imageData.beadBackgroundDiagnostics = { safe: false, reason: "没有可靠的边缘背景" }; return imageData; }
 
-  // Remove detached edge-coloured islands.  The old implementation restored
-  // every boundary pixel next to the subject, which created a visible one-cell
-  // halo.  Keeping the flood mask intact gives a crisp, honest bead boundary.
-  const seen = new Uint8Array(size * size);
-  const componentQueue = new Int32Array(size * size);
-  const minimumIsland = Math.max(4, Math.round(size * size * .0015));
-  for (let start = 0; start < seen.length; start += 1) {
-    if (seen[start] || backgroundMask[start] || original[start * 4 + 3] < 32) continue;
-    let componentHead = 0; let componentTail = 0; let central = false;
-    const members = [];
-    seen[start] = 1; componentQueue[componentTail++] = start;
-    while (componentHead < componentTail) {
-      const pixel = componentQueue[componentHead++]; members.push(pixel); central ||= subjectPrior(pixel);
-      const x = pixel % size; const y = Math.floor(pixel / size);
-      const neighbors = [];
-      if (x) neighbors.push(pixel - 1); if (x + 1 < size) neighbors.push(pixel + 1);
-      if (y) neighbors.push(pixel - size); if (y + 1 < size) neighbors.push(pixel + size);
-      neighbors.forEach(other => {
-        if (!seen[other] && !backgroundMask[other] && original[other * 4 + 3] >= 32) {
-          seen[other] = 1; componentQueue[componentTail++] = other;
-        }
-      });
-    }
-    if (!central && members.length < minimumIsland) members.forEach(pixel => { backgroundMask[pixel] = 1; });
+  // Find the weakest colour-edge barrier from reliable border seeds. The
+  // result depends on image structure, never on a hard-coded portrait area.
+  const barrier = new Float32Array(total); barrier.fill(Infinity); const heap = [];
+  const push = (pixel, cost) => { let index = heap.length; heap.push([cost, pixel]); while (index) { const parent = (index - 1) >> 1; if (heap[parent][0] <= cost) break; heap[index] = heap[parent]; index = parent; } heap[index] = [cost, pixel]; };
+  const pop = () => { const first = heap[0]; const last = heap.pop(); if (heap.length) { let index = 0; while (true) { const left = index * 2 + 1; if (left >= heap.length) break; const right = left + 1; const child = right < heap.length && heap[right][0] < heap[left][0] ? right : left; if (heap[child][0] >= last[0]) break; heap[index] = heap[child]; index = child; } heap[index] = last; } return first; };
+  const seedEdges = borderEntries.map(([pixel]) => localEdge[pixel]).sort((a, b) => a - b);
+  const seedEdgeLimit = Math.max(7, seedEdges[Math.floor(seedEdges.length * .62)] * 1.35);
+  borderEntries.forEach(([pixel]) => {
+    const offset = pixel * 4; const key = `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`;
+    // A foreground object may touch the crop border. Do not seed textured
+    // border cells merely because their colour resembles the background.
+    if (original[offset + 3] < 32 || (selectedBins.has(key) && localEdge[pixel] <= seedEdgeLimit)) { barrier[pixel] = 0; push(pixel, 0); }
+  });
+  while (heap.length) {
+    const [cost, pixel] = pop(); if (cost !== barrier[pixel]) continue;
+    neighbours(pixel).forEach(other => {
+      // Anti-aliased fur, hair and pale clothing may change through several
+      // small colour steps. Use the local edge on both sides as an additional
+      // barrier so those soft boundaries do not become a path into the subject.
+      const structuralEdge = Math.min(localEdge[pixel], localEdge[other]) * .9;
+      const nextCost = Math.max(cost, colourStep(pixel, other), structuralEdge);
+      if (nextCost < barrier[other]) { barrier[other] = nextCost; push(other, nextCost); }
+    });
   }
-  for (let pixel = 0; pixel < backgroundMask.length; pixel += 1) if (backgroundMask[pixel]) data[pixel * 4 + 3] = 0;
+  const quantile = (values, ratio) => { const sorted = [...values].filter(Number.isFinite).sort((a, b) => a - b); return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] : 0; };
+  const band = Math.max(2, Math.round(size * .12)); const borderSteps = [];
+  for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
+    if (x >= band && y >= band && x < size - band && y < size - band) continue;
+    const pixel = y * size + x; neighbours(pixel).forEach(other => { if (other > pixel) borderSteps.push(colourStep(pixel, other)); });
+  }
+  const safeSensitivity = Math.max(12, Math.min(56, Number(sensitivity) || 26));
+  const base = Math.max(6, Math.min(34, quantile(borderSteps, .62) * 1.45 + safeSensitivity * .2));
+  const pixelBin = pixel => { const offset = pixel * 4; return `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`; };
+  const saliencyLimit = Math.max(18, quantile(localEdge, .78)); const salient = []; const protectedColours = [];
+  for (let pixel = 0; pixel < total; pixel += 1) {
+    if (original[pixel * 4 + 3] < 32) continue;
+    if (localEdge[pixel] >= saliencyLimit) salient.push(pixel);
+    if (!selectedBins.has(pixelBin(pixel))) protectedColours.push(pixel);
+  }
+  let best = null;
+  [base * .62, base * .8, base, base * 1.18].forEach(threshold => {
+    const mask = new Uint8Array(total); let removed = 0;
+    for (let pixel = 0; pixel < total; pixel += 1) if (barrier[pixel] <= threshold) { mask[pixel] = 1; removed += 1; }
+    // A strong edge occupies cells on both sides of a boundary. Removing the
+    // background-side cell is correct, so count the edge as preserved when
+    // either it or one of its direct neighbours remains foreground.
+    const retainedSalient = salient.reduce((count, pixel) => count + (!mask[pixel] || neighbours(pixel).some(other => !mask[other]) ? 1 : 0), 0);
+    const salientRetention = salient.length ? retainedSalient / salient.length : 1;
+    const protectedRetention = protectedColours.length ? protectedColours.reduce((count, pixel) => count + (mask[pixel] ? 0 : 1), 0) / protectedColours.length : 1;
+    const removedRatio = removed / total;
+    const safeRemovalLimit = Math.max(.12, Math.min(.84, Number(maxRemoval) || .84));
+    if (removedRatio >= .04 && removedRatio <= safeRemovalLimit && salientRetention >= .9 && protectedRetention >= .88 && (!best || removed > best.removed)) best = { mask, removed, removedRatio, salientRetention, protectedRetention, threshold };
+  });
+  if (!best) { data.set(original); imageData.beadBackgroundDiagnostics = { safe: false, reason: "主体与背景边界不够可靠，已保留原背景" }; return imageData; }
+  for (let pixel = 0; pixel < total; pixel += 1) if (best.mask[pixel]) data[pixel * 4 + 3] = 0;
+  imageData.beadBackgroundDiagnostics = { safe: true, removedRatio: best.removedRatio, salientRetention: best.salientRetention, protectedRetention: best.protectedRetention, threshold: best.threshold };
   return imageData;
 }
 
@@ -6679,9 +6654,11 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   context.drawImage(image, left, top, width, height);
   context.filter = "none";
   let imageData = context.getImageData(0, 0, size, size);
-  if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity);
+  if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity, background.maxRemoval);
+  const backgroundDiagnostics = imageData.beadBackgroundDiagnostics;
   imageData = adjustBeadTones(imageData, size, toneMode);
   imageData = sharpenBeadDetails(imageData, size, detailMode);
+  if (backgroundDiagnostics) imageData.data.beadBackgroundDiagnostics = backgroundDiagnostics;
   return imageData.data;
 }
 
@@ -6691,16 +6668,20 @@ function beadCounts(pattern = state.bead) {
   return counts;
 }
 
-function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true, labels = grid } = {}) {
+function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true, labels = grid, coordinates = false } = {}) {
   if (!canvas || !pattern?.size || !pattern?.indices?.length) return;
   const side = canvas.width;
   canvas.height = side;
   const context = canvas.getContext("2d");
-  const cell = side / pattern.size;
+  const coordinateMargin = coordinates ? Math.max(34, Math.round(side * .025)) : 0;
+  const boardSide = side - coordinateMargin * 2;
+  const cell = boardSide / pattern.size;
+  canvas.dataset.beadInset = String(coordinateMargin / side);
   context.clearRect(0, 0, side, side);
+  if (coordinates) { context.fillStyle = "#fffaf6"; context.fillRect(0, 0, side, side); }
   pattern.indices.forEach((paletteIndex, index) => {
-    const x = (index % pattern.size) * cell;
-    const y = Math.floor(index / pattern.size) * cell;
+    const x = coordinateMargin + (index % pattern.size) * cell;
+    const y = coordinateMargin + Math.floor(index / pattern.size) * cell;
     if (paletteIndex < 0) {
       if (showEmpty) {
         context.fillStyle = (index % pattern.size + Math.floor(index / pattern.size)) % 2 ? "#eee9e5" : "#faf7f4";
@@ -6719,8 +6700,8 @@ function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true, label
       const color = pattern.palette[paletteIndex] || [255, 255, 255];
       const luminance = .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
       const fontSize = Math.max(3.2, Math.min(cell * .48, cell * 1.48 / Math.max(2, code.length)));
-      const x = (index % pattern.size) * cell + cell / 2;
-      const y = Math.floor(index / pattern.size) * cell + cell / 2;
+      const x = coordinateMargin + (index % pattern.size) * cell + cell / 2;
+      const y = coordinateMargin + Math.floor(index / pattern.size) * cell + cell / 2;
       context.font = `800 ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
       context.fillStyle = luminance < 138 ? "rgba(255,255,255,.96)" : "rgba(45,31,34,.9)";
       context.fillText(code, x, y + fontSize * .04, cell * .92);
@@ -6732,19 +6713,32 @@ function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true, label
   context.lineWidth = pattern.size > 32 ? .55 : .8;
   context.beginPath();
   for (let index = 0; index <= pattern.size; index += 1) {
-    const position = Math.round(index * cell) + .5;
-    context.moveTo(position, 0); context.lineTo(position, side);
-    context.moveTo(0, position); context.lineTo(side, position);
+    const position = coordinateMargin + Math.round(index * cell) + .5;
+    context.moveTo(position, coordinateMargin); context.lineTo(position, side - coordinateMargin);
+    context.moveTo(coordinateMargin, position); context.lineTo(side - coordinateMargin, position);
   }
   context.stroke();
   const guideWidth = Math.max(2, Math.round(side / 522));
   context.fillStyle = "rgba(78,38,48,.62)"; context.beginPath();
   for (let index = 5; index < pattern.size; index += 5) {
-    const position = Math.round(index * cell) - Math.floor(guideWidth / 2);
-    context.rect(position, 0, guideWidth, side);
-    context.rect(0, position, side, guideWidth);
+    const position = coordinateMargin + Math.round(index * cell) - Math.floor(guideWidth / 2);
+    context.rect(position, coordinateMargin, guideWidth, boardSide);
+    context.rect(coordinateMargin, position, boardSide, guideWidth);
   }
   context.fill();
+  if (coordinates) {
+    const axisFont = Math.max(8, Math.min(18, cell * .58));
+    context.font = `700 ${axisFont}px ui-sans-serif, system-ui, sans-serif`;
+    context.fillStyle = "#5d4b4f"; context.textAlign = "center"; context.textBaseline = "middle";
+    for (let index = 0; index < pattern.size; index += 1) {
+      const number = String(index + 1); const centre = coordinateMargin + index * cell + cell / 2;
+      context.fillText(number, centre, coordinateMargin / 2, cell * 1.5);
+      context.fillText(number, centre, side - coordinateMargin / 2, cell * 1.5);
+      context.fillText(number, coordinateMargin / 2, centre, coordinateMargin * .8);
+      context.fillText(number, side - coordinateMargin / 2, centre, coordinateMargin * .8);
+    }
+    context.textAlign = "start"; context.textBaseline = "alphabetic";
+  }
 }
 
 function beadPatternQuality(pattern) {
@@ -6796,10 +6790,20 @@ function renderBeadPalette() {
   }).join("");
 }
 
+function renderBeadLegend() {
+  const host = document.getElementById("beadLegend");
+  if (!host || !state.bead.palette.length) return;
+  const counts = beadCounts();
+  host.innerHTML = `<strong>图纸色号与数量</strong><div>${state.bead.palette.map((color, index) => {
+    const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
+    return `<span><i style="--bead-color:${beadHex(color)}"></i><b>${escapeHtml(meta.code)}</b><small>${counts[index]} 颗</small></span>`;
+  }).join("")}</div>`;
+}
+
 function renderBeadPattern() {
-  const zoomed = document.querySelector(".bead-canvas-wrap")?.classList.contains("zoomed");
-  paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: Boolean(zoomed) });
+  paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true });
   renderBeadPalette();
+  renderBeadLegend();
   renderBeadVariantChoices();
   const total = beadCounts().reduce((sum, count) => sum + count, 0);
   const empty = state.bead.size * state.bead.size - total;
@@ -6815,7 +6819,7 @@ function renderBeadPattern() {
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
   const inspector = document.getElementById("beadCellInspector");
-  if (inspector) inspector.textContent = "每格已标色号；放大后点格子可查看坐标和颜色";
+  if (inspector) inspector.textContent = "四边有坐标，三版每格都写入色号；放大后可清楚查看";
 }
 
 function beadCropSettings() {
@@ -7030,8 +7034,10 @@ function createBeadPatternData(settings = {}) {
   const detailMode = settings.detailMode || document.getElementById("beadDetailMode").value;
   const backgroundMode = settings.backgroundMode || document.getElementById("beadBackgroundMode")?.value || "keep";
   const backgroundSensitivity = Number(settings.backgroundSensitivity || document.getElementById("beadBackgroundSensitivity")?.value || 42);
+  const backgroundMaxRemoval = Number(settings.backgroundMaxRemoval || .84);
   const toneMode = settings.toneMode || document.getElementById("beadToneMode")?.value || "auto";
-  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
+  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity, maxRemoval: backgroundMaxRemoval }, toneMode);
+  if (backgroundMode === "remove" && pixels.beadBackgroundDiagnostics?.safe === false) throw new Error(pixels.beadBackgroundDiagnostics.reason);
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
   if (!result.palette.length) throw new Error("背景去除范围过大，已没有可生成的主体；请降低去背景力度");
   const pattern = { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, backgroundMode, catalog: beadCatalogueSnapshot() };
@@ -7065,17 +7071,17 @@ function smartBeadPlans() {
   if (purpose === "charm") return finish([
     { id: "recommended", label: "可爱挂件", description: "小尺寸、轮廓优先", size: 29, colorCount: 24, detailMode: "simple", backgroundMode: "keep" },
     { id: "faithful", label: "细节挂件", description: "多保留一些表情与花纹", size: 32, colorCount: 36, detailMode: "detail", backgroundMode: "keep" },
-    { id: "clean", label: "净背景挂件", description: "保守去除边缘背景，不伤主体轮廓", size: 29, colorCount: 24, detailMode: "balanced", backgroundMode: "remove", backgroundSensitivity: 24 },
+    { id: "clean", label: "净背景挂件", description: "保守去除边缘背景，不伤主体轮廓", size: 29, colorCount: 24, detailMode: "balanced", backgroundMode: "remove", backgroundSensitivity: 24, backgroundMaxRemoval: .2 },
   ]);
   if (purpose === "standard") return finish([
     { id: "recommended", label: "推荐摆件", description: "清楚且制作量适中", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "keep" },
-    { id: "easy", label: "更容易做", description: "保持清晰五官与轮廓，只减少色号和孤立杂色", size: 58, colorCount: 42, detailMode: "easy", backgroundMode: "keep" },
-    { id: "clean", label: "净背景版", description: "保守清理边缘背景并完整保留主体", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 24 },
+    { id: "easy", label: "更容易做", description: "与推荐版同为 58 格，只减少色号，不降低人物清晰度", size: 58, colorCount: 36, detailMode: "detail", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "保守清理边缘背景并完整保留主体", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 24, backgroundMaxRemoval: .2 },
   ]);
   return finish([
     { id: "recommended", label: "专业拼豆版", description: "清晰整理五官、毛发、轮廓与互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
-    { id: "easy", label: "易制作版", description: "58 格实体双板规格，减少色号但不再模糊五官和轮廓", size: 58, colorCount: 42, detailMode: "easy", backgroundMode: "keep" },
-    { id: "clean", label: "净背景版", description: "保守清理边缘背景，不再切伤人物或宠物主体", size: 87, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 24 },
+    { id: "easy", label: "易制作版", description: "与专业版同为 87 格，只减少色号，不牺牲五官和轮廓清晰度", size: 87, colorCount: 36, detailMode: "detail", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "保守清理边缘背景，不再切伤人物或宠物主体", size: 87, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 24, backgroundMaxRemoval: .2 },
   ]);
 }
 
@@ -7173,7 +7179,7 @@ function exportBeadPattern() {
   const canvas = document.createElement("canvas");
   canvas.width = boardSide; canvas.height = boardSide + footer;
   const board = document.createElement("canvas"); board.width = boardSide; board.height = boardSide;
-  paintBeadCanvas(board, state.bead);
+  paintBeadCanvas(board, state.bead, { labels: true, coordinates: true });
   const context = canvas.getContext("2d");
   context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0);
   context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34);
@@ -7219,9 +7225,9 @@ document.addEventListener("click", async event => {
     else if (action === "bead-toggle-zoom") {
       const wrap = document.querySelector(".bead-canvas-wrap");
       const zoomed = wrap?.classList.toggle("zoomed");
-      beadAction.textContent = zoomed ? "缩回全图" : "放大看色号";
+      beadAction.textContent = zoomed ? "缩回全图" : "放大查看全部色号";
       beadAction.setAttribute("aria-pressed", String(Boolean(zoomed)));
-      paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: Boolean(zoomed) });
+      paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true });
     }
     else if (action === "bead-use-variant") {
       const variant = state.bead.variants.find(item => item.id === beadAction.dataset.id);
@@ -10240,8 +10246,11 @@ document.getElementById("beadUploadZone").addEventListener("drop", event => {
 document.getElementById("beadCanvas").addEventListener("click", event => {
   if (!state.bead.indices.length) return;
   const bounds = event.currentTarget.getBoundingClientRect();
-  const x = Math.floor((event.clientX - bounds.left) / bounds.width * state.bead.size);
-  const y = Math.floor((event.clientY - bounds.top) / bounds.height * state.bead.size);
+  const insetRatio = Number(event.currentTarget.dataset.beadInset || 0);
+  const localX = ((event.clientX - bounds.left) / bounds.width - insetRatio) / Math.max(.01, 1 - insetRatio * 2);
+  const localY = ((event.clientY - bounds.top) / bounds.height - insetRatio) / Math.max(.01, 1 - insetRatio * 2);
+  const x = Math.floor(localX * state.bead.size);
+  const y = Math.floor(localY * state.bead.size);
   if (x < 0 || y < 0 || x >= state.bead.size || y >= state.bead.size) return;
   const offset = y * state.bead.size + x;
   const current = state.bead.indices[offset];

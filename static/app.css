@@ -1593,6 +1593,13 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-canvas-wrap { margin-top: 8px; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 18px; background: #fff; overscroll-behavior: contain; }
 #beadCanvas { display: block; width: 100%; max-width: none; height: auto; image-rendering: pixelated; border-radius: 10px; touch-action: manipulation; cursor: crosshair; transition: width .18s ease; }
 .bead-canvas-wrap.zoomed #beadCanvas { width: 500%; }
+.bead-legend { margin-top: 9px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: #fffaf6; }
+.bead-legend > strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 10px; }
+.bead-legend > div { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }
+.bead-legend span { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 2px 5px; min-width: 0; padding: 5px; border: 1px solid color-mix(in srgb,var(--line) 75%,transparent); border-radius: 8px; background: var(--paper); }
+.bead-legend i { grid-row: 1 / 3; width: 18px; height: 18px; border: 1px solid rgba(45,31,34,.2); border-radius: 4px; background: var(--bead-color); }
+.bead-legend b,.bead-legend small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bead-legend b { color: var(--ink); font-size: 8px; }.bead-legend small { color: var(--muted); font-size: 7px; }
 .bead-edit-hint { margin: 10px 0; color: var(--muted); font-size: 10px; text-align: center; }
 .bead-quick-actions { display: flex; justify-content: flex-end; margin: -2px 0 8px; }
 .bead-quick-actions button { min-height: 34px; color: #9a5724; background: #fff0df; }
