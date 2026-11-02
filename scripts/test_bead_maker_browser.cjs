@@ -62,6 +62,13 @@ async function waitForHealth(origin, child) {
     assert(toneCheck.normalAfter >= toneCheck.normalBefore && toneCheck.normalAfter <= toneCheck.normalBefore + 14, `正常曝光没有受到柔和且受控的提亮：${JSON.stringify(toneCheck)}`);
     await page.locator("#beadImageInput").setInputFiles(process.env.BEAD_TEST_IMAGE || { name: "couple.png", mimeType: "image/png", buffer: png });
     await page.locator('[data-action="bead-generate"]').waitFor({ state: "visible" });
+    await page.locator('[data-action="bead-generate"]').click();
+    await page.locator("#beadResult:not([hidden])").waitFor();
+    assert(await page.locator("#beadVariantChoices button").count() === 3, "一键生成没有提供三套可选方案");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "高清收藏画没有自动使用高清人像标准");
+    await page.locator('#beadVariantChoices [data-id="easy"]').click();
+    assert((await page.locator("#beadResultSummary").textContent()).includes("易制作版"), "三套方案之间无法切换");
+    await page.locator("#beadAdvancedSettings summary").click();
     await page.locator("#beadCropControls:not([hidden])").waitFor();
     await page.locator("#beadCropZoom").fill("125");
     assert((await page.locator("#beadSourcePreview").getAttribute("style")).includes("scale(1.25)"), "裁剪预览没有同步主体大小");
@@ -75,6 +82,7 @@ async function waitForHealth(origin, child) {
     assert((await page.locator("#beadResultSummary").textContent()).includes(`共 ${Number(boardSize) ** 2} 颗`), "拼豆总数错误");
     const rareBefore = await page.locator('#beadPalette [data-availability="expanded"]').count();
     if (rareBefore) {
+      await page.locator(".bead-result-advanced summary").click();
       await page.locator('[data-action="bead-replace-rare"]').click();
       assert(await page.locator('#beadPalette [data-availability="expanded"]').count() === 0, "冷门色没有全部替换为常用色");
       await page.locator('[data-action="bead-reset-edits"]').click();

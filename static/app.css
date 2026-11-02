@@ -1537,6 +1537,14 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-upload.has-image { min-height: 0; aspect-ratio: 1; }
 .bead-upload.has-image img { width: 100%; height: 100%; max-height: none; transition: transform .16s ease,object-position .16s ease; }
 .bead-change-image { position: absolute; right: 10px; bottom: 10px; background: color-mix(in srgb,var(--paper) 92%,transparent) !important; }
+.bead-purpose { display: grid; gap: 6px; margin: 14px 0 9px; }
+.bead-purpose > span { color: var(--wine-dark); font-size: 11px; font-weight: 800; }
+.bead-purpose select { width: 100%; padding: 12px 11px; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); background: var(--paper); font-weight: 750; }
+.bead-smart-note { display: grid; gap: 3px; margin-bottom: 10px; padding: 11px 13px; border: 1px solid color-mix(in srgb,var(--wine) 16%,var(--line)); border-radius: 14px; background: linear-gradient(135deg,var(--cream),var(--blush)); }
+.bead-smart-note strong { color: var(--wine-dark); font-size: 10px; }.bead-smart-note span { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.bead-advanced,.bead-result-advanced { margin: 8px 0 12px; border: 1px solid var(--line); border-radius: 15px; background: color-mix(in srgb,var(--paper) 78%,transparent); }
+.bead-advanced > summary,.bead-result-advanced > summary { padding: 11px 13px; color: var(--muted); font-size: 10px; font-weight: 750; cursor: pointer; }
+.bead-advanced[open],.bead-result-advanced[open] { padding: 0 11px 11px; }.bead-advanced[open] > summary,.bead-result-advanced[open] > summary { margin-inline: -11px; }
 .bead-settings { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; margin: 14px 0 10px; }
 .bead-settings label { display: grid; gap: 5px; }
 .bead-settings label > span { color: var(--wine-dark); font-size: 10px; font-weight: 750; }
@@ -1568,6 +1576,13 @@ body:is([data-ui-theme="kitty"],[data-ui-theme="daniel"]) .bottom-nav { backgrou
 .bead-ai-version-card > div:last-child { display: grid; gap: 5px; }
 .bead-ai-version-card button { min-height: 34px; padding: 6px 9px; border: 0; border-radius: 10px; color: var(--wine-dark); background: var(--blush); font-size: 9px; }
 @keyframes bead-ai-spin { to { transform: rotate(360deg); } }
+.bead-variant-choices { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 14px; }
+.bead-variant-choices[hidden] { display: none; }
+.bead-variant-choices button { display: grid; align-content: start; gap: 7px; min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); background: var(--cream); text-align: left; }
+.bead-variant-choices button.selected { border-color: var(--wine); box-shadow: 0 0 0 2px var(--blush); }
+.bead-variant-choices canvas { display: block; width: 100%; height: auto; border-radius: 9px; background: #fff; image-rendering: pixelated; }
+.bead-variant-choices span,.bead-variant-choices strong,.bead-variant-choices small,.bead-variant-choices em,.bead-variant-choices b { display: block; min-width: 0; }
+.bead-variant-choices strong { color: var(--wine-dark); font-size: 10px; }.bead-variant-choices small { margin-top: 2px; color: var(--muted); font-size: 8px; }.bead-variant-choices em { min-height: 30px; margin-top: 4px; color: var(--muted); font-size: 8px; font-style: normal; line-height: 1.35; }.bead-variant-choices b { margin-top: 4px; color: #5c7a56; font-size: 8px; }
 .bead-canvas-wrap { margin-top: 15px; padding: 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
 #beadCanvas { display: block; width: 100%; height: auto; image-rendering: pixelated; border-radius: 10px; touch-action: manipulation; cursor: crosshair; }
 .bead-edit-hint { margin: 10px 0; color: var(--muted); font-size: 10px; text-align: center; }
@@ -1762,6 +1777,7 @@ body[data-card-art-ready="kitty-couple"] .card-kitty-sticker { color: transparen
   .bottom-nav { padding-inline: 5px; }
   .bottom-nav small { font-size: 9px; }
   .bead-settings { grid-template-columns: 1fr; }
+  .bead-variant-choices { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .bead-crop-controls { grid-template-columns: 1fr; }
   .play-feature-grid { grid-template-columns: 1fr; }
   .bead-palette { grid-template-columns: 1fr 1fr; }

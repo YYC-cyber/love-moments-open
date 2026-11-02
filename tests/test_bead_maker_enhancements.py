@@ -21,6 +21,23 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn('if (Number(boardSize?.value || 0) < 58)', self.javascript)
         self.assertIn('if (Number(colorCount?.value || 0) < 48)', self.javascript)
 
+    def test_simple_one_click_flow_generates_three_local_variants(self):
+        self.assertIn('id="beadPurpose"', self.html)
+        self.assertIn('id="beadAdvancedSettings"', self.html)
+        self.assertIn('高级设置（一般不需要调整）', self.html)
+        self.assertIn('id="beadVariantChoices"', self.html)
+        self.assertIn('function generateSmartBeadVariants()', self.javascript)
+        self.assertIn('高清收藏版', self.javascript)
+        self.assertIn('易制作版', self.javascript)
+        self.assertIn('净背景版', self.javascript)
+        self.assertIn('只调用一次 AI，再在本机生成三套方案', self.javascript)
+
+    def test_subject_prompt_supports_people_pets_and_mixed_photos(self):
+        prompt = (ROOT / "love_moments" / "bead_ai.py").read_text(encoding="utf-8")
+        self.assertIn("单人、双人、宠物", prompt)
+        self.assertIn("人与宠物互动合照", prompt)
+        self.assertIn("动物的物种、毛色、斑纹", prompt)
+
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)
         catalog = self.javascript.split("const BEAD_COLOR_CATALOG = [", 1)[1].split("].map", 1)[0]

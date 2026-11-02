@@ -311,7 +311,7 @@ const state = {
   data: null,
   selectedItemIds: new Set(),
   playTool: "",
-  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
+  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], variants: [], selectedVariant: "", size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
@@ -6100,7 +6100,7 @@ function openEntertainmentTool(tool) {
   document.getElementById("playHubPanel").hidden = true;
   const panelId = { beads: "beadToolPanel", wheel: "wheelToolPanel", cards: "cardToolPanel" }[tool];
   document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== panelId; });
-  if (tool === "beads") { renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); }
+  if (tool === "beads") { renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); prepareBeadSmartMode(); }
   else if (tool === "wheel") loadCoupleWheel().catch(error => toast(error.message));
   else loadCoupleCards().catch(error => toast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -6502,6 +6502,33 @@ function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
   context.stroke();
 }
 
+function beadPatternQuality(pattern) {
+  const filled = pattern.indices.reduce((total, index) => total + (index >= 0 ? 1 : 0), 0);
+  const coverage = filled / Math.max(1, pattern.indices.length);
+  let isolated = 0;
+  for (let y = 1; y < pattern.size - 1; y += 1) for (let x = 1; x < pattern.size - 1; x += 1) {
+    const offset = y * pattern.size + x; const color = pattern.indices[offset];
+    if (color < 0) continue;
+    const neighbors = [offset - 1, offset + 1, offset - pattern.size, offset + pattern.size];
+    if (!neighbors.some(index => pattern.indices[index] === color)) isolated += 1;
+  }
+  const rare = pattern.paletteMeta.filter(meta => !meta.common).length;
+  const detail = Math.min(24, Math.round(pattern.size / 4));
+  const coveragePenalty = coverage < .18 ? 24 : coverage < .3 ? 12 : 0;
+  const noisePenalty = Math.min(18, Math.round(isolated / Math.max(1, filled) * 160));
+  const rarePenalty = Math.min(10, rare * 2);
+  return Math.max(40, Math.min(99, 72 + detail - coveragePenalty - noisePenalty - rarePenalty));
+}
+
+function renderBeadVariantChoices() {
+  const host = document.getElementById("beadVariantChoices");
+  if (!host) return;
+  const variants = state.bead.variants || [];
+  host.hidden = variants.length < 2;
+  host.innerHTML = variants.map(variant => `<button type="button" class="${state.bead.selectedVariant === variant.id ? "selected" : ""}" data-action="bead-use-variant" data-id="${escapeHtml(variant.id)}" aria-pressed="${state.bead.selectedVariant === variant.id}"><canvas width="112" height="112" data-bead-variant-preview="${escapeHtml(variant.id)}" aria-hidden="true"></canvas><span><strong>${escapeHtml(variant.label)}</strong><small>${variant.size} × ${variant.size} · ${variant.palette.length} 色</small><em>${escapeHtml(variant.description)}</em><b>质量 ${variant.quality} 分</b></span></button>`).join("");
+  variants.forEach(variant => paintBeadCanvas(host.querySelector(`[data-bead-variant-preview="${CSS.escape(variant.id)}"]`), variant, { grid: false }));
+}
+
 function renderBeadPalette() {
   const host = document.getElementById("beadPalette");
   if (!host || !state.bead.palette.length) return;
@@ -6516,10 +6543,12 @@ function renderBeadPalette() {
 function renderBeadPattern() {
   paintBeadCanvas(document.getElementById("beadCanvas"), state.bead);
   renderBeadPalette();
+  renderBeadVariantChoices();
   const total = beadCounts().reduce((sum, count) => sum + count, 0);
   const empty = state.bead.size * state.bead.size - total;
   const expanded = state.bead.paletteMeta.filter(item => !item.common).length;
-  document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`;
+  const chosen = state.bead.variants.find(item => item.id === state.bead.selectedVariant);
+  document.getElementById("beadResultSummary").textContent = `${chosen ? `${chosen.label} · ` : ""}${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}${chosen ? ` · 质量 ${chosen.quality} 分` : ""}`;
   const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
@@ -6597,7 +6626,7 @@ function loadBeadImage(file) {
   image.onload = () => {
     if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl);
     if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
-    state.bead.image = image; state.bead.originalImage = image; state.bead.sourceFile = file; state.bead.sourceUrl = url; state.bead.aiUrl = ""; state.bead.aiAttempt = 0;
+    state.bead.image = image; state.bead.originalImage = image; state.bead.sourceFile = file; state.bead.sourceUrl = url; state.bead.aiUrl = ""; state.bead.aiAttempt = 0; state.bead.variants = []; state.bead.selectedVariant = "";
     const preview = document.getElementById("beadSourcePreview");
     preview.src = url; preview.hidden = false;
     document.getElementById("beadUploadZone").classList.add("has-image");
@@ -6606,11 +6635,29 @@ function loadBeadImage(file) {
     document.querySelector(".bead-change-image").hidden = false;
     document.querySelector('[data-action="bead-generate"]').disabled = false;
     document.getElementById("beadAiActions").hidden = true;
+    document.getElementById("beadResult").hidden = true;
     updateBeadCropPreview();
-    toast("照片已在本机打开，可以调整尺寸后生成");
+    toast("照片已准备好，点击一键智能生成即可");
   };
   image.onerror = () => { URL.revokeObjectURL(url); toast("这张照片无法读取，请换一张重试"); };
   image.src = url;
+}
+
+async function prepareBeadSmartMode() {
+  if (state.bead.aiConfigured !== null) return;
+  const mode = document.getElementById("beadGenerationMode");
+  const note = document.getElementById("beadSmartNote");
+  try {
+    const status = await api("/api/v1/entertainment/beads/ai-status");
+    state.bead.aiConfigured = Boolean(status.configured);
+    mode.value = state.bead.aiConfigured ? "ai" : "local";
+    if (note) note.innerHTML = state.bead.aiConfigured
+      ? `<strong>AI 智能模式可用</strong><span>自动识别人、宠物或互动合照；只调用一次 AI，再在本机生成三套方案。</span>`
+      : `<strong>本机智能模式</strong><span>当前没有配置图片模型，将直接生成三套本机方案，照片不会上传。</span>`;
+    renderBeadAiVersions();
+  } catch (_) {
+    state.bead.aiConfigured = false; mode.value = "local";
+  }
 }
 
 async function beadImageFromBlob(blob) {
@@ -6668,8 +6715,8 @@ async function loadBeadAiVersion(mediaId) {
   document.querySelector('[data-action="bead-generate"]').disabled = false;
   document.getElementById("beadAiActions").hidden = !state.bead.sourceFile;
   updateBeadCropPreview();
-  buildBeadPatternFromCurrentImage();
-  toast("已恢复这一版，并重新生成可编辑网格");
+  generateSmartBeadVariants();
+  toast("已恢复这一版，并自动生成三套可选网格");
 }
 
 async function requestAiBeadPreview({ retry = false } = {}) {
@@ -6680,7 +6727,7 @@ async function requestAiBeadPreview({ retry = false } = {}) {
   progress.hidden = false; let seconds = 0;
   strong.textContent = retry ? `AI 正在重新生成第 ${attempt} 版` : "AI 正在精修照片";
   small.textContent = "已等待 0 秒 · 一般需要 20～60 秒，请保持页面打开。";
-  const timer = setInterval(() => { seconds += 1; small.textContent = `已等待 ${seconds} 秒 · 正在保留人物特征并简化背景。`; }, 1000);
+  const timer = setInterval(() => { seconds += 1; small.textContent = `已等待 ${seconds} 秒 · 正在保留人物或宠物特征并简化背景。`; }, 1000);
   try {
     const uploadFile = await compressImageForUpload(state.bead.sourceFile);
     if (uploadFile.size > 10 * 1024 * 1024) throw new Error("照片仍超过 10 MB，请先在系统相册中缩小后重试");
@@ -6712,22 +6759,83 @@ async function requestAiBeadPreview({ retry = false } = {}) {
   }
 }
 
-function buildBeadPatternFromCurrentImage() {
-  const size = Number(document.getElementById("beadBoardSize").value);
-  const colorCount = Number(document.getElementById("beadColorCount").value);
-  const cropMode = document.getElementById("beadCropMode").value;
-  const detailMode = document.getElementById("beadDetailMode").value;
-  const backgroundMode = document.getElementById("beadBackgroundMode")?.value || "keep";
-  const backgroundSensitivity = Number(document.getElementById("beadBackgroundSensitivity")?.value || 42);
-  const toneMode = document.getElementById("beadToneMode")?.value || "auto";
+function createBeadPatternData(settings = {}) {
+  const size = Number(settings.size || document.getElementById("beadBoardSize").value);
+  const colorCount = Number(settings.colorCount || document.getElementById("beadColorCount").value);
+  const cropMode = settings.cropMode || document.getElementById("beadCropMode").value;
+  const detailMode = settings.detailMode || document.getElementById("beadDetailMode").value;
+  const backgroundMode = settings.backgroundMode || document.getElementById("beadBackgroundMode")?.value || "keep";
+  const backgroundSensitivity = Number(settings.backgroundSensitivity || document.getElementById("beadBackgroundSensitivity")?.value || 42);
+  const toneMode = settings.toneMode || document.getElementById("beadToneMode")?.value || "auto";
   const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
   if (!result.palette.length) throw new Error("背景去除范围过大，已没有可生成的主体；请降低去背景力度");
-  state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;
-  state.bead.generatedPalette = result.palette.map(color => [...color]); state.bead.generatedPaletteMeta = result.paletteMeta.map(meta => ({ ...meta }));
-  state.bead.generatedIndices = [...result.indices]; state.bead.selectedColor = 0;
+  const pattern = { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, backgroundMode };
+  pattern.quality = beadPatternQuality(pattern);
+  return pattern;
+}
+
+function applyBeadVariant(pattern, { scroll = true } = {}) {
+  state.bead.selectedVariant = pattern.id || "";
+  state.bead.size = pattern.size; state.bead.palette = pattern.palette.map(color => [...color]);
+  state.bead.paletteMeta = pattern.paletteMeta.map(meta => ({ ...meta })); state.bead.indices = [...pattern.indices];
+  state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
+  state.bead.generatedIndices = [...state.bead.indices]; state.bead.selectedColor = 0;
   renderBeadPattern();
-  document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (scroll) document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function smartBeadPlans() {
+  const purpose = document.getElementById("beadPurpose")?.value || "collectible";
+  const finish = plans => {
+    if (!document.getElementById("beadAdvancedSettings")?.open) return plans;
+    const manual = {
+      id: "recommended", label: "我的高级设置", description: "按你展开后选择的参数生成",
+      size: Number(document.getElementById("beadBoardSize").value), colorCount: Number(document.getElementById("beadColorCount").value),
+      cropMode: document.getElementById("beadCropMode").value, detailMode: document.getElementById("beadDetailMode").value,
+      backgroundMode: document.getElementById("beadBackgroundMode").value, toneMode: document.getElementById("beadToneMode").value,
+    };
+    return [manual, ...plans.slice(1)];
+  };
+  if (purpose === "charm") return finish([
+    { id: "recommended", label: "可爱挂件", description: "小尺寸、轮廓优先", size: 29, colorCount: 24, detailMode: "simple", backgroundMode: "keep" },
+    { id: "faithful", label: "细节挂件", description: "多保留一些表情与花纹", size: 32, colorCount: 36, detailMode: "detail", backgroundMode: "keep" },
+    { id: "clean", label: "净背景挂件", description: "尽量只保留主体", size: 29, colorCount: 24, detailMode: "balanced", backgroundMode: "remove", backgroundSensitivity: 34 },
+  ]);
+  if (purpose === "standard") return finish([
+    { id: "recommended", label: "推荐摆件", description: "清楚且制作量适中", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "keep" },
+    { id: "easy", label: "更容易做", description: "减少色号与零碎色块", size: 50, colorCount: 36, detailMode: "balanced", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "减少没有意义的背景豆", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 34 },
+  ]);
+  return finish([
+    { id: "recommended", label: "高清收藏版", description: "重点保留五官、毛发和互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
+    { id: "easy", label: "易制作版", description: "减少豆量和难买色号", size: 58, colorCount: 36, detailMode: "balanced", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "突出人物或宠物主体", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 34 },
+  ]);
+}
+
+function generateSmartBeadVariants() {
+  const variants = smartBeadPlans().map(plan => {
+    let pattern;
+    try { pattern = createBeadPatternData(plan); }
+    catch (error) {
+      if (plan.backgroundMode !== "remove") throw error;
+      pattern = createBeadPatternData({ ...plan, backgroundMode: "keep" });
+      plan = { ...plan, description: `${plan.description}（复杂背景已安全保留）` };
+    }
+    if (pattern.quality < 60 && plan.backgroundMode === "remove") {
+      pattern = createBeadPatternData({ ...plan, backgroundMode: "keep", colorCount: Math.max(36, plan.colorCount) });
+      plan = { ...plan, description: `${plan.description}（自动修正主体缺失）` };
+    }
+    return { ...pattern, id: plan.id, label: plan.label, description: plan.description };
+  });
+  state.bead.variants = variants;
+  applyBeadVariant(variants[0]);
+}
+
+function buildBeadPatternFromCurrentImage() {
+  state.bead.variants = [];
+  applyBeadVariant(createBeadPatternData());
 }
 
 async function generateBeadPattern({ retryAi = false } = {}) {
@@ -6750,7 +6858,7 @@ async function generateBeadPattern({ retryAi = false } = {}) {
   try {
     if (mode === "ai") await requestAiBeadPreview({ retry: retryAi });
     else { state.bead.image = state.bead.originalImage || state.bead.image; document.getElementById("beadSourcePreview").src = state.bead.sourceUrl; document.getElementById("beadAiActions").hidden = true; }
-    buildBeadPatternFromCurrentImage();
+    generateSmartBeadVariants();
   } catch (error) {
     toast(error.message || "拼豆板图生成失败");
   } finally {
@@ -6775,6 +6883,7 @@ function saveCurrentBeadPattern() {
 function openSavedBeadPattern(id) {
   const item = readSavedBeadPatterns().find(entry => entry.id === id);
   if (!item) { toast("这份本机草稿已经不存在"); return; }
+  state.bead.variants = []; state.bead.selectedVariant = "";
   state.bead.size = Number(item.size); state.bead.palette = item.palette.map(color => [...color]);
   state.bead.paletteMeta = state.bead.palette.map((color, index) => item.paletteMeta?.[index] || beadPaletteMeta(color, index)); state.bead.indices = [...item.indices];
   state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
@@ -6836,6 +6945,11 @@ document.addEventListener("click", async event => {
     if (action === "bead-pick-image") document.getElementById("beadImageInput").click();
     else if (action === "bead-generate") generateBeadPattern();
     else if (action === "bead-ai-retry") generateBeadPattern({ retryAi: true });
+    else if (action === "bead-use-variant") {
+      const variant = state.bead.variants.find(item => item.id === beadAction.dataset.id);
+      if (!variant) toast("这套方案已经失效，请重新生成");
+      else { applyBeadVariant(variant, { scroll: false }); toast(`已切换到${variant.label}`); }
+    }
     else if (action === "bead-reset-edits") {
       state.bead.palette = state.bead.generatedPalette.map(color => [...color]); state.bead.paletteMeta = state.bead.generatedPaletteMeta.map(meta => ({ ...meta }));
       state.bead.indices = [...state.bead.generatedIndices]; state.bead.selectedColor = 0; renderBeadPattern(); toast("已恢复刚生成的板图");

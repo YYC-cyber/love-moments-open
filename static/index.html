@@ -545,6 +545,10 @@
             <button type="button" class="quiet bead-change-image" data-action="bead-pick-image" hidden>更换照片</button>
           </div>
 
+          <label class="bead-purpose"><span>想做成什么</span><select id="beadPurpose"><option value="collectible" selected>高清收藏画 · 自动保留人物/宠物细节</option><option value="standard">普通摆件 · 清楚且更容易制作</option><option value="charm">小挂件 · 简化成可爱图案</option></select></label>
+          <div class="bead-smart-note" id="beadSmartNote"><strong>智能模式已准备</strong><span>会自动处理单人、双人、宠物以及人与宠物同框，生成 3 套可选方案。</span></div>
+          <details class="bead-advanced" id="beadAdvancedSettings">
+            <summary>高级设置（一般不需要调整）</summary>
           <div class="bead-settings">
             <label><span>生成方式</span><select id="beadGenerationMode"><option value="local">本机生成 · 免费快速</option><option value="ai">AI 精修 · 人像效果更好</option></select></label>
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29">29 × 29 · 图标/单板</option><option value="32">32 × 32 · 简单头像</option><option value="50">50 × 50 · 中等作品</option><option value="58" selected>58 × 58 · 人像推荐</option><option value="87">87 × 87 · 高清人像</option></select></label>
@@ -560,18 +564,22 @@
             <label><span>主体大小 <output data-bead-crop-output="beadCropZoom">100%</output></span><input id="beadCropZoom" type="range" min="100" max="180" value="100"></label>
             <label id="beadBackgroundSensitivityRow" hidden><span>去背景力度 <output data-bead-crop-output="beadBackgroundSensitivity">42</output></span><input id="beadBackgroundSensitivity" type="range" min="18" max="90" value="42"></label>
           </div>
-          <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
+          </details>
+          <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>一键智能生成</button>
           <div class="bead-ai-progress" id="beadAiProgress" hidden role="status" aria-live="polite"><span></span><strong>AI 正在精修照片</strong><small>一般需要 20～60 秒，请保持页面打开。</small></div>
           <p class="form-note" id="beadModeNote">人像建议至少使用 58 × 58 和 48 色；29 × 29 只适合图标或小挂件。清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光。</p>
         </article>
 
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
+          <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
+          <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
           <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>
-          <div class="bead-ai-actions" id="beadAiActions" hidden><p>不满意可以从原始照片重新生成，不会反复加工上一版。每次重试会产生一次百炼图片费用。</p><button type="button" class="secondary-button" data-action="bead-ai-retry">AI 重新生成一版</button></div>
           <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
+          </details>
+          <div class="bead-ai-actions" id="beadAiActions" hidden><p>不满意可以从原始照片重新生成，不会反复加工上一版。每次重试会产生一次百炼图片费用。</p><button type="button" class="secondary-button" data-action="bead-ai-retry">AI 重新生成一版</button></div>
           <div class="bead-result-actions">
             <button type="button" class="secondary-button" data-action="bead-save">保存到本机</button>
             <button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button>
