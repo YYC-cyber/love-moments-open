@@ -311,7 +311,7 @@ const state = {
   data: null,
   selectedItemIds: new Set(),
   playTool: "",
-  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], variants: [], selectedVariant: "", size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
+  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], variants: [], selectedVariant: "", size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0, catalogs: [], catalog: null, catalogId: "", catalogLoading: null, patternCatalog: null },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
@@ -6100,7 +6100,10 @@ function openEntertainmentTool(tool) {
   document.getElementById("playHubPanel").hidden = true;
   const panelId = { beads: "beadToolPanel", wheel: "wheelToolPanel", cards: "cardToolPanel" }[tool];
   document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== panelId; });
-  if (tool === "beads") { renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); prepareBeadSmartMode(); }
+  if (tool === "beads") {
+    renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); prepareBeadSmartMode();
+    loadBeadPaletteCatalogs().catch(error => toast(`拼豆色卡读取失败：${error.message}`));
+  }
   else if (tool === "wheel") loadCoupleWheel().catch(error => toast(error.message));
   else loadCoupleCards().catch(error => toast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -6253,32 +6256,9 @@ function beadHex(color) {
   return `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 }
 
-// Generic colour families avoid pretending that different bead brands share
-// one number system. Expanded colours remain usable and get a common fallback.
-const BEAD_COLOR_CATALOG = [
-  ["W01", "瓷白", "FFFDF7", 1], ["W02", "奶油白", "F4E8D5", 1], ["N01", "黑色", "211D1D", 1], ["N02", "深灰", "4A4648", 1], ["N03", "中灰", "7D797B", 1], ["N04", "浅灰", "B9B5B2", 1],
-  ["B01", "深咖", "3A241F", 1], ["B02", "咖啡", "674238", 1], ["B03", "棕色", "8B5D4B", 1], ["B04", "焦糖", "B77A51", 1], ["B05", "浅驼", "D1A47E", 1], ["B06", "米杏", "E9C9A5", 1],
-  ["S01", "深肤", "9A604B", 1], ["S02", "暖肤", "C98568", 1], ["S03", "自然肤", "E5AB8D", 1], ["S04", "浅肤", "F3C9AD", 1], ["S05", "粉肤", "F7D7C4", 1],
-  ["R01", "酒红", "7A2637", 1], ["R02", "正红", "C93143", 1], ["R03", "珊瑚红", "EB665F", 1], ["O01", "橙色", "EA7A32", 1], ["O02", "浅橙", "F5A35C", 1],
-  ["Y01", "深黄", "D5A51E", 1], ["Y02", "亮黄", "F4D739", 1], ["Y03", "奶黄", "FFF09A", 1],
-  ["G01", "墨绿", "244E3D", 1], ["G02", "草绿", "4E8A55", 1], ["G03", "亮绿", "7FBD52", 1], ["G04", "浅绿", "B9DB83", 1], ["G05", "薄荷绿", "A8DCC5", 1],
-  ["C01", "深青", "1E5961", 1], ["C02", "湖蓝", "368E9B", 1], ["C03", "浅青", "85CED3", 1],
-  ["U01", "藏蓝", "273B62", 1], ["U02", "宝蓝", "345FA8", 1], ["U03", "天蓝", "67A7DB", 1], ["U04", "浅蓝", "A9D2ED", 1],
-  ["P01", "深紫", "52335F", 1], ["P02", "紫色", "79538D", 1], ["P03", "浅紫", "B69ACB", 1],
-  ["K01", "玫红", "B93669", 1], ["K02", "粉红", "E77FA4", 1], ["K03", "浅粉", "F3B6CB", 1], ["K04", "樱花粉", "F8D4DF", 1],
-  ["W03", "冷瓷白", "F2F6F8", 1], ["N05", "银灰", "D7D8DC", 1], ["B07", "红木深棕", "512A2D", 1], ["B08", "沙金棕", "C68F65", 1], ["B09", "淡沙米", "EBD8BD", 1],
-  ["S06", "橄榄肤", "B77C5B", 1], ["S07", "蜜桃肤", "F2BFA0", 1], ["R04", "深绯红", "551D32", 1], ["R05", "玫瑰红", "D94D68", 1], ["R06", "淡珊瑚", "F59A92", 1],
-  ["O03", "焦橙", "C95427", 1], ["O04", "杏橙", "FFC083", 1], ["Y04", "芥末黄", "B88618", 1], ["Y05", "淡柠檬", "FFF6BD", 1],
-  ["G06", "森林绿", "173C2D", 1], ["G07", "翡翠绿", "1F7651", 1], ["G08", "鼠尾草", "91A982", 1], ["G09", "淡薄荷", "D4EFE0", 1],
-  ["C04", "深海青", "12434D", 1], ["C05", "水蓝", "55B9C1", 1], ["C06", "淡水青", "BDE7E7", 1],
-  ["U05", "午夜蓝", "172647", 1], ["U06", "矢车菊蓝", "557BC4", 1], ["U07", "婴儿蓝", "C8E3F4", 1],
-  ["P04", "李子紫", "44234F", 1], ["P05", "薰衣草", "9B79B2", 1], ["P06", "淡丁香", "DED0E8", 1],
-  ["K05", "深莓粉", "8E2859", 1], ["K06", "蔷薇粉", "D85E91", 1], ["K07", "腮红粉", "F9E4EA", 1],
-  ["X01", "炭黑", "100E12", 0], ["X02", "蓝灰", "687887", 0], ["X03", "雾灰", "9B9294", 0], ["X04", "烟粉", "B98E94", 0], ["X05", "豆沙", "A85E68", 0], ["X06", "灰紫", "88758E", 0],
-  ["X07", "灰绿", "718678", 0], ["X08", "橄榄绿", "788044", 0], ["X09", "荧光绿", "B7E84B", 0], ["X10", "柠檬黄", "F5EE56", 0], ["X11", "蜜桃", "F2A58D", 0],
-  ["X12", "杏粉", "EBC0AF", 0], ["X13", "冰蓝", "C6E7E8", 0], ["X14", "丁香紫", "CDB9D8", 0], ["X15", "莓紫", "9E4778", 0], ["X16", "砖红", "A84A3F", 0],
-].map(([code, name, hex, common]) => ({ code, name, rgb: [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16)), common: Boolean(common) }));
-
+// Physical colour numbers are loaded from validated server-side catalogue
+// files.  A new brand or a corrected batch therefore never requires a web
+// client code change.
 function beadRgbToLab(color) {
   const linear = color.map(value => { const next = value / 255; return next <= .04045 ? next / 12.92 : ((next + .055) / 1.055) ** 2.4; });
   const x = (linear[0] * .4124 + linear[1] * .3576 + linear[2] * .1805) / .95047;
@@ -6293,15 +6273,72 @@ function beadLabDistance(first, second) {
   return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2 + (first[2] - second[2]) ** 2;
 }
 
-BEAD_COLOR_CATALOG.forEach(color => { color.lab = beadRgbToLab(color.rgb); });
+function beadColorCatalog() {
+  return state.bead.catalog?.colors || [];
+}
+
+function beadCatalogueSnapshot(catalog = state.bead.catalog) {
+  if (!catalog) return null;
+  return { id: catalog.id, name: catalog.name, brand: catalog.brand, series: catalog.series, version: catalog.version, beadSizeMm: Number(catalog.bead_size_mm), boardPitchMm: Number(catalog.board_pitch_mm), verified: Boolean(catalog.verified), colorValueKind: catalog.color_value_kind };
+}
+
+function renderBeadPaletteStatus() {
+  const catalog = state.bead.catalog;
+  const status = document.getElementById("beadPaletteStatus");
+  if (!status) return;
+  if (!catalog) { status.textContent = "暂时没有读取到可用色卡，生成按钮会保持停用。"; return; }
+  const accuracy = catalog.verified ? (catalog.color_value_kind === "measured_physical" ? "实物测色已校准" : "官方数字色值") : "工程参考色值 · 购买前请用实物色卡复核";
+  status.textContent = `${catalog.brand} · ${catalog.series || catalog.name} · ${catalog.colors.length} 色 · ${Number(catalog.bead_size_mm)}mm · ${accuracy} · ${catalog.version}`;
+}
+
+function normalizeBeadCatalogue(payload) {
+  return { ...payload, colors: (payload.colors || []).map(item => {
+    const hex = String(item.hex || "#000000").replace("#", "");
+    const rgb = [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16));
+    return { ...item, rgb, common: Boolean(item.common), lab: beadRgbToLab(rgb) };
+  }) };
+}
+
+async function selectBeadCatalogue(id, { remember = true } = {}) {
+  const selected = state.bead.catalogs.find(item => item.id === id);
+  if (!selected) throw new Error("所选拼豆色卡不存在");
+  const payload = await api(`/api/v1/entertainment/beads/palettes/${encodeURIComponent(id)}`);
+  state.bead.catalog = normalizeBeadCatalogue(payload); state.bead.catalogId = id;
+  if (remember) privateStorage().setItem("love-bead-palette-id", id);
+  const select = document.getElementById("beadPaletteCatalog"); if (select) select.value = id;
+  renderBeadPaletteStatus();
+  return state.bead.catalog;
+}
+
+async function loadBeadPaletteCatalogs() {
+  if (state.bead.catalogLoading) return state.bead.catalogLoading;
+  state.bead.catalogLoading = (async () => {
+    const manifest = await api("/api/v1/entertainment/beads/palettes");
+    state.bead.catalogs = Array.isArray(manifest.items) ? manifest.items : [];
+    if (!state.bead.catalogs.length) throw new Error("服务器没有可用的拼豆色卡");
+    const select = document.getElementById("beadPaletteCatalog");
+    if (select) select.innerHTML = state.bead.catalogs.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.brand)} · ${escapeHtml(item.series || item.name)} · ${Number(item.bead_size_mm)}mm · ${Number(item.color_count)} 色${item.verified ? " · 已校准" : " · 参考"}</option>`).join("");
+    const remembered = privateStorage().getItem("love-bead-palette-id");
+    const target = state.bead.catalogs.some(item => item.id === remembered) ? remembered : manifest.default_id || state.bead.catalogs[0].id;
+    await selectBeadCatalogue(target, { remember: false });
+    return state.bead.catalog;
+  })().catch(error => {
+    state.bead.catalog = null; renderBeadPaletteStatus(); throw error;
+  }).finally(() => { state.bead.catalogLoading = null; });
+  return state.bead.catalogLoading;
+}
 
 function beadCommonSubstitute(color) {
-  return BEAD_COLOR_CATALOG.filter(item => item.common).reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best);
+  const available = beadColorCatalog().filter(item => item.common);
+  if (!available.length) return color;
+  return available.reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best);
 }
 
 function beadPaletteMeta(color, fallbackIndex = 0) {
+  const catalog = beadColorCatalog();
+  if (!catalog.length) return { code: `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: "已保存颜色", common: true, substituteCode: "", substituteName: "", substituteRgb: null };
   const lab = beadRgbToLab(color);
-  const entry = BEAD_COLOR_CATALOG.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best);
+  const entry = catalog.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best);
   const substitute = entry.common ? null : beadCommonSubstitute(entry);
   return { code: entry.code || `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: entry.name || "自定义色", common: entry.common, substituteCode: substitute?.code || "", substituteName: substitute?.name || "", substituteRgb: substitute?.rgb || null };
 }
@@ -6350,6 +6387,8 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
 }
 
 function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqrt(pixels.length / 4)), detailMode = "detail" } = {}) {
+  const catalog = beadColorCatalog();
+  if (!catalog.length) throw new Error("拼豆色卡尚未加载，请稍后重试");
   const colors = [];
   const active = [];
   for (let index = 0; index < pixels.length; index += 4) {
@@ -6360,14 +6399,14 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
   if (!active.some(Boolean)) return { palette: [], paletteMeta: [], indices: active.map(() => -1) };
   const labs = colors.map(beadRgbToLab);
   const weights = beadDetailWeights(colors, size, detailMode).map((weight, index) => active[index] ? weight : 0);
-  const count = Math.max(1, Math.min(Number(requestedCount) || 12, BEAD_COLOR_CATALOG.length));
-  const distances = BEAD_COLOR_CATALOG.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
+  const count = Math.max(1, Math.min(Number(requestedCount) || 12, catalog.length));
+  const distances = catalog.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
   const selected = [];
   let bestDistances = new Array(colors.length).fill(Infinity);
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   while (selected.length < count) {
     let bestCandidate = -1; let bestCost = Infinity;
-    BEAD_COLOR_CATALOG.forEach((candidate, candidateIndex) => {
+    catalog.forEach((candidate, candidateIndex) => {
       if (selected.includes(candidateIndex)) return;
       let cost = candidate.common ? 0 : totalWeight * 4;
       for (let pixel = 0; pixel < colors.length; pixel += 1) cost += weights[pixel] * Math.min(bestDistances[pixel], distances[candidateIndex][pixel]);
@@ -6378,12 +6417,12 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
     bestDistances = bestDistances.map((distance, pixel) => Math.min(distance, distances[bestCandidate][pixel]));
   }
   let indices = labs.map((_, pixel) => active[pixel] ? selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0) : -1);
-  let palette = selected.map(index => [...BEAD_COLOR_CATALOG[index].rgb]);
+  let palette = selected.map(index => [...catalog[index].rgb]);
   indices = cleanupBeadIndices(indices, colors, palette, size, detailMode);
   const used = [...new Set(indices.filter(index => index >= 0))];
   const remap = new Map(used.map((oldIndex, newIndex) => [oldIndex, newIndex]));
   palette = used.map(index => palette[index]);
-  const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(BEAD_COLOR_CATALOG[selected[index]].rgb, paletteIndex));
+  const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(catalog[selected[index]].rgb, paletteIndex));
   return { palette, paletteMeta, indices: indices.map(index => index < 0 ? -1 : remap.get(index)) };
 }
 
@@ -6527,6 +6566,18 @@ function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
     context.moveTo(0, position); context.lineTo(side, position);
   }
   context.stroke();
+  const drawGuide = (step, strokeStyle, lineWidth) => {
+    context.strokeStyle = strokeStyle; context.lineWidth = lineWidth; context.beginPath();
+    for (let index = step; index < pattern.size; index += step) {
+      if (pattern.size % 29 === 0 && index % 29 === 0) continue;
+      const position = Math.round(index * cell) + .5;
+      context.moveTo(position, 0); context.lineTo(position, side);
+      context.moveTo(0, position); context.lineTo(side, position);
+    }
+    context.stroke();
+  };
+  drawGuide(5, "rgba(78,47,53,.42)", Math.max(1, side / 1044));
+  drawGuide(10, "rgba(78,38,48,.62)", Math.max(1.5, side / 696));
   if (pattern.size >= 58 && pattern.size % 29 === 0) {
     context.strokeStyle = "rgba(80,42,50,.72)";
     context.lineWidth = Math.max(2, side / 520);
@@ -6586,7 +6637,10 @@ function renderBeadPattern() {
   const empty = state.bead.size * state.bead.size - total;
   const expanded = state.bead.paletteMeta.filter(item => !item.common).length;
   const chosen = state.bead.variants.find(item => item.id === state.bead.selectedVariant);
-  document.getElementById("beadResultSummary").textContent = `${chosen ? `${chosen.label} · ` : ""}${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}${chosen ? ` · 质量 ${chosen.quality} 分` : ""}`;
+  const catalog = state.bead.patternCatalog || beadCatalogueSnapshot();
+  const physical = catalog?.boardPitchMm ? ` · 成品约 ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} × ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} cm` : "";
+  const catalogText = catalog ? ` · ${catalog.brand} ${catalog.series || catalog.name} ${catalog.beadSizeMm}mm${catalog.verified ? "（已校准）" : "（参考色）"}` : "";
+  document.getElementById("beadResultSummary").textContent = `${chosen ? `${chosen.label} · ` : ""}${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${physical}${catalogText}${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}${chosen ? ` · 质量 ${chosen.quality} 分` : ""}`;
   const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
@@ -6622,7 +6676,7 @@ function replaceRareBeadColors() {
   state.bead.palette.forEach((color, index) => {
     const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
     const target = meta.common ? { color, meta } : (() => {
-      const entry = BEAD_COLOR_CATALOG.find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color) });
+      const entry = beadColorCatalog().find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color), rgb: color });
       return { color: [...entry.rgb], meta: beadPaletteMeta(entry.rgb, index) };
     })();
     if (!byCode.has(target.meta.code)) {
@@ -6808,7 +6862,7 @@ function createBeadPatternData(settings = {}) {
   const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
   const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
   if (!result.palette.length) throw new Error("背景去除范围过大，已没有可生成的主体；请降低去背景力度");
-  const pattern = { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, backgroundMode };
+  const pattern = { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, backgroundMode, catalog: beadCatalogueSnapshot() };
   pattern.quality = beadPatternQuality(pattern);
   return pattern;
 }
@@ -6817,6 +6871,7 @@ function applyBeadVariant(pattern, { scroll = true } = {}) {
   state.bead.selectedVariant = pattern.id || "";
   state.bead.size = pattern.size; state.bead.palette = pattern.palette.map(color => [...color]);
   state.bead.paletteMeta = pattern.paletteMeta.map(meta => ({ ...meta })); state.bead.indices = [...pattern.indices];
+  state.bead.patternCatalog = pattern.catalog ? { ...pattern.catalog } : beadCatalogueSnapshot();
   state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
   state.bead.generatedIndices = [...state.bead.indices]; state.bead.selectedColor = 0;
   renderBeadPattern();
@@ -6878,6 +6933,10 @@ function buildBeadPatternFromCurrentImage() {
 
 async function generateBeadPattern({ retryAi = false } = {}) {
   if (!state.bead.image) { toast("请先选择照片"); return; }
+  if (!state.bead.catalog) {
+    try { await loadBeadPaletteCatalogs(); }
+    catch (error) { toast(`暂时无法生成：${error.message}`); return; }
+  }
   const generateButton = document.querySelector('[data-action="bead-generate"]');
   const retryButton = document.querySelector('[data-action="bead-ai-retry"]');
   const originalLabel = generateButton?.textContent || "生成拼豆板图";
@@ -6911,7 +6970,7 @@ function saveCurrentBeadPattern() {
   const record = {
     id: globalThis.crypto?.randomUUID?.() || `bead-${Date.now()}`,
     title: `拼豆作品 · ${now.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`,
-    size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices],
+    size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices], catalog: state.bead.patternCatalog ? { ...state.bead.patternCatalog } : beadCatalogueSnapshot(),
     createdAt: now.toISOString(), updatedAt: now.toISOString(),
   };
   writeSavedBeadPatterns([record, ...readSavedBeadPatterns()]);
@@ -6924,6 +6983,7 @@ function openSavedBeadPattern(id) {
   state.bead.variants = []; state.bead.selectedVariant = "";
   state.bead.size = Number(item.size); state.bead.palette = item.palette.map(color => [...color]);
   state.bead.paletteMeta = state.bead.palette.map((color, index) => item.paletteMeta?.[index] || beadPaletteMeta(color, index)); state.bead.indices = [...item.indices];
+  state.bead.patternCatalog = item.catalog ? { ...item.catalog } : null;
   state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
   state.bead.generatedIndices = [...item.indices]; state.bead.selectedColor = 0;
   renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -6946,7 +7006,8 @@ function exportBeadPattern() {
   context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0);
   context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34);
   const totalBeads = counts.reduce((sum, count) => sum + count, 0);
-  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${totalBeads} 颗 · 空白 ${state.bead.size * state.bead.size - totalBeads} 格 · 购买时请按门店品牌色卡复核`, 18, boardSide + 58);
+  const catalog = state.bead.patternCatalog || beadCatalogueSnapshot();
+  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${totalBeads} 颗 · 空白 ${state.bead.size * state.bead.size - totalBeads} 格 · ${catalog?.brand || "未知品牌"} ${catalog?.series || ""} ${catalog?.beadSizeMm || "?"}mm${catalog?.verified ? " 已校准" : " 参考色，采购前请实物复核"}`, 18, boardSide + 58);
   const columnWidth = canvas.width / columns;
   state.bead.palette.forEach((color, index) => {
     const column = index % columns; const row = Math.floor(index / columns);
@@ -9965,6 +10026,16 @@ document.getElementById("beadGenerationMode")?.addEventListener("change", async 
     state.bead.aiConfigured = false; event.target.value = "local";
     note.textContent = `AI 模式暂不可用：${error.message}。已切回本机生成。`;
   }
+});
+document.getElementById("beadPaletteCatalog")?.addEventListener("change", async event => {
+  const previous = state.bead.catalogId;
+  event.target.disabled = true;
+  try {
+    await selectBeadCatalogue(event.target.value);
+    if (state.bead.indices.length && previous !== event.target.value) toast("实体豆色卡已切换；现有板图仍保留原色号，点击生成后才会按新色卡重新配色");
+  } catch (error) {
+    event.target.value = previous; toast(error.message || "色卡切换失败");
+  } finally { event.target.disabled = false; }
 });
 for (const id of ["beadCropX", "beadCropY", "beadCropZoom", "beadBackgroundSensitivity"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
 document.getElementById("beadBackgroundMode")?.addEventListener("change", event => {

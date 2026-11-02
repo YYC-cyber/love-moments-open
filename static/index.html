@@ -551,6 +551,7 @@
             <summary>高级设置（一般不需要调整）</summary>
           <div class="bead-settings">
             <label><span>生成方式</span><select id="beadGenerationMode"><option value="local">本机生成 · 免费快速</option><option value="ai">AI 精修 · 人像效果更好</option></select></label>
+            <label><span>实体拼豆</span><select id="beadPaletteCatalog" aria-describedby="beadPaletteStatus"><option value="">正在读取可用色卡…</option></select></label>
             <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29">29 × 29 · 图标/单板</option><option value="32">32 × 32 · 简单头像</option><option value="50">50 × 50 · 中等作品</option><option value="58" selected>58 × 58 · 人像推荐</option><option value="87">87 × 87 · 高清人像</option></select></label>
             <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24">24 色 · 卡通推荐</option><option value="36">36 色 · 细节丰富</option><option value="48" selected>48 色 · 人像推荐</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
@@ -558,6 +559,7 @@
             <label><span>人物明暗</span><select id="beadToneMode"><option value="auto" selected>主体整体提亮 · 推荐</option><option value="bright">强力提亮暗部</option><option value="original">保持原图明暗</option></select></label>
             <label><span>照片背景</span><select id="beadBackgroundMode"><option value="keep" selected>保留原背景</option><option value="remove">本机智能去背景</option></select></label>
           </div>
+          <p class="form-note bead-palette-status" id="beadPaletteStatus">色卡由服务器配置，页面不会写死品牌色号。</p>
           <div class="bead-crop-controls" id="beadCropControls" hidden aria-label="调整照片取景">
             <label><span>左右位置 <output data-bead-crop-output="beadCropX">50</output></span><input id="beadCropX" type="range" min="0" max="100" value="50"></label>
             <label><span>上下位置 <output data-bead-crop-output="beadCropY">50</output></span><input id="beadCropY" type="range" min="0" max="100" value="50"></label>
@@ -573,7 +575,7 @@
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
-          <div class="bead-board-toolbar"><span>深色粗线表示每块 29 × 29 实体底板边界</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
+          <div class="bead-board-toolbar"><span>5 格辅助线、10 格定位线；深色粗线表示每块 29 × 29 实体底板边界</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
           <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1044" height="1044" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>

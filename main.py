@@ -30,6 +30,7 @@ from love_moments.quota import QuotaExceededError
 from love_moments.webpush import WebPushService
 from love_moments.life_assistant import life_assistant_from_env
 from love_moments.bead_ai import BailianBeadProvider, bead_ai_status
+from love_moments.bead_palettes import BeadPaletteRepository
 
 
 ROOT = Path(__file__).resolve().parent
@@ -55,6 +56,7 @@ WEATHER = OpenMeteoWeather()
 TURN = TurnCredentialProvider()
 RTC = ShengwangRtcProvider()
 ADMIN = AdminService(lambda: STORE, ROOT)
+BEAD_PALETTES = BeadPaletteRepository.from_environment(ROOT)
 SESSION_COOKIE = "lm_session"
 PUBLIC_FILES = {
     "/static/index.html",
@@ -1374,6 +1376,14 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         elif path == "/api/v1/entertainment/beads/ai-status":
             self._require_user()
             self._send_json(bead_ai_status(), headers={"Cache-Control": "no-store"})
+            return
+        elif path == "/api/v1/entertainment/beads/palettes":
+            self._require_user()
+            self._send_json(BEAD_PALETTES.list(), headers={"Cache-Control": "private, max-age=300"})
+            return
+        elif match := re.fullmatch(r"/api/v1/entertainment/beads/palettes/([a-z0-9][a-z0-9._-]{1,63})", path):
+            self._require_user()
+            self._send_json(BEAD_PALETTES.get(match.group(1)), headers={"Cache-Control": "private, max-age=300"})
             return
         elif path == "/api/v1/entertainment/beads/ai-previews":
             user = self._require_user()

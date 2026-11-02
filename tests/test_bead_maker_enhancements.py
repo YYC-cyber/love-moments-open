@@ -1,4 +1,4 @@
-import re
+import json
 import unittest
 from pathlib import Path
 
@@ -49,11 +49,20 @@ class BeadMakerEnhancementTests(unittest.TestCase):
 
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)
-        catalog = self.javascript.split("const BEAD_COLOR_CATALOG = [", 1)[1].split("].map", 1)[0]
-        entries = re.findall(r'\["[A-Z]\d+",\s*"[^"]+",\s*"[0-9A-F]{6}",\s*[01]\]', catalog)
-        self.assertGreaterEqual(len(entries), 90)
+        self.assertNotIn("const BEAD_COLOR_CATALOG = [", self.javascript)
+        catalog = json.loads((ROOT / "love_moments" / "data" / "bead_palettes" / "domestic-common-5mm-v1.json").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(catalog["colors"]), 90)
         for shade in ("深绯红", "淡珊瑚", "森林绿", "淡薄荷", "午夜蓝", "婴儿蓝", "深莓粉", "腮红粉"):
-            self.assertIn(shade, catalog)
+            self.assertIn(shade, {item["name"] for item in catalog["colors"]})
+
+    def test_physical_bead_catalogue_is_loaded_from_server_data(self):
+        self.assertIn('id="beadPaletteCatalog"', self.html)
+        self.assertIn("loadBeadPaletteCatalogs", self.javascript)
+        self.assertIn("/api/v1/entertainment/beads/palettes", self.javascript)
+        self.assertIn("BEAD_PALETTE_ROOT", (ROOT / "love_moments" / "bead_palettes.py").read_text(encoding="utf-8"))
+        self.assertIn("5 格辅助线、10 格定位线", self.html)
+        self.assertIn('drawGuide(5', self.javascript)
+        self.assertIn('drawGuide(10', self.javascript)
 
     def test_local_background_removal_creates_empty_cells(self):
         self.assertIn('id="beadBackgroundMode"', self.html)

@@ -38,7 +38,7 @@ async function waitForHealth(origin, child) {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator("#authUsername").fill("test"); await page.locator("#authPassword").fill("test123"); await page.locator("#authSubmit").click();
+    await page.locator("#authUsername").fill("tangtang"); await page.locator("#authPassword").fill("12345678"); await page.locator("#authSubmit").click();
     await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
     await page.locator('.bottom-nav [data-nav="play"]').click();
     await page.locator('[data-screen="play"].active').waitFor();
@@ -51,6 +51,10 @@ async function waitForHealth(origin, child) {
     assert(await page.locator('[data-play-feature="beads"]').isVisible(), "搜索无法找到拼豆功能");
     await page.locator('[data-play-feature="beads"]').click();
     await page.locator("#beadToolPanel:not([hidden])").waitFor();
+    await page.waitForFunction(() => document.querySelector("#beadPaletteCatalog")?.value);
+    await page.waitForFunction(() => document.querySelector("#beadPaletteStatus")?.textContent?.includes("5mm"));
+    assert(await page.locator("#beadPaletteCatalog option").count() >= 1, "实体拼豆色卡没有从服务器加载");
+    assert((await page.locator("#beadPaletteStatus").textContent()).includes("5mm"), "没有显示国内常用实体豆规格");
     assert(await page.locator("#beadBoardSize").inputValue() === "58", "人像默认画板不是 58 × 58");
     assert(await page.locator("#beadColorCount").inputValue() === "48", "人像默认颜色不是 48 色");
     const toneCheck = await page.evaluate(() => {
@@ -66,6 +70,8 @@ async function waitForHealth(origin, child) {
     await page.locator("#beadResult:not([hidden])").waitFor();
     assert(await page.locator("#beadVariantChoices button").count() === 3, "一键生成没有提供三套可选方案");
     assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "高清收藏画没有自动使用高清人像标准");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("5mm"), "生成结果没有锁定实体豆规格");
+    assert((await page.locator("#beadResultSummary").textContent()).includes("cm"), "生成结果没有给出物理成品尺寸");
     assert(await page.locator("#beadCanvas").getAttribute("width") === "1044", "主板图没有使用高清网格画布");
     await page.locator('[data-action="bead-toggle-zoom"]').click();
     assert(await page.locator(".bead-canvas-wrap").evaluate(node => node.classList.contains("zoomed")), "板图无法放大查看单格");
@@ -126,4 +132,3 @@ async function waitForHealth(origin, child) {
     if (server.exitCode === null) await new Promise(resolve => server.once("exit", resolve)); fs.rmSync(temp, { recursive: true, force: true });
   }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
-
