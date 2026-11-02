@@ -37,7 +37,7 @@
         <div id="storageUsage" class="stack-list"></div>
       </section>
       <section class="panel">
-        <div class="panel-title"><div><span class="eyebrow">MAINTENANCE</span><h2>守护与每日维护</h2></div><span class="soft-badge">本机免费能力</span></div>
+        <div class="panel-title"><div><span class="eyebrow">MAINTENANCE</span><h2>守护与每日维护</h2></div><span class="soft-badge">服务器定时任务</span></div>
         <div id="maintenanceState" class="stack-list"></div>
       </section>
     </div>
@@ -57,6 +57,12 @@
       <div class="panel-title"><div><span class="eyebrow">FREE QUOTA GUARD</span><h2>外部接口安全额度</h2></div><span class="soft-badge">80% 预警 · 100% 自动停止</span></div>
       <p class="panel-note">只统计由这台恋屿服务器发出的真实请求；缓存和模拟数据不扣次数。若同一密钥还在别处使用，请把这里的上限设置得更低。</p>
       <div id="quotaUsage" class="quota-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><div><span class="eyebrow">AI WALLET</span><h2>大模型充值与费用</h2></div><span class="soft-badge">手工充值记录</span></div>
+      <p class="panel-note">记录你实际充值的金额，并汇总恋屿能够核算的调用费用；接口未返回单价的调用会单独标记，真实余额仍以供应商控制台为准。</p>
+      <div id="aiWallets" class="quota-grid"></div>
     </section>
 
     <section class="panel">

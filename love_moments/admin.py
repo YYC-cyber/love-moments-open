@@ -462,7 +462,18 @@ class AdminService:
                 age_hours = round((datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds() / 3600, 1)
             except ValueError:
                 pass
-        return {"root_name": root.name, "count": total_count, "latest": latest, "latest_age_hours": age_hours, "items": items[:20]}
+        automatic_count = sum(1 for item in items if item.get("source") == "automatic")
+        manual_count = total_count - automatic_count
+        return {
+            "root_name": root.name,
+            "count": total_count,
+            "automatic_count": automatic_count,
+            "manual_count": manual_count,
+            "retention": {"daily": 7, "weekly": 4, "manual_auto_delete": False},
+            "latest": latest,
+            "latest_age_hours": age_hours,
+            "items": items[:20],
+        }
 
     def create_backup(self, admin_user_id: str) -> dict:
         from scripts.backup_local import create_backup
@@ -716,6 +727,15 @@ class AdminService:
                 """
             ).fetchall()]
             couple_media_bytes = int(db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM media_assets WHERE purged_at IS NULL").fetchone()[0])
+            ai_usage_rows = [] if "ai_usage_events" in schema_health.get("missing_tables", []) else [dict(row) for row in db.execute(
+                """
+                SELECT provider,model,request_sent,estimated_cost,cost_currency
+                FROM ai_usage_events
+                """
+            ).fetchall()]
+            bailian_preview_count = int(db.execute(
+                "SELECT COUNT(*) FROM media_assets WHERE purged_at IS NULL AND original_name LIKE 'bead-ai__%'"
+            ).fetchone()[0])
             unresolved_events = int(db.execute("SELECT COUNT(*) FROM system_events WHERE resolved_at IS NULL").fetchone()[0])
             growth = self._capture_metrics(db, {
                 "database_bytes": database.stat().st_size if database.is_file() else 0,
@@ -725,8 +745,50 @@ class AdminService:
                 "backup_age_hours": backups["latest_age_hours"],
                 "unresolved_events": unresolved_events,
             })
+        def prepaid_amount(name: str) -> float:
+            try:
+                return max(0.0, round(float(os.getenv(name, "0").strip() or 0), 2))
+            except ValueError:
+                return 0.0
+
+        wallet_usage = {
+            "deepseek": {"known_spend_cny": 0.0, "unknown_cost_calls": 0, "calls": 0},
+            "bailian": {"known_spend_cny": 0.0, "unknown_cost_calls": 0, "calls": 0},
+        }
+        for item in ai_usage_rows:
+            identity = f"{item.get('provider', '')} {item.get('model', '')}".lower()
+            wallet_key = "deepseek" if "deepseek" in identity else "bailian" if any(value in identity for value in ("bailian", "dashscope", "qwen-image")) else None
+            if not wallet_key or not item.get("request_sent"):
+                continue
+            wallet_usage[wallet_key]["calls"] += 1
+            if item.get("estimated_cost") is None or str(item.get("cost_currency") or "").upper() != "CNY":
+                wallet_usage[wallet_key]["unknown_cost_calls"] += 1
+            else:
+                wallet_usage[wallet_key]["known_spend_cny"] += float(item["estimated_cost"])
+        if wallet_usage["bailian"]["calls"] == 0 and bailian_preview_count:
+            wallet_usage["bailian"]["calls"] = bailian_preview_count
+            wallet_usage["bailian"]["unknown_cost_calls"] = bailian_preview_count
+        ai_wallets = []
+        for key, label, env_name, configured_key in (
+            ("deepseek", "DeepSeek", "DEEPSEEK_PREPAID_CNY", "large_model"),
+            ("bailian", "阿里云百炼", "BAILIAN_PREPAID_CNY", "bailian_image"),
+        ):
+            credited = prepaid_amount(env_name)
+            known_spend = round(wallet_usage[key]["known_spend_cny"], 6)
+            unknown_calls = int(wallet_usage[key]["unknown_cost_calls"])
+            ai_wallets.append({
+                "provider": key,
+                "label": label,
+                "credited_cny": credited,
+                "known_spend_cny": known_spend,
+                "estimated_remaining_cny": None if unknown_calls else round(max(0.0, credited - known_spend), 6),
+                "unknown_cost_calls": unknown_calls,
+                "calls": int(wallet_usage[key]["calls"]),
+                "configured_key": configured_key,
+            })
         configured = {
             "large_model": bool(os.getenv("LLM_API_KEY", "").strip()),
+            "bailian_image": bool(os.getenv("DASHSCOPE_API_KEY", "").strip() and os.getenv("DASHSCOPE_BASE_URL", "").strip()),
             "amap": bool(os.getenv("AMAP_WEB_KEY", "").strip()),
             "geoapify": bool(
                 os.getenv("GEOAPIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -782,6 +844,8 @@ class AdminService:
         active_quotas = [quota for quota in quotas if quota["configured"]]
         exhausted_quotas = [quota for quota in active_quotas if quota["exhausted"]]
         warning_quotas = [quota for quota in active_quotas if quota["warning"]]
+        for wallet in ai_wallets:
+            wallet["configured"] = bool(configured.get(str(wallet.pop("configured_key")), False))
         cookie_mode = os.getenv("COOKIE_SECURE", "false").strip().lower()
         public_https = os.getenv("PUBLIC_BASE_URL", "").strip().startswith("https://")
         secure_cookie_configured = cookie_mode in {"1", "true", "yes", "on"} or (cookie_mode == "auto" and public_https)
@@ -1003,6 +1067,7 @@ class AdminService:
             ],
             "configured": configured,
             "external_api_quotas": quotas,
+            "ai_wallets": ai_wallets,
             "users": users,
             "sessions": sessions,
             "events": events,

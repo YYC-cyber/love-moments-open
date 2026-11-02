@@ -148,11 +148,20 @@ def daily_maintenance() -> dict:
         retention = prune_automatic_backups(backup_root)
         mirror_name = None
         cloud_mirror = None
+        mirror_error = None
+        cloud_mirror_error = None
         mirror_value = os.getenv("BACKUP_MIRROR_ROOT", "").strip()
         if mirror_value:
-            mirror_name = str(mirror_backup(destination, _resolve(mirror_value, mirror_value)))
-        if os.getenv("BACKUP_QINIU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
-            cloud_mirror = mirror_backup_to_qiniu(destination)
+            try:
+                mirror_name = str(mirror_backup(destination, _resolve(mirror_value, mirror_value)))
+            except Exception as exc:
+                mirror_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+        cloud_mirror_configured = os.getenv("BACKUP_QINIU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if cloud_mirror_configured:
+            try:
+                cloud_mirror = mirror_backup_to_qiniu(destination)
+            except Exception as exc:
+                cloud_mirror_error = f"{type(exc).__name__}: {str(exc)[:240]}"
         media_checks = LoveMomentsStore(
             database, media_root=media_root, seed_demo_data=False,
         ).check_due_recipe_media(limit=100)
@@ -165,15 +174,25 @@ def daily_maintenance() -> dict:
             "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "backup": destination.name,
             "mirror": mirror_name,
+            "mirror_configured": bool(mirror_value),
+            "mirror_ok": not mirror_value or bool(mirror_name),
+            "mirror_error": mirror_error,
             "cloud_mirror": cloud_mirror,
+            "cloud_mirror_configured": cloud_mirror_configured,
+            "cloud_mirror_ok": not cloud_mirror_configured or bool(cloud_mirror),
+            "cloud_mirror_error": cloud_mirror_error,
             "retention": retention,
             "recipe_media_checks": media_checks,
             "database_integrity": integrity,
             "foreign_key_violations": foreign_keys,
             "disk_free_bytes": disk.free,
         })
-        _log(f"每日维护完成：{destination.name}")
-        _notify("恋屿每日维护完成", f"备份与恢复验证通过，可用空间 {disk.free / 1024**3:.1f} GB。")
+        if mirror_error or cloud_mirror_error:
+            _log(f"每日本地备份完成、异地镜像待重试：{destination.name}")
+            _notify("恋屿本地备份已完成", "恢复验证通过，但异地镜像暂时失败；后台会明确显示并在下次维护时重试。")
+        else:
+            _log(f"每日维护完成：{destination.name}")
+            _notify("恋屿每日维护完成", f"备份与恢复验证通过，可用空间 {disk.free / 1024**3:.1f} GB。")
     except Exception as exc:
         summary.update({
             "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

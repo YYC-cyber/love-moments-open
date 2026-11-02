@@ -70,6 +70,35 @@ class AdminServiceTests(unittest.TestCase):
         self.assertEqual(set(ACCOUNT_EXPORT_POLICIES), REQUIRED_TABLES_V34)
         self.assertNotIn(str(self.store.db_path), encoded)
 
+    def test_ai_wallets_record_manual_topups_without_inventing_provider_balance(self) -> None:
+        self.store.record_ai_usage_event(
+            actor_kind="user", feature="travel.plan", provider="openai-compatible",
+            model="deepseek-chat", request_id="wallet-deepseek", status="succeeded",
+            request_sent=True, user_id=DEMO_USER, estimated_cost=None,
+        )
+        with patch.dict(os.environ, {
+            "LLM_API_KEY": "configured",
+            "DASHSCOPE_API_KEY": "configured",
+            "DASHSCOPE_BASE_URL": "https://workspace.example.test/compatible-mode/v1",
+            "DEEPSEEK_PREPAID_CNY": "10",
+            "BAILIAN_PREPAID_CNY": "10",
+        }, clear=False):
+            overview = self.admin.overview(True)
+        wallets = {item["provider"]: item for item in overview["ai_wallets"]}
+        self.assertEqual(wallets["deepseek"]["credited_cny"], 10.0)
+        self.assertEqual(wallets["bailian"]["credited_cny"], 10.0)
+        self.assertEqual(wallets["deepseek"]["unknown_cost_calls"], 1)
+        self.assertIsNone(wallets["deepseek"]["estimated_remaining_cny"])
+        self.assertTrue(wallets["deepseek"]["configured"])
+        self.assertTrue(wallets["bailian"]["configured"])
+
+    def test_backup_summary_exposes_safe_retention_policy(self) -> None:
+        self.admin.create_backup(DEMO_USER)
+        summary = self.admin.overview(True)["backups"]
+        self.assertEqual(summary["retention"], {"daily": 7, "weekly": 4, "manual_auto_delete": False})
+        self.assertEqual(summary["manual_count"], 1)
+        self.assertEqual(summary["automatic_count"], 0)
+
     def test_backup_is_private_and_database_is_valid(self) -> None:
         result = self.admin.create_backup(DEMO_USER)
         destination = self.root / "backups" / result["backup"]
