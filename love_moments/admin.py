@@ -6,19 +6,26 @@ returns message bodies, moment bodies, media bytes, password hashes or tokens.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+import certifi
 
 from .intelligent_ui import ConflictError
 from .schema import SCHEMA_VERSION, account_export_policy_status, schema_inventory
@@ -75,6 +82,9 @@ class AdminService:
         self._deepseek_balance_cache: dict[str, Any] | None = None
         self._deepseek_balance_cache_until = datetime.min.replace(tzinfo=timezone.utc)
         self._deepseek_balance_lock = threading.Lock()
+        self._alibaba_balance_cache: dict[str, Any] | None = None
+        self._alibaba_balance_cache_until = datetime.min.replace(tzinfo=timezone.utc)
+        self._alibaba_balance_lock = threading.Lock()
 
     @property
     def store(self) -> LoveMomentsStore:
@@ -97,6 +107,11 @@ class AdminService:
         path = Path(configured) if configured else self.root / "data" / "maintenance"
         return path if path.is_absolute() else self.root / path
 
+    @staticmethod
+    def _provider_ssl_context() -> ssl.SSLContext:
+        """Use the bundled CA store so provider calls also work on local macOS Python."""
+        return ssl.create_default_context(cafile=certifi.where())
+
     def _deepseek_balance(self) -> dict[str, Any] | None:
         """Read the official DeepSeek balance without exposing its API key."""
         api_key = os.getenv("LLM_API_KEY", "").strip()
@@ -114,7 +129,7 @@ class AdminService:
             )
             result: dict[str, Any] | None = None
             try:
-                with urllib.request.urlopen(req, timeout=8) as response:
+                with urllib.request.urlopen(req, timeout=8, context=self._provider_ssl_context()) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 for item in payload.get("balance_infos", []):
                     if str(item.get("currency", "")).upper() != "CNY":
@@ -132,6 +147,63 @@ class AdminService:
                 result = None
             self._deepseek_balance_cache = result
             self._deepseek_balance_cache_until = now + timedelta(minutes=5)
+            return result
+
+    @staticmethod
+    def _alibaba_percent_encode(value: Any) -> str:
+        """Encode Alibaba RPC parameters exactly as required by Signature V1."""
+        return urllib.parse.quote(str(value), safe="~")
+
+    def _alibaba_balance(self) -> dict[str, Any] | None:
+        """Read the account-level Alibaba Cloud balance with a dedicated read-only key."""
+        access_key_id = os.getenv("ALIBABA_BILLING_ACCESS_KEY_ID", "").strip()
+        access_key_secret = os.getenv("ALIBABA_BILLING_ACCESS_KEY_SECRET", "").strip()
+        if not access_key_id or not access_key_secret:
+            return None
+        now = datetime.now(timezone.utc)
+        with self._alibaba_balance_lock:
+            if self._alibaba_balance_cache_until > now:
+                return self._alibaba_balance_cache
+            params = {
+                "AccessKeyId": access_key_id,
+                "Action": "QueryAccountBalance",
+                "Format": "JSON",
+                "SignatureMethod": "HMAC-SHA1",
+                "SignatureNonce": uuid.uuid4().hex,
+                "SignatureVersion": "1.0",
+                "Timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "Version": "2017-12-14",
+            }
+            canonical = "&".join(
+                f"{self._alibaba_percent_encode(key)}={self._alibaba_percent_encode(value)}"
+                for key, value in sorted(params.items())
+            )
+            string_to_sign = f"GET&%2F&{self._alibaba_percent_encode(canonical)}"
+            signature = base64.b64encode(
+                hmac.new(f"{access_key_secret}&".encode(), string_to_sign.encode(), hashlib.sha1).digest()
+            ).decode()
+            query = f"{canonical}&Signature={self._alibaba_percent_encode(signature)}"
+            result: dict[str, Any] | None = None
+            try:
+                with urllib.request.urlopen(
+                    f"https://business.aliyuncs.com/?{query}", timeout=8, context=self._provider_ssl_context()
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                data = payload.get("Data") or {}
+                if payload.get("Success") is not False and data.get("AvailableAmount") is not None:
+                    result = {
+                        "available": True,
+                        "currency": str(data.get("Currency") or "CNY").upper(),
+                        "total_balance": round(float(data.get("AvailableAmount") or 0), 6),
+                        "available_cash_balance": round(float(data.get("AvailableCashAmount") or 0), 6),
+                        "credit_amount": round(float(data.get("CreditAmount") or 0), 6),
+                        "source": "provider",
+                        "scope": "alibaba_account",
+                    }
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                result = None
+            self._alibaba_balance_cache = result
+            self._alibaba_balance_cache_until = now + timedelta(minutes=5)
             return result
 
     @staticmethod
@@ -402,7 +474,7 @@ class AdminService:
         if not re.fullmatch(r"[0-9a-f]{7,40}", deployed):
             deployed = "unknown"
         enabled = os.getenv("RELEASE_CHECK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-        repository = "https://github.com/YYC-cyber/love-moments-open"
+        repository = "https://github.com/YYC-cyber/love_memory"
         base = {
             "deployed_sha": deployed,
             "latest_sha": None,
@@ -419,7 +491,7 @@ class AdminService:
             checked_at = now.replace(microsecond=0).isoformat()
             try:
                 request = urllib.request.Request(
-                    "https://api.github.com/repos/YYC-cyber/love-moments-open/commits/main",
+                    "https://api.github.com/repos/YYC-cyber/love_memory/commits/main",
                     headers={"Accept": "application/vnd.github+json", "User-Agent": "love-moments-release-check"},
                 )
                 with urllib.request.urlopen(request, timeout=3) as response:
@@ -833,6 +905,13 @@ class AdminService:
                     wallet["provider_balance"] = deepseek_balance
                     wallet["estimated_remaining_cny"] = deepseek_balance["total_balance"]
                     break
+        alibaba_balance = self._alibaba_balance()
+        if alibaba_balance:
+            for wallet in ai_wallets:
+                if wallet["provider"] == "bailian":
+                    wallet["provider_balance"] = alibaba_balance
+                    wallet["estimated_remaining_cny"] = alibaba_balance["total_balance"]
+                    break
         configured = {
             "large_model": bool(os.getenv("LLM_API_KEY", "").strip()),
             "bailian_image": bool(os.getenv("DASHSCOPE_API_KEY", "").strip() and os.getenv("DASHSCOPE_BASE_URL", "").strip()),
@@ -1121,3 +1200,4 @@ class AdminService:
             "audits": audits,
             "privacy": "后台仅显示运行元数据，不读取聊天正文、私密瞬间正文或媒体内容。",
         }
+

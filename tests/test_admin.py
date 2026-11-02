@@ -92,6 +92,44 @@ class AdminServiceTests(unittest.TestCase):
         self.assertTrue(wallets["deepseek"]["configured"])
         self.assertTrue(wallets["bailian"]["configured"])
 
+    def test_bailian_wallet_can_show_account_level_alibaba_balance(self) -> None:
+        provider_balance = {
+            "available": True,
+            "currency": "CNY",
+            "total_balance": 9.75,
+            "available_cash_balance": 9.75,
+            "credit_amount": 0.0,
+            "source": "provider",
+            "scope": "alibaba_account",
+        }
+        with patch.object(self.admin, "_alibaba_balance", return_value=provider_balance):
+            overview = self.admin.overview(True)
+        wallet = next(item for item in overview["ai_wallets"] if item["provider"] == "bailian")
+        self.assertEqual(wallet["provider_balance"], provider_balance)
+        self.assertEqual(wallet["estimated_remaining_cny"], 9.75)
+
+    def test_alibaba_balance_uses_read_only_rpc_without_exposing_secret(self) -> None:
+        response = io.BytesIO(json.dumps({
+            "Success": True,
+            "Data": {
+                "AvailableAmount": "10.00",
+                "AvailableCashAmount": "10.00",
+                "CreditAmount": "0.00",
+                "Currency": "CNY",
+            },
+        }).encode())
+        with patch.dict(os.environ, {
+            "ALIBABA_BILLING_ACCESS_KEY_ID": "billing-reader-id",
+            "ALIBABA_BILLING_ACCESS_KEY_SECRET": "billing-reader-secret",
+        }, clear=False), patch("love_moments.admin.urllib.request.urlopen", return_value=response) as opened:
+            balance = self.admin._alibaba_balance()
+        self.assertEqual(balance["total_balance"], 10.0)
+        self.assertEqual(balance["scope"], "alibaba_account")
+        called_url = opened.call_args.args[0]
+        self.assertIn("Action=QueryAccountBalance", called_url)
+        self.assertIn("AccessKeyId=billing-reader-id", called_url)
+        self.assertNotIn("billing-reader-secret", called_url)
+
     def test_backup_summary_exposes_safe_retention_policy(self) -> None:
         self.admin.create_backup(DEMO_USER)
         summary = self.admin.overview(True)["backups"]
@@ -291,7 +329,7 @@ class AdminServiceTests(unittest.TestCase):
         self.assertEqual(recovered["auth:login:failed:quiet"]["detail"]["recovery"]["kind"], "quiet_period")
 
     def test_successful_login_resolves_only_the_same_username_failure(self) -> None:
-        username = "test"
+        username = "tangtang"
         key = f"auth:login:failed:{__import__('hashlib').sha256(username.encode()).hexdigest()[:16]}"
         self.admin.record_event(key, "warning", "authentication", "账号登录失败", {"username": username})
         self.admin.record_event("auth:login:failed:other", "warning", "authentication", "账号登录失败", {"username": "other"})
