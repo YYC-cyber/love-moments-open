@@ -6282,13 +6282,12 @@ function beadCatalogueSnapshot(catalog = state.bead.catalog) {
   return { id: catalog.id, name: catalog.name, brand: catalog.brand, series: catalog.series, version: catalog.version, beadSizeMm: Number(catalog.bead_size_mm), boardPitchMm: Number(catalog.board_pitch_mm), verified: Boolean(catalog.verified), colorValueKind: catalog.color_value_kind };
 }
 
-function renderBeadPaletteStatus() {
-  const catalog = state.bead.catalog;
+function renderBeadPaletteStatus(catalog = state.bead.catalog) {
   const status = document.getElementById("beadPaletteStatus");
   if (!status) return;
   if (!catalog) { status.textContent = "暂时没有读取到可用色卡，生成按钮会保持停用。"; return; }
   const accuracy = catalog.verified ? (catalog.color_value_kind === "measured_physical" ? "实物测色已校准" : "官方数字色值") : "工程参考色值 · 购买前请用实物色卡复核";
-  status.textContent = `${catalog.brand} · ${catalog.series || catalog.name} · ${catalog.colors.length} 色 · ${Number(catalog.bead_size_mm)}mm · ${accuracy} · ${catalog.version}`;
+  status.textContent = `${catalog.brand} · ${catalog.series || catalog.name} · ${Number(catalog.colors?.length ?? catalog.color_count)} 色 · ${Number(catalog.bead_size_mm)}mm · ${accuracy} · ${catalog.version}`;
 }
 
 function normalizeBeadCatalogue(payload) {
@@ -6320,6 +6319,7 @@ async function loadBeadPaletteCatalogs() {
     if (select) select.innerHTML = state.bead.catalogs.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.brand)} · ${escapeHtml(item.series || item.name)} · ${Number(item.bead_size_mm)}mm · ${Number(item.color_count)} 色${item.verified ? " · 已校准" : " · 参考"}</option>`).join("");
     const remembered = privateStorage().getItem("love-bead-palette-id");
     const target = state.bead.catalogs.some(item => item.id === remembered) ? remembered : manifest.default_id || state.bead.catalogs[0].id;
+    renderBeadPaletteStatus(state.bead.catalogs.find(item => item.id === target));
     await selectBeadCatalogue(target, { remember: false });
     return state.bead.catalog;
   })().catch(error => {
