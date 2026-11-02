@@ -573,7 +573,8 @@
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
           <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
-          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
+          <div class="bead-board-toolbar"><span>深色粗线表示每块 29 × 29 实体底板边界</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大网格</button></div>
+          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1044" height="1044" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
           <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
           <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>

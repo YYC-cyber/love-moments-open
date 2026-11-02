@@ -27,7 +27,7 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn('高级设置（一般不需要调整）', self.html)
         self.assertIn('id="beadVariantChoices"', self.html)
         self.assertIn('function generateSmartBeadVariants()', self.javascript)
-        self.assertIn('高清收藏版', self.javascript)
+        self.assertIn('专业拼豆版', self.javascript)
         self.assertIn('易制作版', self.javascript)
         self.assertIn('净背景版', self.javascript)
         self.assertIn('只调用一次 AI，再在本机生成三套方案', self.javascript)
@@ -37,6 +37,15 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("单人、双人、宠物", prompt)
         self.assertIn("人与宠物互动合照", prompt)
         self.assertIn("动物的物种、毛色、斑纹", prompt)
+        self.assertIn("适配重绘底图", prompt)
+
+    def test_professional_board_has_sharpening_and_physical_grid_boundaries(self):
+        self.assertIn('id="beadCanvas" width="1044" height="1044"', self.html)
+        self.assertIn('data-action="bead-toggle-zoom"', self.html)
+        self.assertIn("function sharpenBeadDetails", self.javascript)
+        self.assertIn("imageData = sharpenBeadDetails", self.javascript)
+        self.assertIn("pattern.size % 29 === 0", self.javascript)
+        self.assertIn("for (let index = 29; index < pattern.size; index += 29)", self.javascript)
 
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)

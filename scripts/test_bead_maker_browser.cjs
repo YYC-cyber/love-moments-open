@@ -66,6 +66,11 @@ async function waitForHealth(origin, child) {
     await page.locator("#beadResult:not([hidden])").waitFor();
     assert(await page.locator("#beadVariantChoices button").count() === 3, "一键生成没有提供三套可选方案");
     assert((await page.locator("#beadResultSummary").textContent()).includes("87 × 87"), "高清收藏画没有自动使用高清人像标准");
+    assert(await page.locator("#beadCanvas").getAttribute("width") === "1044", "主板图没有使用高清网格画布");
+    await page.locator('[data-action="bead-toggle-zoom"]').click();
+    assert(await page.locator(".bead-canvas-wrap").evaluate(node => node.classList.contains("zoomed")), "板图无法放大查看单格");
+    await page.locator('[data-action="bead-toggle-zoom"]').click();
+    if (process.env.BEAD_TEST_INITIAL_SCREENSHOT) await page.screenshot({ path: process.env.BEAD_TEST_INITIAL_SCREENSHOT, fullPage: true });
     await page.locator('#beadVariantChoices [data-id="easy"]').click();
     assert((await page.locator("#beadResultSummary").textContent()).includes("易制作版"), "三套方案之间无法切换");
     await page.locator("#beadAdvancedSettings summary").click();
@@ -76,10 +81,12 @@ async function waitForHealth(origin, child) {
     await page.locator("#beadBoardSize").selectOption(boardSize); await page.locator("#beadColorCount").selectOption(colorCount);
     await page.locator('[data-action="bead-generate"]').click();
     await page.locator("#beadResult:not([hidden])").waitFor();
+    await page.waitForFunction(expected => document.querySelector("#beadResultSummary")?.textContent?.includes(`${expected} × ${expected}`), Number(boardSize));
     assert(await page.locator("#beadPalette button").count() >= 1, "没有生成颜色统计");
     assert((await page.locator("#beadPalette button").first().textContent()).includes("色"), "没有显示实体拼豆颜色名称");
     assert((await page.locator("#beadResultSummary").textContent()).includes("实体拼豆色"), "没有使用实体拼豆色库");
-    assert((await page.locator("#beadResultSummary").textContent()).includes(`共 ${Number(boardSize) ** 2} 颗`), "拼豆总数错误");
+    const compactSummary = await page.locator("#beadResultSummary").textContent();
+    assert(compactSummary.includes(`共 ${Number(boardSize) ** 2} 颗`), `拼豆总数错误：${compactSummary}`);
     const rareBefore = await page.locator('#beadPalette [data-availability="expanded"]').count();
     if (rareBefore) {
       await page.locator(".bead-result-advanced summary").click();

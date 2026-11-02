@@ -6315,12 +6315,15 @@ function beadDetailWeights(colors, size, detailMode) {
     if (x) neighbors.push(index - 1); if (x + 1 < size) neighbors.push(index + 1);
     if (y) neighbors.push(index - size); if (y + 1 < size) neighbors.push(index + size);
     const edge = neighbors.reduce((maximum, other) => Math.max(maximum, Math.abs(luminance[index] - luminance[other])), 0) / 255;
-    return 1 + strength * Math.min(1, edge * 3.2);
+    const nx = (x + .5) / size - .5; const ny = (y + .5) / size - .5;
+    const focus = Math.max(0, 1 - Math.hypot(nx, ny) / .72);
+    const subjectBoost = detailMode === "detail" ? 1 + focus * .42 : detailMode === "balanced" ? 1 + focus * .18 : 1;
+    return (1 + strength * Math.min(1, edge * 3.2)) * subjectBoost;
   });
 }
 
 function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
-  if (detailMode === "detail" || size < 8) return indices;
+  if (size < 8) return indices;
   let current = [...indices];
   const passes = detailMode === "simple" ? 2 : 1;
   for (let pass = 0; pass < passes; pass += 1) {
@@ -6332,11 +6335,14 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
       if (!neighbors.length) continue;
       const counts = new Map(); neighbors.forEach(other => counts.set(current[other], (counts.get(current[other]) || 0) + 1));
       const [majority, amount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (majority === current[index] || amount < (detailMode === "simple" ? 5 : 6)) continue;
+      const threshold = detailMode === "simple" ? 5 : detailMode === "balanced" ? 6 : 7;
+      if (majority === current[index] || amount < threshold) continue;
       const lab = beadRgbToLab(colors[index]);
       const ownDistance = beadLabDistance(lab, beadRgbToLab(palette[current[index]]));
       const majorityDistance = beadLabDistance(lab, beadRgbToLab(palette[majority]));
-      if (majorityDistance <= ownDistance * 1.25 + 36) next[index] = majority;
+      const tolerance = detailMode === "detail" ? 1.08 : 1.25;
+      const allowance = detailMode === "detail" ? 12 : 36;
+      if (majorityDistance <= ownDistance * tolerance + allowance) next[index] = majority;
     }
     current = next;
   }
@@ -6444,6 +6450,26 @@ function adjustBeadTones(imageData, size, mode = "auto") {
   return imageData;
 }
 
+function sharpenBeadDetails(imageData, size, detailMode = "detail") {
+  if (detailMode === "simple" || size < 8) return imageData;
+  const source = new Uint8ClampedArray(imageData.data);
+  const data = imageData.data;
+  const baseAmount = detailMode === "detail" ? .62 : .3;
+  for (let y = 1; y < size - 1; y += 1) for (let x = 1; x < size - 1; x += 1) {
+    const pixel = y * size + x; const offset = pixel * 4;
+    if (source[offset + 3] < 128) continue;
+    const nx = (x + .5) / size - .5; const ny = (y + .5) / size - .5;
+    const focus = Math.max(0, 1 - Math.hypot(nx, ny) / .72);
+    const amount = baseAmount * (.68 + focus * .62);
+    const neighbors = [pixel - 1, pixel + 1, pixel - size, pixel + size];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const average = neighbors.reduce((sum, other) => sum + source[other * 4 + channel], 0) / neighbors.length;
+      data[offset + channel] = Math.max(0, Math.min(255, Math.round(source[offset + channel] + amount * (source[offset + channel] - average))));
+    }
+  }
+  return imageData;
+}
+
 function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}, background = {}, toneMode = "auto") {
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
@@ -6467,6 +6493,7 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   let imageData = context.getImageData(0, 0, size, size);
   if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity);
   imageData = adjustBeadTones(imageData, size, toneMode);
+  imageData = sharpenBeadDetails(imageData, size, detailMode);
   return imageData.data;
 }
 
@@ -6500,6 +6527,17 @@ function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
     context.moveTo(0, position); context.lineTo(side, position);
   }
   context.stroke();
+  if (pattern.size >= 58 && pattern.size % 29 === 0) {
+    context.strokeStyle = "rgba(80,42,50,.72)";
+    context.lineWidth = Math.max(2, side / 520);
+    context.beginPath();
+    for (let index = 29; index < pattern.size; index += 29) {
+      const position = Math.round(index * cell) + .5;
+      context.moveTo(position, 0); context.lineTo(position, side);
+      context.moveTo(0, position); context.lineTo(side, position);
+    }
+    context.stroke();
+  }
 }
 
 function beadPatternQuality(pattern) {
@@ -6808,7 +6846,7 @@ function smartBeadPlans() {
     { id: "clean", label: "净背景版", description: "减少没有意义的背景豆", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 34 },
   ]);
   return finish([
-    { id: "recommended", label: "高清收藏版", description: "重点保留五官、毛发和互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
+    { id: "recommended", label: "专业拼豆版", description: "清晰整理五官、毛发、轮廓与互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
     { id: "easy", label: "易制作版", description: "减少豆量和难买色号", size: 58, colorCount: 36, detailMode: "balanced", backgroundMode: "keep" },
     { id: "clean", label: "净背景版", description: "突出人物或宠物主体", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 34 },
   ]);
@@ -6945,6 +6983,12 @@ document.addEventListener("click", async event => {
     if (action === "bead-pick-image") document.getElementById("beadImageInput").click();
     else if (action === "bead-generate") generateBeadPattern();
     else if (action === "bead-ai-retry") generateBeadPattern({ retryAi: true });
+    else if (action === "bead-toggle-zoom") {
+      const wrap = document.querySelector(".bead-canvas-wrap");
+      const zoomed = wrap?.classList.toggle("zoomed");
+      beadAction.textContent = zoomed ? "适合屏幕" : "放大网格";
+      beadAction.setAttribute("aria-pressed", String(Boolean(zoomed)));
+    }
     else if (action === "bead-use-variant") {
       const variant = state.bead.variants.find(item => item.id === beadAction.dataset.id);
       if (!variant) toast("这套方案已经失效，请重新生成");
