@@ -18,8 +18,8 @@ from .http_client import TRUSTED_SSL_CONTEXT
 
 
 INTENT_KINDS = {
-    "hotel_search", "restaurant_search", "plan_compare", "itinerary_change",
-    "day_replan", "next_stop", "transport_compare", "trip_recap", "general",
+    "hotel_search", "restaurant_search", "plan_compare", "itinerary_change", "itinerary_add",
+    "day_replan", "next_stop", "transport_compare", "trip_recap", "place_search", "general",
 }
 MEAL_TYPES = {"breakfast", "lunch", "snack", "dinner"}
 ALLOWED_MODEL_FIELDS = {
@@ -142,18 +142,31 @@ class RuleBasedTravelAssistant:
         lowered = text.lower()
         if re.search(r"回忆|回顾|游记|旅行总结|旅程总结", lowered):
             kind = "trip_recap"
+        elif re.search(r"下雨|雨天|下雪|雪天|延误|迟到|晚了|体力不支|走不动|换成室内|重新安排.*(后面|当天)", lowered):
+            # Weather and delay requests re-plan the affected day.  Keep this
+            # ahead of generic place replacement so “雨天换成室内项目” does
+            # not lose the weather-aware scheduling step.
+            kind = "day_replan"
+        elif re.search(
+            r"附近.*(?:景点|地点|活动|好玩)|(?:景点|地点|活动).*(?:推荐|搜索|查找|换|替换)|"
+            r"(?:换|替换)(?:个|一个|成)?.*(?:景点|地点|活动|项目)|有什么好玩|还能去哪",
+            lowered,
+        ):
+            kind = "place_search"
         elif re.search(r"下一站|接下来.*(去|玩)|现在.*(去哪|去哪里)|当前位置.*推荐", lowered):
             kind = "next_stop"
         elif re.search(r"(统一|一起|综合).*(酒店|住宿).*(机票|航班).*(火车|高铁|车票)|交通.*住宿.*比较", lowered):
             kind = "transport_compare"
-        elif re.search(r"下雨|雨天|下雪|雪天|延误|迟到|晚了|体力不支|走不动|换成室内|重新安排.*(后面|当天)", lowered):
-            kind = "day_replan"
         elif re.search(r"酒店|住宿|民宿|hotel", lowered):
             kind = "hotel_search"
         elif re.search(r"餐厅|餐馆|饭店|早餐|早饭|午餐|午饭|晚餐|晚饭|小吃|美食|吃", lowered):
             kind = "restaurant_search"
+        elif re.search(r"换掉|换一个|替换|不要这个|换个别的", lowered):
+            kind = "place_search"
         elif re.search(r"比较|哪套|哪个方案|五套|方案.*(好|适合|轻松|便宜)", lowered):
             kind = "plan_compare"
+        elif re.search(r"(?:加入|添加|放到|放进).*?(?:第\s*[一二两三四五六七八九十\d]+\s*天|行程)", lowered):
+            kind = "itinerary_add"
         elif re.search(r"改到|调整|提前|推迟|挪到|停留|时长", lowered):
             kind = "itinerary_change"
         else:
@@ -184,6 +197,7 @@ class RuleBasedTravelAssistant:
             if word in text:
                 preference = word
                 break
+        add_match = re.search(r"(?:把)?\s*(.+?)\s*(?:加入|添加|放到|放进)(?:第\s*[一二两三四五六七八九十\d]+\s*天)?(?:的)?行程", text)
         return TravelAssistantIntent.from_dict({
             "kind": kind,
             "day_number": _number(text),
@@ -193,6 +207,7 @@ class RuleBasedTravelAssistant:
             "max_distance_meters": distance_meters,
             "changes": changes,
             "preference": preference,
+            "item_hint": add_match.group(1).strip()[:120] if add_match else "",
             "query": text,
             "delay_minutes": delay_minutes,
         }, context)
@@ -310,7 +325,7 @@ class OpenAICompatibleTravelAssistant:
             "model": self.model, "temperature": 0.1, "max_tokens": 500,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": "你是旅行意图解析器。只返回JSON。kind只能是hotel_search、restaurant_search、plan_compare、itinerary_change、day_replan、next_stop、transport_compare、trip_recap、general。只提取约束，不得返回店名、价格结果、评分结果、URL或数据库ID。changes只能含start_time、duration_minutes、position、note；delay_minutes只能是0到720的整数。"},
+                {"role": "system", "content": "你是旅行意图解析器。只返回JSON。kind只能是hotel_search、restaurant_search、place_search、plan_compare、itinerary_add、itinerary_change、day_replan、next_stop、transport_compare、trip_recap、general。准确区分查询与修改：换酒店用hotel_search，换餐厅用restaurant_search，换景点或活动用place_search，天气或延误导致当天重排用day_replan。查询附近景点、活动、好玩的地方用place_search；把一个地点加入某天行程用itinerary_add，并把地点名放进item_hint。修改对象不明确时仍提取已知的kind、日期、餐次和约束，不得自行猜测具体行程，后端会用卡片追问；完全无法判断时用general。只提取约束，不得返回价格结果、评分结果、URL或数据库ID。changes只能含start_time、duration_minutes、position、note；delay_minutes只能是0到720的整数。"},
                 {"role": "user", "content": json.dumps({"context": safe_context, "recent": history[-6:], "message": str(message)[:1000]}, ensure_ascii=False)},
             ],
         }

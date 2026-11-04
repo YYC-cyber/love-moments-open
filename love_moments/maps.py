@@ -280,6 +280,14 @@ class AmapProvider(MapProvider):
             name = self._text(row.get("name"))[:160]
             if not name:
                 continue
+            image_url = ""
+            for photo in row.get("photos") or []:
+                candidate = self._text(photo.get("url") if isinstance(photo, dict) else "")[:800]
+                if candidate.startswith("http://"):
+                    candidate = "https://" + candidate[7:]
+                if candidate.startswith(("https://store.is.autonavi.com/", "https://aos-comment.amap.com/")):
+                    image_url = candidate
+                    break
             results.append({
                 "provider": "amap",
                 "provider_place_id": self._text(row.get("id"))[:180],
@@ -292,6 +300,8 @@ class AmapProvider(MapProvider):
                 "latitude": latitude,
                 "longitude": longitude,
                 "category": self._text(row.get("type"))[:120],
+                "image_url": image_url,
+                "image_source": "amap" if image_url else "",
             })
         return results
 

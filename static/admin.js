@@ -46,8 +46,17 @@ function growthBytes(value) {
 }
 
 function capacityClass(ratio) {
-  const bucket = Math.min(100, Math.max(0, Math.ceil(Number(ratio || 0) / 10) * 10));
+  const value = Math.min(100, Math.max(0, Number(ratio || 0)));
+  if (value > 0 && value < 1) return "capacity-fill-tiny";
+  const bucket = Math.min(100, Math.max(0, Math.ceil(value / 10) * 10));
   return `capacity-fill-${bucket}`;
+}
+
+function capacityLabel(ratio) {
+  const value = Math.min(100, Math.max(0, Number(ratio || 0)));
+  if (value === 0) return "使用率 0%";
+  if (value < 0.01) return "使用率 <0.01%";
+  return `使用率 ${value < 1 ? value.toFixed(2) : value.toFixed(1)}%`;
 }
 
 function dateTime(value) {
@@ -98,6 +107,26 @@ function render(data) {
     return `<article class="quota-card ${item.exhausted ? "exhausted" : item.warning ? "warning" : ""}"><div><strong>${escapeHtml(item.label)}</strong><span>${state}</span></div><b>${amount}</b><small>${detail}</small><div class="capacity-track"><i class="${capacityClass(ratio)}"></i></div></article>`;
   }).join("");
 
+  document.getElementById("aiWallets").innerHTML = (data.ai_wallets || []).map(item => {
+    const credited = Number(item.credited_cny || 0);
+    const spent = Number(item.known_spend_cny || 0);
+    const unknown = Number(item.unknown_cost_calls || 0);
+    const remaining = item.estimated_remaining_cny == null ? "暂不能准确计算" : `约 ¥${Number(item.estimated_remaining_cny).toFixed(2)}`;
+    const detail = `${Number(item.calls || 0)} 次真实调用 · 已核算支出 ¥${spent.toFixed(4)}${unknown ? ` · ${unknown} 次费用待核对` : ""}`;
+    const provider = item.provider_balance;
+    const alibabaAccount = provider?.scope === "alibaba_account";
+    const providerDetail = alibabaAccount
+      ? `阿里云账户现金余额 ¥${Number(provider.available_cash_balance || 0).toFixed(4)} · 信用额度 ¥${Number(provider.credit_amount || 0).toFixed(4)}`
+      : `充值余额 ¥${Number(provider?.topped_up_balance || 0).toFixed(4)} · 赠送余额 ¥${Number(provider?.granted_balance || 0).toFixed(4)}`;
+    const balance = provider
+      ? `<b>${alibabaAccount ? "阿里云账户可用余额" : "实时余额"} ¥${Number(provider.total_balance || 0).toFixed(4)}</b><small>${escapeHtml(providerDetail)}</small>`
+      : `<b>充值 ¥${credited.toFixed(2)}</b>`;
+    const remainder = provider
+      ? (alibabaAccount ? "来自阿里云费用与成本只读接口，最多缓存 5 分钟；这是阿里云账户级余额，不等同于百炼单项消费" : "余额来自供应商官方接口，最多缓存 5 分钟")
+      : `估算剩余：${escapeHtml(remaining)} · 实际余额以供应商后台为准`;
+    return `<article class="quota-card ${unknown && !provider ? "warning" : ""}"><div><strong>${escapeHtml(item.label)}</strong><span>${item.configured ? "已配置" : "未启用"}</span></div>${balance}<small>${escapeHtml(detail)}</small><small>${remainder}</small></article>`;
+  }).join("");
+
   const vault = data.data_vault;
   const policy = vault.account_export_policy;
   const backup = vault.latest_backup;
@@ -110,21 +139,25 @@ function render(data) {
   ].map(([label, ok, detail]) => `<article class="list-row"><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><span class="severity ${ok ? "" : "warning"}">${ok ? "正常" : "待完善"}</span></article>`).join("");
 
   document.getElementById("backupCount").textContent = `${data.backups.count} 份`;
-  const backupLocation = `<p class="panel-note">${data.configured.backup_mirror ? "数据库已配置第二存储位置；七牛云灾备会先加密再上传。" : "当前数据库备份仍在服务器同一磁盘；请配置本地镜像或七牛云加密灾备。"}</p>`;
+  const retention = data.backups.retention || {};
+  const backupLocation = `<p class="panel-note">${data.configured.backup_mirror ? "数据库已配置第二存储位置；七牛云灾备会先加密再上传。" : "当前数据库备份仍在服务器同一磁盘；请配置本地镜像或七牛云加密灾备。"} 自动备份会定时清理：保留最近 ${Number(retention.daily || 7)} 天每日备份和最近 ${Number(retention.weekly || 4)} 周每周备份；手动备份不会自动删除，避免误删。</p>`;
   document.getElementById("backupList").innerHTML = backupLocation + (data.backups.items.length ? data.backups.items.map(item => `<article class="list-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(dateTime(item.created_at))} · ${item.source === "automatic" ? "自动" : "手动"} · 媒体 ${item.media_files} 个 / ${bytes(item.media_bytes)} · ${item.verification_ok ? "恢复演练通过" : "待验证"}</small></div><div class="row-actions"><span class="severity ${item.verification_ok ? "" : "warning"}">${item.verification_ok ? "已验证" : "待验证"}</span><button data-verify-backup="${escapeHtml(item.name)}">重新验证</button></div></article>`).join("") : `<div class="empty">还没有备份，建议立即创建第一份。</div>`);
 
   const integrity = data.storage.integrity;
   const capacityRows = data.storage.users.map(item => {
     const ratio = Math.min(100, Number(item.media_bytes || 0) / Math.max(1, Number(data.storage.user_quota_bytes || 1)) * 100);
-    return `<article class="capacity-row"><div><strong>${escapeHtml(item.nickname)} · ${bytes(item.media_bytes)}</strong><small>个人上限 ${bytes(data.storage.user_quota_bytes)}</small></div><div class="capacity-track"><i class="${capacityClass(ratio)}"></i></div></article>`;
+    return `<article class="capacity-row"><div><strong>${escapeHtml(item.nickname)} · ${bytes(item.media_bytes)}</strong><small>由该账号上传 · 个人上限 ${bytes(data.storage.user_quota_bytes)} · ${capacityLabel(ratio)}</small></div><div class="capacity-track"><i class="${capacityClass(ratio)}"></i></div></article>`;
   });
   const coupleRatio = Math.min(100, Number(data.storage.couple_media_bytes || 0) / Math.max(1, Number(data.storage.couple_quota_bytes || 1)) * 100);
   document.getElementById("storageGrowth").textContent = `7 天 ${growthBytes(data.storage.media_7d_bytes)}`;
-  document.getElementById("storageUsage").innerHTML = `<article class="capacity-row"><div><strong>情侣空间 · ${bytes(data.storage.couple_media_bytes)}</strong><small>总上限 ${bytes(data.storage.couple_quota_bytes)} · 缺失 ${integrity.missing_files} · 孤立 ${integrity.orphan_files} / ${bytes(integrity.orphan_bytes)}</small></div><div class="capacity-track couple"><i class="${capacityClass(coupleRatio)}"></i></div></article>${capacityRows.join("")}`;
+  document.getElementById("storageUsage").innerHTML = `<article class="capacity-row"><div><strong>情侣空间 · ${bytes(data.storage.couple_media_bytes)}</strong><small>双方可用总空间 · 总上限 ${bytes(data.storage.couple_quota_bytes)} · ${capacityLabel(coupleRatio)} · 缺失 ${integrity.missing_files} · 孤立 ${integrity.orphan_files} / ${bytes(integrity.orphan_bytes)}</small></div><div class="capacity-track couple"><i class="${capacityClass(coupleRatio)}"></i></div></article>${capacityRows.join("")}`;
 
   const watchdog = data.maintenance.watchdog || {};
   const daily = data.maintenance.daily || {};
-  document.getElementById("maintenanceState").innerHTML = `<article class="list-row"><div><strong>服务健康守护</strong><small>${watchdog.checked_at ? `${dateTime(watchdog.checked_at)} · ${escapeHtml(watchdog.message || "")}` : "尚未运行；安装 LaunchAgent 后每 5 分钟检查"}</small></div><span class="severity ${watchdog.healthy ? "" : "warning"}">${watchdog.healthy ? "正常" : "待启用"}</span></article><article class="list-row"><div><strong>每日自动备份</strong><small>${daily.completed_at ? `${dateTime(daily.completed_at)} · ${daily.backup ? escapeHtml(daily.backup) : escapeHtml(daily.message || "未完成")}` : "尚未运行；默认每日 03:30 执行"}</small></div><span class="severity ${daily.ok ? "" : "warning"}">${daily.ok ? "成功" : "待启用"}</span></article>`;
+  const localBackupOk = Boolean(daily.ok && daily.backup);
+  const cloudConfigured = daily.cloud_mirror_configured ?? data.configured.backup_mirror;
+  const cloudOk = daily.cloud_mirror_ok === true;
+  document.getElementById("maintenanceState").innerHTML = `<article class="list-row"><div><strong>服务健康守护</strong><small>${watchdog.checked_at ? `${dateTime(watchdog.checked_at)} · ${escapeHtml(watchdog.message || "")}` : "尚未运行；服务器每 5 分钟检查"}</small></div><span class="severity ${watchdog.healthy ? "" : "warning"}">${watchdog.healthy ? "正常" : "待检查"}</span></article><article class="list-row"><div><strong>每日本地自动备份</strong><small>${daily.completed_at ? `${dateTime(daily.completed_at)} · ${daily.backup ? escapeHtml(daily.backup) : escapeHtml(daily.message || "未完成")}` : "尚未运行；默认每日 03:30 执行"}</small></div><span class="severity ${localBackupOk ? "" : "warning"}">${localBackupOk ? "成功" : "失败"}</span></article><article class="list-row"><div><strong>七牛云加密灾备</strong><small>${!cloudConfigured ? "未配置" : cloudOk ? `最近一次已上传 · ${escapeHtml(daily.cloud_mirror?.key || daily.cloud_mirror || "已完成")}` : `本地备份不受影响 · ${escapeHtml(daily.cloud_mirror_error || daily.message || "将在下次维护时重试")}`}</small></div><span class="severity ${cloudConfigured && cloudOk ? "" : "warning"}">${!cloudConfigured ? "未配置" : cloudOk ? "成功" : "待重试"}</span></article>`;
   document.getElementById("restoreInstructions").innerHTML = data.restore_instructions.map(item => `<li>${escapeHtml(item)}</li>`).join("");
 
   document.getElementById("eventCount").textContent = `${outstanding.length} 项待处理`;

@@ -70,6 +70,73 @@ class AdminServiceTests(unittest.TestCase):
         self.assertEqual(set(ACCOUNT_EXPORT_POLICIES), REQUIRED_TABLES_V34)
         self.assertNotIn(str(self.store.db_path), encoded)
 
+    def test_ai_wallets_record_manual_topups_without_inventing_provider_balance(self) -> None:
+        self.store.record_ai_usage_event(
+            actor_kind="user", feature="travel.plan", provider="openai-compatible",
+            model="deepseek-chat", request_id="wallet-deepseek", status="succeeded",
+            request_sent=True, user_id=DEMO_USER, estimated_cost=None,
+        )
+        with patch.dict(os.environ, {
+            "LLM_API_KEY": "configured",
+            "DASHSCOPE_API_KEY": "configured",
+            "DASHSCOPE_BASE_URL": "https://workspace.example.test/compatible-mode/v1",
+            "DEEPSEEK_PREPAID_CNY": "10",
+            "BAILIAN_PREPAID_CNY": "10",
+        }, clear=False):
+            overview = self.admin.overview(True)
+        wallets = {item["provider"]: item for item in overview["ai_wallets"]}
+        self.assertEqual(wallets["deepseek"]["credited_cny"], 10.0)
+        self.assertEqual(wallets["bailian"]["credited_cny"], 10.0)
+        self.assertEqual(wallets["deepseek"]["unknown_cost_calls"], 1)
+        self.assertIsNone(wallets["deepseek"]["estimated_remaining_cny"])
+        self.assertTrue(wallets["deepseek"]["configured"])
+        self.assertTrue(wallets["bailian"]["configured"])
+
+    def test_bailian_wallet_can_show_account_level_alibaba_balance(self) -> None:
+        provider_balance = {
+            "available": True,
+            "currency": "CNY",
+            "total_balance": 9.75,
+            "available_cash_balance": 9.75,
+            "credit_amount": 0.0,
+            "source": "provider",
+            "scope": "alibaba_account",
+        }
+        with patch.object(self.admin, "_alibaba_balance", return_value=provider_balance):
+            overview = self.admin.overview(True)
+        wallet = next(item for item in overview["ai_wallets"] if item["provider"] == "bailian")
+        self.assertEqual(wallet["provider_balance"], provider_balance)
+        self.assertEqual(wallet["estimated_remaining_cny"], 9.75)
+
+    def test_alibaba_balance_uses_read_only_rpc_without_exposing_secret(self) -> None:
+        response = io.BytesIO(json.dumps({
+            "Success": True,
+            "Data": {
+                "AvailableAmount": "10.00",
+                "AvailableCashAmount": "10.00",
+                "CreditAmount": "0.00",
+                "Currency": "CNY",
+            },
+        }).encode())
+        with patch.dict(os.environ, {
+            "ALIBABA_BILLING_ACCESS_KEY_ID": "billing-reader-id",
+            "ALIBABA_BILLING_ACCESS_KEY_SECRET": "billing-reader-secret",
+        }, clear=False), patch("love_moments.admin.urllib.request.urlopen", return_value=response) as opened:
+            balance = self.admin._alibaba_balance()
+        self.assertEqual(balance["total_balance"], 10.0)
+        self.assertEqual(balance["scope"], "alibaba_account")
+        called_url = opened.call_args.args[0]
+        self.assertIn("Action=QueryAccountBalance", called_url)
+        self.assertIn("AccessKeyId=billing-reader-id", called_url)
+        self.assertNotIn("billing-reader-secret", called_url)
+
+    def test_backup_summary_exposes_safe_retention_policy(self) -> None:
+        self.admin.create_backup(DEMO_USER)
+        summary = self.admin.overview(True)["backups"]
+        self.assertEqual(summary["retention"], {"daily": 7, "weekly": 4, "manual_auto_delete": False})
+        self.assertEqual(summary["manual_count"], 1)
+        self.assertEqual(summary["automatic_count"], 0)
+
     def test_backup_is_private_and_database_is_valid(self) -> None:
         result = self.admin.create_backup(DEMO_USER)
         destination = self.root / "backups" / result["backup"]
@@ -302,6 +369,19 @@ class AdminServiceTests(unittest.TestCase):
         self.assertEqual(json.loads(events["backup:stale"]["detail_json"])["recovery"]["kind"], "recent_backup")
         self.assertEqual(json.loads(events["backup:unverified"]["detail_json"])["recovery"]["kind"], "verified_backup")
 
+    def test_successful_daily_maintenance_resolves_previous_failure(self) -> None:
+        self.admin.record_event("maintenance:daily", "critical", "backup", "最近一次每日维护失败")
+        completed = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with patch.object(self.admin, "_maintenance_state", return_value={
+            "daily": {"ok": True, "completed_at": completed, "backup": "verified-backup"},
+            "watchdog": {"healthy": True, "consecutive_failures": 0, "message": "健康接口正常"},
+        }):
+            self.admin.overview(True)
+        with self.store.connection() as db:
+            event = db.execute("SELECT * FROM system_events WHERE event_key='maintenance:daily'").fetchone()
+        self.assertIsNotNone(event["resolved_at"])
+        self.assertEqual(json.loads(event["detail_json"])["recovery"]["kind"], "successful_daily_maintenance")
+
     def test_old_blocked_origin_is_kept_but_no_longer_actionable(self) -> None:
         key = "origin:preflight:historical"
         self.admin.record_event(key, "warning", "security", "已拦截未授权网页来源的跨域预检")
@@ -318,6 +398,8 @@ class AdminServiceTests(unittest.TestCase):
         deployed = "a" * 40
         current_response = io.BytesIO(json.dumps({"sha": deployed}).encode())
         with patch.dict(os.environ, {"APP_RELEASE_SHA": deployed, "RELEASE_CHECK_ENABLED": "true"}, clear=False), \
+             patch.object(self.admin, "_deepseek_balance", return_value=None), \
+             patch.object(self.admin, "_alibaba_balance", return_value=None), \
              patch("love_moments.admin.urllib.request.urlopen", return_value=current_response) as fetch:
             first = self.admin.overview(True)
             second = self.admin.overview(True)
@@ -329,6 +411,8 @@ class AdminServiceTests(unittest.TestCase):
         other_admin = AdminService(lambda: self.store, self.root)
         behind_response = io.BytesIO(json.dumps({"sha": "b" * 40}).encode())
         with patch.dict(os.environ, {"APP_RELEASE_SHA": deployed, "RELEASE_CHECK_ENABLED": "true"}, clear=False), \
+             patch.object(other_admin, "_deepseek_balance", return_value=None), \
+             patch.object(other_admin, "_alibaba_balance", return_value=None), \
              patch("love_moments.admin.urllib.request.urlopen", return_value=behind_response):
             behind = other_admin.overview(True)
         self.assertEqual(behind["runtime"]["release"]["status"], "behind")

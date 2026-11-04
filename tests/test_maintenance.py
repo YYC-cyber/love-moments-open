@@ -64,6 +64,26 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue((mirror / result["backup"] / "manifest.json").is_file())
         self.assertTrue((state / "daily-summary.json").is_file())
 
+    def test_cloud_mirror_failure_does_not_hide_successful_local_backup(self) -> None:
+        backups = self.root / "backups-cloud-failure"
+        state = self.root / "state-cloud-failure"
+        with patch.dict(os.environ, {
+            "DATABASE_PATH": str(self.database),
+            "MEDIA_ROOT": str(self.media),
+            "BACKUP_ROOT": str(backups),
+            "BACKUP_MIRROR_ROOT": "",
+            "BACKUP_QINIU_ENABLED": "true",
+            "MAINTENANCE_STATE_ROOT": str(state),
+            "LOG_ROOT": str(self.root / "logs-cloud-failure"),
+            "LOCAL_ADMIN_NOTIFICATIONS": "false",
+        }, clear=False), patch("scripts.maintenance.mirror_backup_to_qiniu", side_effect=RuntimeError("temporary outage")):
+            result = scheduled.daily_maintenance()
+        self.assertTrue(result["ok"])
+        self.assertTrue((backups / result["backup"] / "manifest.json").is_file())
+        self.assertTrue(result["cloud_mirror_configured"])
+        self.assertFalse(result["cloud_mirror_ok"])
+        self.assertIn("temporary outage", result["cloud_mirror_error"])
+
     def test_backup_excludes_ephemeral_album_exports(self) -> None:
         export_root = self.media / "temp" / "album_exports"
         export_root.mkdir(parents=True, exist_ok=True)

@@ -632,7 +632,11 @@ class LoveMomentsStore(
             assistant_draft_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(trip_assistant_action_drafts)").fetchall()
             }
-            if "day_replan" not in assistant_draft_sql or "expected_item_versions_json" not in assistant_draft_columns:
+            if (
+                "day_replan" not in assistant_draft_sql
+                or "itinerary_add" not in assistant_draft_sql
+                or "expected_item_versions_json" not in assistant_draft_columns
+            ):
                 db.execute("ALTER TABLE trip_assistant_action_drafts RENAME TO trip_assistant_action_drafts_v30")
                 db.execute(
                     """CREATE TABLE trip_assistant_action_drafts (
@@ -640,7 +644,7 @@ class LoveMomentsStore(
                         trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
                         couple_id TEXT NOT NULL REFERENCES couples(id) ON DELETE CASCADE,
                         creator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        action_type TEXT NOT NULL CHECK(action_type IN ('itinerary_change','day_replan')),
+                        action_type TEXT NOT NULL CHECK(action_type IN ('itinerary_change','day_replan','itinerary_add')),
                         payload_json TEXT NOT NULL,
                         preview_json TEXT NOT NULL,
                         expected_trip_version INTEGER NOT NULL,
@@ -971,7 +975,9 @@ class LoveMomentsStore(
         budget_cents: int,
         plans: list | None = None,
     ) -> None:
-        trip_dates = db.execute("SELECT start_date, end_date FROM trips WHERE id = ?", (trip_id,)).fetchone()
+        trip_dates = db.execute(
+            "SELECT start_date,end_date,outbound_time,return_time FROM trips WHERE id = ?", (trip_id,),
+        ).fetchone()
         first_date = date.fromisoformat(trip_dates["start_date"])
         last_date = date.fromisoformat(trip_dates["end_date"])
         day_count = max(1, (last_date - first_date).days + 1)
@@ -982,7 +988,23 @@ class LoveMomentsStore(
             "food": ["本地味道初见", "市场与特色正餐", "甜品夜市与返程"],
             "nature": ["自然风景初见", "山野湖畔慢行", "日落与返程"],
         }
-        for plan in plans or self.planner.generate_variants(destination, budget_cents):
+        generated_plans = list(plans or self.planner.generate_variants(destination, budget_cents))
+        shared_weather_by_day: dict[int, dict] = {}
+        for generated_plan in generated_plans:
+            for generated_item in generated_plan.items:
+                try:
+                    generated_day = int(generated_item.get("day_number", 0))
+                except (TypeError, ValueError):
+                    continue
+                generated_details = generated_item.get("details") or {}
+                weather_details = {
+                    key: generated_details[key]
+                    for key in ("weather_date", "weather_fit")
+                    if generated_details.get(key)
+                }
+                if 1 <= generated_day <= day_count and weather_details:
+                    shared_weather_by_day.setdefault(generated_day, weather_details)
+        for plan in generated_plans:
             variant_id = f"variant-{plan.style}-{trip_id}"
             db.execute(
                 "INSERT INTO plan_variants(id, trip_id, style, name, summary, estimated_budget_cents, intensity, transport_minutes, generation_source, generation_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -993,26 +1015,108 @@ class LoveMomentsStore(
                     getattr(plan, "generation_message", ""),
                 ),
             )
+            buckets = [[] for _ in range(day_count)]
+            for index, item in enumerate(plan.items):
+                try:
+                    item_day = int(item.get("day_number", 0))
+                except (TypeError, ValueError):
+                    item_day = 0
+                target = item_day - 1 if 1 <= item_day <= day_count else index % day_count
+                buckets[target].append(dict(item))
             if plan.style == "food":
-                # A food plan must be useful for every travel day. The planner may
-                # only return a short sample, so materialize breakfast, lunch and
-                # dinner for every date here. Exact dishes and nearby restaurants
-                # are resolved later by the places provider for each day's area.
+                # Food is a travel theme, not a replacement for travel. Preserve
+                # the model's attractions and experiences, then fill only missing
+                # breakfast/lunch/dinner slots. Exact restaurants are resolved by
+                # the places provider for each day's confirmed activity area.
                 meal_templates = (
                     {"start_time": "08:00", "title": "早餐 · 附近本地早点", "type": "meal", "duration_minutes": 60, "cost_cents": 0, "note": "选择当天住宿或游览区域后查询附近特色早餐", "details": {"activities": ["查看附近真实早餐店", "从候选店中选择双方想吃的早点"], "highlights": ["按当天区域控制距离", "可比较评分、距离与特色菜"], "recommendation_reason": "先确定当天活动区域再找早餐，可以减少绕路，也不会用虚构店名代替真实结果。", "practical_tips": ["点击“查本日早中晚餐馆”获取高德真实候选"], "best_time": "出发前 45–60 分钟", "reservation_note": "早餐通常无需预约，以店铺实时状态为准。"}},
                     {"start_time": "12:00", "title": "午餐 · 附近本地菜", "type": "meal", "duration_minutes": 90, "cost_cents": 0, "note": "选择当天游览区域后查询附近特色正餐", "details": {"activities": ["查看附近本地菜馆", "比较招牌菜、评分与步行距离"], "highlights": ["优先当地特色口味", "可由两个人共同选择餐馆"], "recommendation_reason": "午餐安排在上午和下午行程之间的同一区域，能保留更多游玩时间。", "practical_tips": ["用餐高峰前确认营业状态和排队情况"], "best_time": "11:30–13:00", "reservation_note": "热门餐厅建议提前电话或平台确认。"}},
                     {"start_time": "18:30", "title": "晚餐 · 附近特色晚餐", "type": "meal", "duration_minutes": 90, "cost_cents": 0, "note": "选择当天住宿或夜游区域后查询附近特色晚餐", "details": {"activities": ["查看住宿或夜游区域附近餐厅", "选择适合双人分享的特色菜"], "highlights": ["结束一天后从容用餐", "方便接续夜游或返回酒店"], "recommendation_reason": "把晚餐放在夜游或酒店附近，可以减少疲劳并为当天留出轻松收尾时间。", "practical_tips": ["确认末班交通和餐厅停止接单时间"], "best_time": "18:00–20:00", "reservation_note": "周末和节假日建议预约。"}},
                 )
-                buckets = [[dict(item) for item in meal_templates] for _ in range(day_count)]
-            else:
-                buckets = [[] for _ in range(day_count)]
-                for index, item in enumerate(plan.items):
+                # The planner's food sample also carries per-day weather context.
+                # Keep that context when replacing the sample with a complete
+                # breakfast/lunch/dinner schedule; otherwise the food plan is the
+                # only variant whose later days silently lose weather guidance.
+                weather_by_day: dict[int, dict] = dict(shared_weather_by_day)
+                for generated_item in plan.items:
                     try:
-                        item_day = int(item.get("day_number", 0))
+                        generated_day = int(generated_item.get("day_number", 0))
                     except (TypeError, ValueError):
-                        item_day = 0
-                    target = item_day - 1 if 1 <= item_day <= day_count else index % day_count
-                    buckets[target].append(item)
+                        continue
+                    generated_details = generated_item.get("details") or {}
+                    weather_details = {
+                        key: generated_details[key]
+                        for key in ("weather_date", "weather_fit")
+                        if generated_details.get(key)
+                    }
+                    if 1 <= generated_day <= day_count and weather_details:
+                        weather_by_day[generated_day] = weather_details
+                def meal_slot(item: dict) -> str | None:
+                    title = str(item.get("title", ""))
+                    if "早餐" in title or "早点" in title or "早茶" in title:
+                        return "breakfast"
+                    if "午餐" in title or "午饭" in title:
+                        return "lunch"
+                    if "晚餐" in title or "晚饭" in title or "夜宵" in title:
+                        return "dinner"
+                    if str(item.get("type", "")) != "meal":
+                        return None
+                    try:
+                        hour = int(str(item.get("start_time", "12:00")).split(":", 1)[0])
+                    except (TypeError, ValueError):
+                        hour = 12
+                    return "breakfast" if hour < 10 else "lunch" if hour < 16 else "dinner"
+
+                template_slots = ("breakfast", "lunch", "dinner")
+                for day_index, bucket in enumerate(buckets):
+                    allowed_slots = set(template_slots)
+                    if day_index == 0 and trip_dates["outbound_time"]:
+                        try:
+                            departure_hour = int(str(trip_dates["outbound_time"])[11:13])
+                        except (TypeError, ValueError):
+                            departure_hour = 0
+                        if departure_hour >= 13:
+                            allowed_slots = {"dinner"}
+                        elif departure_hour >= 9:
+                            allowed_slots = {"lunch", "dinner"}
+                    if day_index == day_count - 1 and trip_dates["return_time"]:
+                        try:
+                            return_hour = int(str(trip_dates["return_time"])[11:13])
+                        except (TypeError, ValueError):
+                            return_hour = 23
+                        if return_hour <= 10:
+                            allowed_slots &= {"breakfast"}
+                        elif return_hour <= 15:
+                            allowed_slots &= {"breakfast", "lunch"}
+                    bucket[:] = [
+                        item for item in bucket
+                        if (meal_slot(item) is None or meal_slot(item) in allowed_slots)
+                    ]
+                    present_slots = {slot for item in bucket if (slot := meal_slot(item))}
+                    for slot, template in zip(template_slots, meal_templates):
+                        if slot in allowed_slots and slot not in present_slots:
+                            meal = dict(template)
+                            meal["details"] = {
+                                **(template.get("details") or {}),
+                                **weather_by_day.get(day_index + 1, {}),
+                            }
+                            bucket.append(meal)
+                    if not any(meal_slot(item) is None for item in bucket):
+                        bucket.append({
+                            "start_time": "15:00",
+                            "title": f"{destination} · 当日游玩地点待确认",
+                            "type": "place",
+                            "duration_minutes": 120,
+                            "cost_cents": 0,
+                            "note": "大模型本次没有返回可靠游玩地点，请从高德候选中选择真实景点后替换；三餐安排仍可继续使用。",
+                            "details": {},
+                        })
+                    daily_weather = weather_by_day.get(day_index + 1, {})
+                    if daily_weather:
+                        for item in bucket:
+                            item["details"] = {**(item.get("details") or {}), **daily_weather}
+                    bucket.sort(key=lambda item: str(item.get("start_time", "23:59")))
+            else:
                 for day_index, bucket in enumerate(buckets):
                     if bucket:
                         continue
@@ -1250,7 +1354,7 @@ class LoveMomentsStore(
 
     def register(self, username: str, password: str, nickname: str) -> dict:
         username = username.strip().lower()
-        nickname = nickname.strip()
+        nickname = nickname.strip() or username
         if not re.fullmatch(r"[a-z0-9_]{3,30}", username):
             raise ValueError("账号需为 3–30 位小写字母、数字或下划线")
         validate_new_password(password, username)
@@ -4849,7 +4953,13 @@ class LoveMomentsStore(
             )
         return self.get_trip(trip_id, user_id=user_id)
 
-    def regenerate_trip(self, trip_id: str, user_id: str = DEMO_USER, preserve_manual: bool = True) -> dict:
+    def regenerate_trip(
+        self,
+        trip_id: str,
+        user_id: str = DEMO_USER,
+        preserve_manual: bool = True,
+        weather_provider: object | None = None,
+    ) -> dict:
         with self.connection() as db:
             couple, _ = self._couple_context(db, user_id)
             trip = db.execute("SELECT * FROM trips WHERE id=? AND couple_id=? AND deleted_at IS NULL", (trip_id, couple["id"])).fetchone()
@@ -4875,6 +4985,12 @@ class LoveMomentsStore(
                 "preferences": preference_values[0] if preference_values else {},
                 "partner_preferences": preference_values[1] if len(preference_values) > 1 else {},
                 "destination_place": dict(destination_place_row) if destination_place_row else {},
+                "weather_forecast": self._trip_weather_context(
+                    weather_provider,
+                    dict(destination_place_row) if destination_place_row else None,
+                    trip["start_date"],
+                    trip["end_date"],
+                ),
             }
         plans = self.planner.generate_variants(destination, budget_cents, context)
         if len(plans) < 5:
@@ -4912,8 +5028,16 @@ class LoveMomentsStore(
                     )
             revision = int(trip["current_revision"]) + 1
             revision_id = new_id("revision")
-            generation_source = plans[0].generation_source if plans else "rules"
-            generation_message = plans[0].generation_message if plans else "未生成方案"
+            generation_sources = {plan.generation_source for plan in plans}
+            generation_source = (
+                next(iter(generation_sources)) if len(generation_sources) == 1
+                else "mixed" if generation_sources else "rules"
+            )
+            ai_count = sum(plan.generation_source == "ai" for plan in plans)
+            generation_message = (
+                plans[0].generation_message if plans and len(generation_sources) == 1
+                else f"{ai_count} 套由大模型生成，{len(plans) - ai_count} 套使用本地安全模板"
+            )
             diff = {
                 "regenerated_styles": [plan.style for plan in plans],
                 "protected_manual_items": len(locked_rows),
@@ -4930,9 +5054,11 @@ class LoveMomentsStore(
                 "INSERT INTO plan_revisions(id, trip_id, revision, parent_revision, author_type, diff_json, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     revision_id, trip_id, revision, trip["current_revision"],
-                    "ai" if generation_source == "ai" else "rules",
+                    "ai" if ai_count else "rules",
                     json.dumps(diff, ensure_ascii=False),
-                    "大模型重新生成五套方案" if generation_source == "ai" else "大模型未完成，保留本地安全方案",
+                    "大模型重新生成五套方案" if ai_count == len(plans)
+                    else "大模型部分完成，失败方案单独使用本地安全模板" if ai_count
+                    else "大模型未完成，保留本地安全方案",
                     utc_now(),
                 ),
             )
@@ -5454,6 +5580,152 @@ class LoveMomentsStore(
         return {"text": wish[:300], "note": "由智能整理创建，已由用户确认。"}
 
     @staticmethod
+    def _message_intent(intent: str) -> dict[str, Any] | None:
+        """Extract only an explicit request to send a text message.
+
+        The resulting message still becomes a confirmation draft.  Questions
+        such as “对方说了什么” must never be mistaken for a send operation.
+        """
+        text = intent.strip()
+        match = re.match(
+            r"^(?:请|帮我|替我)?\s*(?:(?:告诉|回复)(?:TA|ta|对方|唐|超)?|"
+            r"(?:给|跟|向)?(?:TA|ta|对方|唐|超)?\s*(?:发送|发消息|回复))"
+            r"\s*[：:,，]?\s*(.+)$",
+            text,
+        )
+        if not match:
+            return None
+        content = match.group(1).strip().strip("“”\"'")
+        if not content or len(content) > 1000:
+            return None
+        return {"type": "text", "content": content}
+
+    @staticmethod
+    def _assistant_quick_prompts(surface: str) -> list[str]:
+        return {
+            "home": ["今天我们还有什么要确认？", "安排周六晚餐并生成采购清单", "查看最近的共同回忆"],
+            "chat": ["查看最近提到旅行的消息", "告诉对方：今晚有空给我打电话吗", "把选中的聊天保存为瞬间"],
+            "trip": ["根据天气调整后面几天行程", "找明天午餐附近的高分餐厅", "比较酒店和交通报价"],
+            "timeline": ["整理今年一起去过的城市", "查看最近一个月的回忆", "记录共同回忆：今天也很想你"],
+            "life": ["查看本周待办和日历", "周六晚餐想吃番茄炒蛋，加入日历并生成采购清单", "查看想吃清单"],
+        }.get(surface, [])
+
+    @staticmethod
+    def _assistant_search_terms(intent: str) -> list[str]:
+        cleaned = re.sub(
+            r"(?:请|帮我|我们|共同|一下|查看|查找|搜索|整理|最近|今年|本月|一个月|内容|相关|里面|有什么|哪些|记录)",
+            " ",
+            intent,
+        )
+        terms = [value for value in re.split(r"[\s，。,.!?！？：:；;]+", cleaned) if 1 < len(value) <= 24]
+        return terms[:4]
+
+    def _assistant_internal_cards(
+        self,
+        db: sqlite3.Connection,
+        *,
+        surface: str,
+        intent: str,
+        couple_id: str,
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return bounded, permission-checked internal search results.
+
+        These values are resolved by the server and are never invented by the
+        language model.  Full private bodies are not copied into the UI card.
+        """
+        terms = self._assistant_search_terms(intent)
+        if not terms or not re.search(r"(?:查看|查找|搜索|整理|回顾|最近|哪些|什么)", intent):
+            return []
+        like = [f"%{term}%" for term in terms]
+        clauses = " OR ".join("content LIKE ?" for _ in like)
+        cards: list[dict[str, Any]] = []
+        if surface == "chat":
+            rows = db.execute(
+                f"SELECT id,content,sent_at,type FROM messages WHERE couple_id=? AND ({clauses}) ORDER BY sent_at DESC LIMIT 6",
+                (couple_id, *like),
+            ).fetchall()
+            cards.extend(
+                {
+                    "kind": "internal",
+                    "badge": "共同消息",
+                    "title": str(row["content"])[:80],
+                    "subtitle": str(row["sent_at"])[:16].replace("T", " "),
+                    "open": "message_summary",
+                    "resourceType": "message",
+                    "resourceId": row["id"],
+                }
+                for row in rows
+            )
+        if surface in {"home", "timeline"}:
+            moment_clauses = " OR ".join("(title LIKE ? OR body LIKE ? OR location LIKE ?)" for _ in like)
+            parameters: list[Any] = [couple_id, user_id, utc_now()]
+            for value in like:
+                parameters.extend((value, value, value))
+            rows = db.execute(
+                "SELECT id,title,occurred_at,location,visibility FROM moments "
+                "WHERE couple_id=? AND deleted_at IS NULL AND "
+                "(visibility='shared' OR creator_id=? OR (visibility='delayed' AND reveal_at<=?)) "
+                f"AND ({moment_clauses}) ORDER BY occurred_at DESC LIMIT 6",
+                tuple(parameters),
+            ).fetchall()
+            cards.extend(
+                {
+                    "kind": "internal",
+                    "badge": "共同回忆" if row["visibility"] == "shared" else "仅自己可见",
+                    "title": row["title"],
+                    "subtitle": " · ".join(value for value in (str(row["occurred_at"])[:10], row["location"] or "") if value),
+                    "open": "timeline_summary" if surface == "timeline" else "quick_capture",
+                    "resourceType": "moment",
+                    "resourceId": row["id"],
+                }
+                for row in rows
+            )
+        if surface in {"home", "life"}:
+            calendar_clauses = " OR ".join("(title LIKE ? OR note LIKE ? OR location LIKE ?)" for _ in like)
+            parameters = [couple_id]
+            for value in like:
+                parameters.extend((value, value, value))
+            rows = db.execute(
+                "SELECT id,title,starts_at,entry_type,completed_at FROM calendar_entries "
+                f"WHERE couple_id=? AND deleted_at IS NULL AND ({calendar_clauses}) "
+                "ORDER BY starts_at DESC LIMIT 4",
+                tuple(parameters),
+            ).fetchall()
+            cards.extend(
+                {
+                    "kind": "internal",
+                    "badge": "共同日历",
+                    "title": row["title"],
+                    "subtitle": str(row["starts_at"])[:16].replace("T", " "),
+                    "open": "calendar_summary",
+                    "resourceType": "calendar_entry",
+                    "resourceId": row["id"],
+                }
+                for row in rows
+            )
+            recipe_clauses = " OR ".join("name LIKE ?" for _ in like)
+            rows = db.execute(
+                "SELECT id,name,variant_name,source_type FROM recipes WHERE deleted_at IS NULL "
+                "AND (visibility='system' OR (couple_id=? AND visibility='couple') OR owner_id=?) "
+                f"AND ({recipe_clauses}) ORDER BY updated_at DESC LIMIT 5",
+                (couple_id, user_id, *like),
+            ).fetchall()
+            cards.extend(
+                {
+                    "kind": "internal" if row["source_type"] != "external" else "external",
+                    "badge": "本地菜谱" if row["source_type"] != "external" else "外部菜谱草稿",
+                    "title": row["name"],
+                    "subtitle": row["variant_name"],
+                    "open": "recipe_library",
+                    "resourceType": "recipe",
+                    "resourceId": row["id"],
+                }
+                for row in rows
+            )
+        return cards[:8]
+
+    @staticmethod
     def _trip_variant_intent(intent: str, trip: dict) -> dict[str, Any] | None:
         if not trip or not re.search(r"(?:采用|选择|切换|换成|使用)", intent):
             return None
@@ -5494,6 +5766,8 @@ class LoveMomentsStore(
             title, subtitle = labels[component]
             actions: list[dict] = [{"id": f"navigate:{surface}:{component}", "type": "navigate", "requiresConfirmation": False, "expectedVersions": {}}]
             sections.append({"id": f"{surface}:{component}:{position}", "type": component, "resourceRef": trip.get("id") if component.startswith(("trip_", "itinerary", "budget", "hotel", "risk", "impact", "approval")) and trip else None, "variant": "editorial", "props": {"title": title, "subtitle": subtitle}, "actions": actions})
+        if sections:
+            sections[0]["props"]["quickPrompts"] = self._assistant_quick_prompts(surface)
         personal = self._personal_ui_overlay(db, surface, couple["id"], user_id, len(context.get("authorizedContent", [])))
         context_version, _ = self._context_identity({key: value for key, value in context.items() if key != "authorizedContent"})
         expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).replace(microsecond=0).isoformat()
@@ -5548,6 +5822,7 @@ class LoveMomentsStore(
         calendar_payload = self._calendar_intent(normalized_intent) if surface == "life" else None
         wishlist_payload = self._wishlist_intent(normalized_intent) if surface == "life" else None
         moment_payload = self._moment_intent(normalized_intent) if surface in {"home", "timeline"} else None
+        message_payload = self._message_intent(normalized_intent) if surface == "chat" else None
         trip_payload = self._trip_variant_intent(normalized_intent, context.get("trip") or {}) if surface == "trip" else None
         destination_intent = self._trip_destination_intent(normalized_intent) if surface == "trip" else None
 
@@ -5565,12 +5840,33 @@ class LoveMomentsStore(
                 selected_components.insert(0, "wishlist")
             if moment_payload and "quick_capture" not in selected_components:
                 selected_components.insert(0, "quick_capture")
+            if message_payload and "message_summary" not in selected_components:
+                selected_components.insert(0, "message_summary")
             if trip_payload and "trip_variant_compare" not in selected_components:
                 selected_components.insert(0, "trip_variant_compare")
             # Content-authorized requests are personal. Their model output cannot
             # reorder the couple-level sections seen by the other partner.
             components = list(COMPONENTS_BY_SURFACE[surface]) if refs else selected_components
             manifest = self._hydrate_ui(db, surface, components, context, couple, user_id, generated_by)
+            # The conversational layer is data-backed: the model may interpret
+            # intent, but search results and quick actions are hydrated here
+            # after permission checks.  Cards are intentionally small and
+            # bounded for iPhone screens.
+            if manifest["sections"]:
+                assistant_cards = self._assistant_internal_cards(
+                    db,
+                    surface=surface,
+                    intent=normalized_intent,
+                    couple_id=couple["id"],
+                    user_id=user_id,
+                )
+                manifest["sections"][0]["props"]["assistantAnswer"] = (
+                    f"找到 {len(assistant_cards)} 条可以直接查看的内容。"
+                    if assistant_cards
+                    else "我已经理解这次需求。可以点下面的建议继续，不需要重复输入。"
+                )
+                manifest["sections"][0]["props"]["assistantCards"] = assistant_cards
+                manifest["sections"][0]["props"]["quickPrompts"] = self._assistant_quick_prompts(surface)
             if destination_intent:
                 target = next((node for node in manifest["sections"] if node["type"] == "trip_variant_compare"), None)
                 if target:
@@ -5600,6 +5896,8 @@ class LoveMomentsStore(
                 intent_actions.append(("wishlist", "create_wishlist_item", wishlist_payload, {"title": "添加共同愿望", "before": "愿望清单中尚无此项", "after": wishlist_payload["text"], "impact": "确认后双方都能查看和编辑"}, {"couple": couple["version"]}))
             if moment_payload:
                 intent_actions.append(("quick_capture", "create_moment", moment_payload, {"title": "保存共同瞬间", "before": "尚未保存", "after": moment_payload["title"], "impact": "确认后会进入双方可见的恋爱时间线"}, {"couple": couple["version"]}))
+            if message_payload:
+                intent_actions.append(("message_summary", "send_message", message_payload, {"title": "发送给对方", "before": "消息尚未发送", "after": message_payload["content"], "impact": "确认后会立即发送到你们的共同消息中"}, {"couple": couple["version"]}))
             if trip_payload:
                 intent_actions.append(("trip_variant_compare", "select_trip_variant", trip_payload, {"title": "采用旅行方案", "before": (context.get("trip") or {}).get("active_variant"), "after": trip_payload["style"], "impact": "只切换当前采用方案，不覆盖锁定的人工行程"}, {"trip": (context.get("trip") or {}).get("version", 0)}))
             for component, action_type, payload, preview, expected in intent_actions:
@@ -5613,7 +5911,15 @@ class LoveMomentsStore(
                 db.execute("INSERT INTO ui_manifests(id, couple_id, user_id, surface, context_version, context_hash, manifest_json, source, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (result_manifest_id, couple["id"], user_id, surface, context_version, context_hash, json.dumps(manifest, ensure_ascii=False), generated_by, manifest["expiresAt"], utc_now()))
             else:
                 shared_manifest_id = new_id("manifest")
-                shared = {**manifest, "sections": [{**node, "actions": []} for node in manifest["sections"]], "personalOverlay": []}
+                shared_sections = []
+                for node in manifest["sections"]:
+                    shared_props = {
+                        key: value
+                        for key, value in node["props"].items()
+                        if key not in {"assistantAnswer", "assistantCards"}
+                    }
+                    shared_sections.append({**node, "props": shared_props, "actions": []})
+                shared = {**manifest, "sections": shared_sections, "personalOverlay": []}
                 db.execute("INSERT INTO ui_manifests(id, couple_id, user_id, surface, context_version, context_hash, manifest_json, source, expires_at, created_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)", (shared_manifest_id, couple["id"], surface, context_version, context_hash, json.dumps(shared, ensure_ascii=False), generated_by, manifest["expiresAt"], utc_now()))
                 # The result copy owns action drafts that only the requesting
                 # user may preview or confirm. The couple-level copy above keeps

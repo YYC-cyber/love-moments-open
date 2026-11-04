@@ -1,4 +1,4 @@
-import re
+import json
 import unittest
 from pathlib import Path
 
@@ -13,16 +13,80 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         cls.javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     def test_large_physical_board_options_are_available(self):
-        self.assertIn('<option value="58">58 × 58 · 四块 29 板</option>', self.html)
-        self.assertIn('<option value="87">87 × 87 · 九块 29 板</option>', self.html)
+        self.assertIn('<option value="58" selected>58 × 58 · 人像推荐</option>', self.html)
+        self.assertIn('<option value="87">87 × 87 · 高清人像</option>', self.html)
+
+    def test_ai_portrait_mode_prevents_low_resolution_defaults(self):
+        self.assertIn('<option value="48" selected>48 色 · 人像推荐</option>', self.html)
+        self.assertIn('if (Number(boardSize?.value || 0) < 58)', self.javascript)
+        self.assertIn('if (Number(colorCount?.value || 0) < 48)', self.javascript)
+
+    def test_simple_one_click_flow_generates_three_local_variants(self):
+        self.assertIn('id="beadPurpose"', self.html)
+        self.assertIn('id="beadAdvancedSettings"', self.html)
+        self.assertIn('高级设置（一般不需要调整）', self.html)
+        self.assertIn('id="beadVariantChoices"', self.html)
+        self.assertIn('function generateSmartBeadVariants()', self.javascript)
+        self.assertIn('专业拼豆版', self.javascript)
+        self.assertIn('易制作版', self.javascript)
+        self.assertIn('净背景版', self.javascript)
+        self.assertIn('只调用一次 AI，再在本机生成三套方案', self.javascript)
+
+    def test_subject_prompt_supports_people_pets_and_mixed_photos(self):
+        prompt = (ROOT / "love_moments" / "bead_ai.py").read_text(encoding="utf-8")
+        self.assertIn("单人、双人、宠物", prompt)
+        self.assertIn("人与宠物互动合照", prompt)
+        self.assertIn("动物的物种、毛色、斑纹", prompt)
+        self.assertIn("适配重绘底图", prompt)
+        self.assertIn("半透明毛边", prompt)
+        self.assertIn("不要靠模糊、磨皮或抹除五官", prompt)
+
+    def test_professional_board_has_sharpening_and_five_cell_guides(self):
+        self.assertIn('id="beadCanvas" width="1740" height="1740"', self.html)
+        self.assertIn('data-action="bead-toggle-zoom"', self.html)
+        self.assertIn("function sharpenBeadDetails", self.javascript)
+        self.assertIn("imageData = sharpenBeadDetails", self.javascript)
+        self.assertIn("for (let index = 5; index < pattern.size; index += 5)", self.javascript)
+        self.assertNotIn('drawGuide(10', self.javascript)
+
+    def test_every_grid_cell_can_show_a_physical_colour_code(self):
+        self.assertIn('id="beadCellInspector"', self.html)
+        self.assertIn("放大查看全部色号", self.html)
+        self.assertIn("pattern.paletteMeta[paletteIndex]?.code", self.javascript)
+        self.assertIn("第 ${y + 1} 行 · 第 ${x + 1} 列", self.javascript)
+        self.assertIn("if (!document.querySelector(\".bead-result-advanced\")?.open) return", self.javascript)
 
     def test_expanded_colour_options_and_shades_are_available(self):
         self.assertIn('<option value="72">72 色 · 最大还原</option>', self.html)
-        catalog = self.javascript.split("const BEAD_COLOR_CATALOG = [", 1)[1].split("].map", 1)[0]
-        entries = re.findall(r'\["[A-Z]\d+",\s*"[^"]+",\s*"[0-9A-F]{6}",\s*[01]\]', catalog)
-        self.assertGreaterEqual(len(entries), 90)
+        self.assertNotIn("const BEAD_COLOR_CATALOG = [", self.javascript)
+        catalog = json.loads((ROOT / "love_moments" / "data" / "bead_palettes" / "domestic-common-5mm-v1.json").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(catalog["colors"]), 90)
         for shade in ("深绯红", "淡珊瑚", "森林绿", "淡薄荷", "午夜蓝", "婴儿蓝", "深莓粉", "腮红粉"):
-            self.assertIn(shade, catalog)
+            self.assertIn(shade, {item["name"] for item in catalog["colors"]})
+
+    def test_physical_bead_catalogue_is_loaded_from_server_data(self):
+        self.assertIn('id="beadPaletteCatalog"', self.html)
+        self.assertIn("先选你手里的豆子品牌和尺寸", self.html)
+        self.assertIn("不同品牌的 H2、W01 等色号不能混用", self.html)
+        self.assertIn("loadBeadPaletteCatalogs", self.javascript)
+        self.assertIn("/api/v1/entertainment/beads/palettes", self.javascript)
+        self.assertIn("BEAD_PALETTE_ROOT", (ROOT / "love_moments" / "bead_palettes.py").read_text(encoding="utf-8"))
+        self.assertIn("三版每格都写入色号", self.html)
+        self.assertIn('paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true })', self.javascript)
+        self.assertIn('id="beadLegend"', self.html)
+        self.assertIn("function renderBeadLegend", self.javascript)
+        self.assertIn("coordinateMargin", self.javascript)
+        self.assertIn("for (let index = 5; index < pattern.size; index += 5)", self.javascript)
+        self.assertIn("重新生成三套图纸", self.javascript)
+
+    def test_mard_reference_catalogues_use_h2_and_h7_codes(self):
+        for size in ("5mm", "2.6mm"):
+            path = ROOT / "love_moments" / "data" / "bead_palettes" / f"mard-reference-{size}-48-v1.json"
+            catalog = json.loads(path.read_text(encoding="utf-8"))
+            colors = {item["code"]: item for item in catalog["colors"]}
+            self.assertEqual(colors["H2"]["name"], "纯白")
+            self.assertEqual(colors["H7"]["name"], "黑色")
+            self.assertFalse(catalog["verified"])
 
     def test_local_background_removal_creates_empty_cells(self):
         self.assertIn('id="beadBackgroundMode"', self.html)
@@ -30,6 +94,33 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("function removeBeadBackground", self.javascript)
         self.assertIn("index < 0 ? -1", self.javascript)
         self.assertIn("去除背景 ${empty} 格", self.javascript)
+        self.assertNotIn("subjectPrior", self.javascript)
+        self.assertIn("beadBackgroundDiagnostics", self.javascript)
+        self.assertIn("salientRetention", self.javascript)
+        self.assertIn("主体与背景边界不够可靠，已保留原背景", self.javascript)
+        self.assertIn("#eee9e5", self.javascript)
+
+    def test_easy_variant_preserves_professional_spatial_resolution(self):
+        self.assertIn('label: "易制作版"', self.javascript)
+        self.assertIn('size: 87, colorCount: 8, detailMode: "easy"', self.javascript)
+        self.assertIn("与专业版同为 87 格", self.javascript)
+        self.assertIn("强化轮廓保留清楚五官", self.javascript)
+        self.assertIn('label: "主体近景版"', self.javascript)
+        self.assertIn("fallbackColors", self.javascript)
+        self.assertIn("cropZoomMultiplier: 1.2", self.javascript)
+
+    def test_clean_variant_never_pretends_an_unsafe_cutout_is_clean(self):
+        self.assertIn("人物轮廓不可信则自动改为主体近景", self.javascript)
+        self.assertIn("backgroundMaxRemoval: .72", self.javascript)
+        self.assertIn("为避免误删人物已改用安全近景", self.javascript)
+        self.assertNotIn('label: "保守背景版"', self.javascript)
+
+    def test_ironing_guidance_covers_large_portraits_and_special_beads(self):
+        self.assertIn('id="beadIroningAdvice"', self.html)
+        self.assertIn("function beadIroningAdvice", self.javascript)
+        self.assertIn("不要垫软毛巾烫", self.javascript)
+        self.assertIn("亮闪、透明、夜光", self.javascript)
+        self.assertIn("5×5 试片", self.javascript)
 
     def test_subject_tone_is_analysed_locally(self):
         self.assertIn('id="beadToneMode"', self.html)
@@ -37,6 +128,19 @@ class BeadMakerEnhancementTests(unittest.TestCase):
         self.assertIn("function adjustBeadTones", self.javascript)
         self.assertIn("if (median < 145)", self.javascript)
         self.assertIn('mode === "bright"', self.javascript)
+
+    def test_ai_mode_is_optional_and_retryable(self):
+        self.assertIn('id="beadGenerationMode"', self.html)
+        self.assertIn("AI 精修 · 人像效果更好", self.html)
+        self.assertIn('data-action="bead-ai-retry"', self.html)
+        self.assertIn("requestAiBeadPreview", self.javascript)
+        self.assertIn("X-Bead-Attempt", self.javascript)
+        self.assertIn("每次重试会产生一次百炼图片费用", self.html)
+        self.assertIn('id="beadAiVersionList"', self.html)
+        self.assertIn("旧版会一直保留", self.html)
+        self.assertIn('data-action="bead-ai-use"', self.javascript)
+        self.assertIn('data-action="bead-ai-delete"', self.javascript)
+        self.assertIn("loadBeadAiVersions", self.javascript)
 
 
 if __name__ == "__main__":

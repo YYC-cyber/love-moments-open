@@ -6,19 +6,26 @@ returns message bodies, moment bodies, media bytes, password hashes or tokens.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+import certifi
 
 from .intelligent_ui import ConflictError
 from .schema import SCHEMA_VERSION, account_export_policy_status, schema_inventory
@@ -72,6 +79,12 @@ class AdminService:
         self._release_cache: dict[str, Any] | None = None
         self._release_cache_until = datetime.min.replace(tzinfo=timezone.utc)
         self._release_lock = threading.Lock()
+        self._deepseek_balance_cache: dict[str, Any] | None = None
+        self._deepseek_balance_cache_until = datetime.min.replace(tzinfo=timezone.utc)
+        self._deepseek_balance_lock = threading.Lock()
+        self._alibaba_balance_cache: dict[str, Any] | None = None
+        self._alibaba_balance_cache_until = datetime.min.replace(tzinfo=timezone.utc)
+        self._alibaba_balance_lock = threading.Lock()
 
     @property
     def store(self) -> LoveMomentsStore:
@@ -93,6 +106,105 @@ class AdminService:
         configured = os.getenv("MAINTENANCE_STATE_ROOT", "").strip()
         path = Path(configured) if configured else self.root / "data" / "maintenance"
         return path if path.is_absolute() else self.root / path
+
+    @staticmethod
+    def _provider_ssl_context() -> ssl.SSLContext:
+        """Use the bundled CA store so provider calls also work on local macOS Python."""
+        return ssl.create_default_context(cafile=certifi.where())
+
+    def _deepseek_balance(self) -> dict[str, Any] | None:
+        """Read the official DeepSeek balance without exposing its API key."""
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        base_url = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
+        if not api_key or "api.deepseek.com" not in base_url.lower():
+            return None
+        now = datetime.now(timezone.utc)
+        with self._deepseek_balance_lock:
+            if self._deepseek_balance_cache_until > now:
+                return self._deepseek_balance_cache
+            req = urllib.request.Request(
+                "https://api.deepseek.com/user/balance",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                method="GET",
+            )
+            result: dict[str, Any] | None = None
+            try:
+                with urllib.request.urlopen(req, timeout=8, context=self._provider_ssl_context()) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                for item in payload.get("balance_infos", []):
+                    if str(item.get("currency", "")).upper() != "CNY":
+                        continue
+                    result = {
+                        "available": bool(payload.get("is_available")),
+                        "currency": "CNY",
+                        "total_balance": round(float(item.get("total_balance", 0)), 6),
+                        "topped_up_balance": round(float(item.get("topped_up_balance", 0)), 6),
+                        "granted_balance": round(float(item.get("granted_balance", 0)), 6),
+                        "source": "provider",
+                    }
+                    break
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                result = None
+            self._deepseek_balance_cache = result
+            self._deepseek_balance_cache_until = now + timedelta(minutes=5)
+            return result
+
+    @staticmethod
+    def _alibaba_percent_encode(value: Any) -> str:
+        """Encode Alibaba RPC parameters exactly as required by Signature V1."""
+        return urllib.parse.quote(str(value), safe="~")
+
+    def _alibaba_balance(self) -> dict[str, Any] | None:
+        """Read the account-level Alibaba Cloud balance with a dedicated read-only key."""
+        access_key_id = os.getenv("ALIBABA_BILLING_ACCESS_KEY_ID", "").strip()
+        access_key_secret = os.getenv("ALIBABA_BILLING_ACCESS_KEY_SECRET", "").strip()
+        if not access_key_id or not access_key_secret:
+            return None
+        now = datetime.now(timezone.utc)
+        with self._alibaba_balance_lock:
+            if self._alibaba_balance_cache_until > now:
+                return self._alibaba_balance_cache
+            params = {
+                "AccessKeyId": access_key_id,
+                "Action": "QueryAccountBalance",
+                "Format": "JSON",
+                "SignatureMethod": "HMAC-SHA1",
+                "SignatureNonce": uuid.uuid4().hex,
+                "SignatureVersion": "1.0",
+                "Timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "Version": "2017-12-14",
+            }
+            canonical = "&".join(
+                f"{self._alibaba_percent_encode(key)}={self._alibaba_percent_encode(value)}"
+                for key, value in sorted(params.items())
+            )
+            string_to_sign = f"GET&%2F&{self._alibaba_percent_encode(canonical)}"
+            signature = base64.b64encode(
+                hmac.new(f"{access_key_secret}&".encode(), string_to_sign.encode(), hashlib.sha1).digest()
+            ).decode()
+            query = f"{canonical}&Signature={self._alibaba_percent_encode(signature)}"
+            result: dict[str, Any] | None = None
+            try:
+                with urllib.request.urlopen(
+                    f"https://business.aliyuncs.com/?{query}", timeout=8, context=self._provider_ssl_context()
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                data = payload.get("Data") or {}
+                if payload.get("Success") is not False and data.get("AvailableAmount") is not None:
+                    result = {
+                        "available": True,
+                        "currency": str(data.get("Currency") or "CNY").upper(),
+                        "total_balance": round(float(data.get("AvailableAmount") or 0), 6),
+                        "available_cash_balance": round(float(data.get("AvailableCashAmount") or 0), 6),
+                        "credit_amount": round(float(data.get("CreditAmount") or 0), 6),
+                        "source": "provider",
+                        "scope": "alibaba_account",
+                    }
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                result = None
+            self._alibaba_balance_cache = result
+            self._alibaba_balance_cache_until = now + timedelta(minutes=5)
+            return result
 
     @staticmethod
     def _local_notification(title: str, message: str) -> None:
@@ -462,7 +574,18 @@ class AdminService:
                 age_hours = round((datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds() / 3600, 1)
             except ValueError:
                 pass
-        return {"root_name": root.name, "count": total_count, "latest": latest, "latest_age_hours": age_hours, "items": items[:20]}
+        automatic_count = sum(1 for item in items if item.get("source") == "automatic")
+        manual_count = total_count - automatic_count
+        return {
+            "root_name": root.name,
+            "count": total_count,
+            "automatic_count": automatic_count,
+            "manual_count": manual_count,
+            "retention": {"daily": 7, "weekly": 4, "manual_auto_delete": False},
+            "latest": latest,
+            "latest_age_hours": age_hours,
+            "items": items[:20],
+        }
 
     def create_backup(self, admin_user_id: str) -> dict:
         from scripts.backup_local import create_backup
@@ -716,6 +839,15 @@ class AdminService:
                 """
             ).fetchall()]
             couple_media_bytes = int(db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM media_assets WHERE purged_at IS NULL").fetchone()[0])
+            ai_usage_rows = [] if "ai_usage_events" in schema_health.get("missing_tables", []) else [dict(row) for row in db.execute(
+                """
+                SELECT provider,model,request_sent,estimated_cost,cost_currency
+                FROM ai_usage_events
+                """
+            ).fetchall()]
+            bailian_preview_count = int(db.execute(
+                "SELECT COUNT(*) FROM media_assets WHERE purged_at IS NULL AND original_name LIKE 'bead-ai__%'"
+            ).fetchone()[0])
             unresolved_events = int(db.execute("SELECT COUNT(*) FROM system_events WHERE resolved_at IS NULL").fetchone()[0])
             growth = self._capture_metrics(db, {
                 "database_bytes": database.stat().st_size if database.is_file() else 0,
@@ -725,8 +857,64 @@ class AdminService:
                 "backup_age_hours": backups["latest_age_hours"],
                 "unresolved_events": unresolved_events,
             })
+        def prepaid_amount(name: str) -> float:
+            try:
+                return max(0.0, round(float(os.getenv(name, "0").strip() or 0), 2))
+            except ValueError:
+                return 0.0
+
+        wallet_usage = {
+            "deepseek": {"known_spend_cny": 0.0, "unknown_cost_calls": 0, "calls": 0},
+            "bailian": {"known_spend_cny": 0.0, "unknown_cost_calls": 0, "calls": 0},
+        }
+        for item in ai_usage_rows:
+            identity = f"{item.get('provider', '')} {item.get('model', '')}".lower()
+            wallet_key = "deepseek" if "deepseek" in identity else "bailian" if any(value in identity for value in ("bailian", "dashscope", "qwen-image")) else None
+            if not wallet_key or not item.get("request_sent"):
+                continue
+            wallet_usage[wallet_key]["calls"] += 1
+            if item.get("estimated_cost") is None or str(item.get("cost_currency") or "").upper() != "CNY":
+                wallet_usage[wallet_key]["unknown_cost_calls"] += 1
+            else:
+                wallet_usage[wallet_key]["known_spend_cny"] += float(item["estimated_cost"])
+        if wallet_usage["bailian"]["calls"] == 0 and bailian_preview_count:
+            wallet_usage["bailian"]["calls"] = bailian_preview_count
+            wallet_usage["bailian"]["unknown_cost_calls"] = bailian_preview_count
+        ai_wallets = []
+        for key, label, env_name, configured_key in (
+            ("deepseek", "DeepSeek", "DEEPSEEK_PREPAID_CNY", "large_model"),
+            ("bailian", "阿里云百炼", "BAILIAN_PREPAID_CNY", "bailian_image"),
+        ):
+            credited = prepaid_amount(env_name)
+            known_spend = round(wallet_usage[key]["known_spend_cny"], 6)
+            unknown_calls = int(wallet_usage[key]["unknown_cost_calls"])
+            ai_wallets.append({
+                "provider": key,
+                "label": label,
+                "credited_cny": credited,
+                "known_spend_cny": known_spend,
+                "estimated_remaining_cny": None if unknown_calls else round(max(0.0, credited - known_spend), 6),
+                "unknown_cost_calls": unknown_calls,
+                "calls": int(wallet_usage[key]["calls"]),
+                "configured_key": configured_key,
+            })
+        deepseek_balance = self._deepseek_balance()
+        if deepseek_balance:
+            for wallet in ai_wallets:
+                if wallet["provider"] == "deepseek":
+                    wallet["provider_balance"] = deepseek_balance
+                    wallet["estimated_remaining_cny"] = deepseek_balance["total_balance"]
+                    break
+        alibaba_balance = self._alibaba_balance()
+        if alibaba_balance:
+            for wallet in ai_wallets:
+                if wallet["provider"] == "bailian":
+                    wallet["provider_balance"] = alibaba_balance
+                    wallet["estimated_remaining_cny"] = alibaba_balance["total_balance"]
+                    break
         configured = {
             "large_model": bool(os.getenv("LLM_API_KEY", "").strip()),
+            "bailian_image": bool(os.getenv("DASHSCOPE_API_KEY", "").strip() and os.getenv("DASHSCOPE_BASE_URL", "").strip()),
             "amap": bool(os.getenv("AMAP_WEB_KEY", "").strip()),
             "geoapify": bool(
                 os.getenv("GEOAPIFY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -782,6 +970,8 @@ class AdminService:
         active_quotas = [quota for quota in quotas if quota["configured"]]
         exhausted_quotas = [quota for quota in active_quotas if quota["exhausted"]]
         warning_quotas = [quota for quota in active_quotas if quota["warning"]]
+        for wallet in ai_wallets:
+            wallet["configured"] = bool(configured.get(str(wallet.pop("configured_key")), False))
         cookie_mode = os.getenv("COOKIE_SECURE", "false").strip().lower()
         public_https = os.getenv("PUBLIC_BASE_URL", "").strip().startswith("https://")
         secure_cookie_configured = cookie_mode in {"1", "true", "yes", "on"} or (cookie_mode == "auto" and public_https)
@@ -924,6 +1114,13 @@ class AdminService:
             self.record_event("watchdog:unhealthy", "critical", "service", "本机健康检查连续失败", maintenance["watchdog"])
         if maintenance["daily"] and not maintenance["daily"].get("ok", False):
             self.record_event("maintenance:daily", "critical", "backup", "最近一次每日维护失败", maintenance["daily"])
+        elif maintenance["daily"] and maintenance["daily"].get("ok", False):
+            self.resolve_event_condition(
+                "maintenance:daily",
+                kind="successful_daily_maintenance",
+                message=f"每日维护已于 {maintenance['daily'].get('completed_at') or maintenance['daily'].get('started_at') or utc_now()} 成功完成",
+                verified_at=maintenance["daily"].get("completed_at") or utc_now(),
+            )
         with store.connection() as db:
             events = []
             for row in db.execute("SELECT * FROM system_events ORDER BY (resolved_at IS NULL) DESC,last_seen_at DESC LIMIT 100").fetchall():
@@ -1003,6 +1200,7 @@ class AdminService:
             ],
             "configured": configured,
             "external_api_quotas": quotas,
+            "ai_wallets": ai_wallets,
             "users": users,
             "sessions": sessions,
             "events": events,

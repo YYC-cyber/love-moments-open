@@ -96,6 +96,12 @@ class TravelAssistantStoreTests(unittest.TestCase):
             ids = {row[0] for row in db.execute("SELECT id FROM quote_snapshots WHERE trip_id=?", (self.trip_id,))}
         self.assertTrue({card["quote_id"] for card in cards}.issubset(ids))
 
+        replacement = self.store.ask_trip_assistant(
+            self.trip_id, "酒店换一家，每晚2000元以内", DEMO_USER, "replace-hotel-00001",
+        )
+        self.assertTrue(replacement["assistant"]["cards"])
+        self.assertTrue(all(card.get("selection_mode") == "replace" for card in replacement["assistant"]["cards"]))
+
     def test_itinerary_change_requires_confirm_and_rejects_stale_version(self) -> None:
         trip = self.store.get_trip(self.trip_id, DEMO_USER)
         item = trip["variants"][0]["days"][1]["items"][0]
@@ -135,6 +141,45 @@ class TravelAssistantStoreTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             self.store.confirm_trip_assistant_action(self.trip_id, stale_card["draft_id"], "confirm-stale-001", DEMO_USER)
 
+    def test_place_result_can_be_added_with_a_preview_card(self) -> None:
+        searched = self.store.ask_trip_assistant(
+            self.trip_id, "附近有什么好玩的景点", DEMO_USER, "place-search-000001",
+        )
+        place = searched["assistant"]["cards"][0]
+        self.assertEqual(place["type"], "place_result")
+        self.assertEqual(place["day_options"], [1, 2, 3])
+        title = place["name"]
+        drafted = self.store.ask_trip_assistant(
+            self.trip_id, f"把{title}加入第1天行程", DEMO_USER, "place-add-00000001",
+        )
+        card = drafted["assistant"]["cards"][0]
+        self.assertEqual(card["type"], "itinerary_add")
+        before = sum(
+            len(day["items"])
+            for variant in self.store.get_trip(self.trip_id, DEMO_USER)["variants"]
+            if variant["style"] == self.store.get_trip(self.trip_id, DEMO_USER)["active_variant"]
+            for day in variant["days"] if day["day_number"] == 1
+        )
+        confirmed = self.store.confirm_trip_assistant_action(
+            self.trip_id, card["draft_id"], "confirm-place-add-001", DEMO_USER,
+        )
+        active = confirmed["trip"]["active_variant"]
+        day = next(
+            day for variant in confirmed["trip"]["variants"] if variant["style"] == active
+            for day in variant["days"] if day["day_number"] == 1
+        )
+        self.assertEqual(len(day["items"]), before + 1)
+        self.assertTrue(any(item["title"] == title for item in day["items"]))
+
+    def test_adding_place_without_day_returns_clickable_day_choices(self) -> None:
+        result = self.store.ask_trip_assistant(
+            self.trip_id, "把西湖加入行程", DEMO_USER, "place-add-needs-day-01",
+        )
+        card = result["assistant"]["cards"][0]
+        self.assertEqual(card["type"], "clarification")
+        self.assertEqual(len(card["options"]), 3)
+        self.assertTrue(all("加入第" in option["prompt"] for option in card["options"]))
+
     def test_itinerary_change_requires_day_when_titles_repeat(self) -> None:
         trip = self.store.get_trip(self.trip_id, DEMO_USER)
         item = trip["variants"][0]["days"][0]["items"][0]
@@ -169,6 +214,77 @@ class TravelAssistantStoreTests(unittest.TestCase):
         with self.store.connection() as db:
             self.assertIsNotNone(db.execute("SELECT 1 FROM trip_food_recommendations WHERE id=? AND source='amap'", (cards[0]["recommendation_id"],)).fetchone())
 
+        with patch("love_moments.phase_three.map_provider_from_env", return_value=FakeMap()):
+            replacement = self.store.ask_trip_assistant(
+                self.trip_id, "第二天晚餐换一家，4.5分以上", DEMO_USER, "replace-food-00001",
+            )
+        self.assertEqual(replacement["assistant"]["cards"][0]["selection_mode"], "replace")
+
+    def test_ambiguous_restaurant_request_asks_with_meal_choice_cards(self) -> None:
+        result = self.store.ask_trip_assistant(
+            self.trip_id, "晚餐换一家餐厅", DEMO_USER, "food-needs-day-0001",
+        )
+        card = result["assistant"]["cards"][0]
+        self.assertEqual(card["type"], "clarification")
+        self.assertGreaterEqual(len(card["options"]), 2)
+        self.assertTrue(all("第" in option["label"] and "晚餐" in option["label"] for option in card["options"]))
+
+    def test_weather_replan_without_day_asks_with_day_choice_cards(self) -> None:
+        result = self.store.ask_trip_assistant(
+            self.trip_id, "下雨了帮我换成室内安排", DEMO_USER, "rain-needs-day-0001",
+        )
+        card = result["assistant"]["cards"][0]
+        self.assertEqual(card["type"], "clarification")
+        self.assertEqual(len(card["options"]), 3)
+        self.assertTrue(all(option["prompt"].startswith("第") for option in card["options"]))
+
+    def test_general_place_replacement_returns_real_choice_cards(self) -> None:
+        candidate_id = "place_replace_general_001"
+        candidate = {
+            "provider": "amap", "provider_place_id": "amap-replace-001",
+            "name": "杭州自然博物院", "formatted_address": "杭州市拱墅区西湖文化广场",
+            "country": "中国", "province": "浙江省", "city": "杭州市", "district": "拱墅区",
+            "latitude": 30.28, "longitude": 120.16, "category": "博物馆",
+            "source_type": "real_api", "scope_confirmed": True,
+        }
+        with self.store.connection() as db:
+            db.execute(
+                "INSERT INTO place_search_candidates(id,user_id,query,region_hint,payload_json,expires_at,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    candidate_id, DEMO_USER, "景点", "杭州市", json.dumps(candidate, ensure_ascii=False),
+                    (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat(),
+                    datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                ),
+            )
+        with patch.object(
+            self.store, "search_destination_places",
+            return_value={"items": [{"candidate_id": candidate_id, **candidate}], "notice": "高德实时地点"},
+        ):
+            result = self.store.ask_trip_assistant(
+                self.trip_id, "把第二天下午的景点换一个", DEMO_USER, "replace-place-0001",
+            )
+        card = result["assistant"]["cards"][0]
+        self.assertEqual((card["type"], card["name"], card["day_number"]), ("place_replacement_option", "杭州自然博物院", 2))
+        confirmed = self.store.confirm_trip_assistant_action(
+            self.trip_id, card["draft_id"], "confirm-replace-place-001", DEMO_USER,
+        )
+        changed = next(
+            item for variant in confirmed["trip"]["variants"] if variant["style"] == confirmed["trip"]["active_variant"]
+            for day in variant["days"] if day["day_number"] == 2
+            for item in day["items"] if item["id"] == card["replace_item_id"]
+        )
+        self.assertEqual(changed["title"], "杭州自然博物院")
+
+    def test_ambiguous_place_replacement_returns_original_item_choice_cards(self) -> None:
+        result = self.store.ask_trip_assistant(
+            self.trip_id, "这个景点换一个", DEMO_USER, "replace-choice-0001",
+        )
+        cards = result["assistant"]["cards"]
+        self.assertTrue(cards)
+        self.assertTrue(all(card["type"] == "itinerary_item_choice" for card in cards))
+        self.assertTrue(all(card.get("prompt") for card in cards))
+
     def test_day_replan_is_previewed_then_atomically_confirmed_and_idempotent(self) -> None:
         before = self.store.get_trip(self.trip_id, DEMO_USER)
         day = next(variant for variant in before["variants"] if variant["style"] == before["active_variant"])["days"][1]
@@ -201,6 +317,52 @@ class TravelAssistantStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(revision_rows, 1)
         self.assertEqual(saved_key, "confirm-day-replan-001")
+
+    def test_rainy_day_returns_real_indoor_choice_and_replaces_selected_item(self) -> None:
+        candidate_id = "place_indoor_rain_001"
+        candidate = {
+            "provider": "amap", "provider_place_id": "amap-indoor-001",
+            "name": "杭州工艺美术博物馆", "formatted_address": "杭州市拱墅区小河路",
+            "country": "中国", "province": "浙江省", "city": "杭州市", "district": "拱墅区",
+            "latitude": 30.3201, "longitude": 120.1432, "category": "博物馆",
+            "source_type": "real_api", "scope_confirmed": True,
+        }
+        with self.store.connection() as db:
+            db.execute(
+                "INSERT INTO place_search_candidates(id,user_id,query,region_hint,payload_json,expires_at,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    candidate_id, DEMO_USER, "博物馆 美术馆 科技馆", "杭州市",
+                    json.dumps(candidate, ensure_ascii=False),
+                    (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat(),
+                    datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                ),
+            )
+        search_result = {"items": [{"candidate_id": candidate_id, **candidate}], "notice": "高德实时地点"}
+        with patch.object(self.store, "search_destination_places", return_value=search_result):
+            result = self.store.ask_trip_assistant(
+                self.trip_id, "第二天有雨，帮我换成室内项目", DEMO_USER, "rain-indoor-choice-001",
+            )
+        option = next(card for card in result["assistant"]["cards"] if card["type"] == "indoor_place_option")
+        self.assertEqual((option["day_number"], option["name"]), (2, "杭州工艺美术博物馆"))
+        self.assertTrue(option["replace_title"])
+        before = self.store.get_trip(self.trip_id, DEMO_USER)
+        confirmed = self.store.confirm_trip_assistant_action(
+            self.trip_id, option["draft_id"], "confirm-rain-indoor-001", DEMO_USER,
+        )
+        changed = next(
+            item for variant in confirmed["trip"]["variants"] if variant["style"] == confirmed["trip"]["active_variant"]
+            for day in variant["days"] if day["day_number"] == 2
+            for item in day["items"] if item["id"] == option["replace_item_id"]
+        )
+        self.assertEqual(changed["title"], "杭州工艺美术博物馆")
+        self.assertGreater(confirmed["trip"]["current_revision"], before["current_revision"])
+        with self.store.connection() as db:
+            place = db.execute(
+                "SELECT provider,name,latitude,longitude FROM itinerary_item_places WHERE itinerary_item_id=?",
+                (option["replace_item_id"],),
+            ).fetchone()
+        self.assertEqual((place["provider"], place["name"]), ("amap", "杭州工艺美术博物馆"))
 
     def test_day_replan_rejects_if_any_involved_item_changed(self) -> None:
         result = self.store.ask_trip_assistant(

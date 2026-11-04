@@ -18,7 +18,7 @@ class RepositorySafetyScannerTests(unittest.TestCase):
     def test_env_example_does_not_bypass_literal_secret_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".env.example").write_text("SERVICE_API_KEY=0123456789abcdef0123456789abcdef\n", encoding="utf-8")
+            (root / ".env.example").write_text("SERVICE_API_KEY=0test1239abcdef0test1239abcdef\n", encoding="utf-8")
             with patch.object(check_repo_safety, "ROOT", root):
                 self.assertEqual(check_repo_safety.scan_text(".env.example"), ["non-empty SERVICE_API_KEY assignment"])
             (root / ".env.example").write_text("SERVICE_API_KEY=your_service_api_key\n", encoding="utf-8")
@@ -45,7 +45,7 @@ class RepositorySafetyScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "settings.py").write_text(
-                'SERVICE_API_KEY="0123456789abcdef0123456789abcdef"\n',
+                'SERVICE_API_KEY="0test1239abcdef0test1239abcdef"\n',
                 encoding="utf-8",
             )
             with patch.object(check_repo_safety, "ROOT", root):

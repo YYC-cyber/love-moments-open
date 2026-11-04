@@ -94,7 +94,7 @@ class IntelligentUiTests(unittest.TestCase):
         alice = self.store.register("alice_private", "safe-password-100", "甲")
         bob = self.store.register("bob_private", "safe-password-200", "乙")
         invite = self.store.create_user_invite(alice["id"])
-        self.store.accept_user_invite(bob["id"], invite["code"], "2024-02-14")
+        self.store.accept_user_invite(bob["id"], invite["code"], "2026-10-16")
         foreign = self.store.compose_ui("home", "记录瞬间：另一对的私密测试", user_id=alice["id"])["manifest"]
         foreign_action = next(action for node in foreign["sections"] for action in node["actions"] if action["requiresConfirmation"])
         foreign_result = self.store.confirm_ui_action(foreign_action["id"], "idem-isolation-0001", user_id=alice["id"])
@@ -224,6 +224,39 @@ class IntelligentUiTests(unittest.TestCase):
         job = self.store.compose_ui("life", "帮我添加一个纪念日")
         node = next(item for item in job["manifest"]["sections"] if item["type"] == "anniversary")
         self.assertFalse(any(item["type"] == "create_calendar_entry" for item in node["actions"]))
+
+    def test_explicit_chat_send_is_a_confirmation_draft(self) -> None:
+        before = len(self.store.list_messages())
+        manifest = self.store.compose_ui("chat", "告诉对方：今晚有空给我打电话吗")["manifest"]
+        action = next(
+            action
+            for node in manifest["sections"]
+            for action in node["actions"]
+            if action["type"] == "send_message"
+        )
+        self.assertEqual(len(self.store.list_messages()), before)
+        preview = self.store.preview_ui_action(action["id"])
+        self.assertIn("今晚有空", preview["preview"]["after"])
+        self.store.confirm_ui_action(action["id"], "idem-chat-send-0001")
+        self.assertEqual(len(self.store.list_messages()), before + 1)
+
+    def test_internal_result_cards_are_clickable_and_not_shared_from_private_search(self) -> None:
+        self.store.create_moment({
+            "title": "只有我知道的流星",
+            "body": "流星秘密",
+            "visibility": "private",
+        })
+        manifest = self.store.compose_ui("timeline", "查看流星秘密相关回忆")["manifest"]
+        cards = manifest["sections"][0]["props"]["assistantCards"]
+        self.assertTrue(cards)
+        self.assertTrue(all(card.get("open") for card in cards))
+        partner = self.store.get_ui_manifest("timeline", user_id=DEMO_PARTNER)
+        self.assertNotIn("assistantCards", partner["sections"][0]["props"])
+        with self.store.connection() as db:
+            shared_rows = db.execute(
+                "SELECT manifest_json FROM ui_manifests WHERE surface='timeline' AND user_id IS NULL"
+            ).fetchall()
+        self.assertFalse(any("流星秘密" in row["manifest_json"] for row in shared_rows))
 
 
 if __name__ == "__main__":

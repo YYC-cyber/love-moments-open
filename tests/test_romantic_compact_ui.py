@@ -156,6 +156,21 @@ class RomanticCompactProductionTests(unittest.TestCase):
         self.assertEqual(self.contract.button_counts_by_ancestor_class.get("life-core-actions"), 4)
         self.assertGreaterEqual(self.contract.button_counts_by_ancestor_class.get("life-more-actions", 0), 5)
 
+    def test_ai_cards_follow_the_selected_personal_theme(self):
+        compact_css = re.sub(r"\s+", " ", self.css)
+        for variable in (
+            "--assistant-card-bg",
+            "--assistant-card-border",
+            "--assistant-card-shadow",
+            "--assistant-card-mark",
+            "--assistant-card-pattern",
+        ):
+            with self.subTest(variable=variable):
+                self.assertGreaterEqual(self.css.count(variable), 3)
+        self.assertIn('body[data-ui-theme="kitty"] :is(.assistant-result-card,.smart-assistant-cards article)', compact_css)
+        self.assertIn('body[data-ui-theme="daniel"] :is(.assistant-result-card,.smart-assistant-cards article)', compact_css)
+        self.assertRegex(compact_css, r"\.assistant-result-card\s*\{[^}]*background-image:\s*var\(--assistant-card-pattern\),var\(--assistant-card-bg\)")
+
 
 if __name__ == "__main__":
     unittest.main()

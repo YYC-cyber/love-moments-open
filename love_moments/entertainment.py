@@ -98,6 +98,60 @@ def _id(prefix: str) -> str:
 
 
 class EntertainmentMixin:
+    def save_bead_ai_preview(self, image: bytes, mime_type: str, model: str, attempt: int, user_id: str) -> dict:
+        """Persist only the generated preview; the uploaded source is never stored."""
+        safe_model = "".join(character for character in str(model) if character.isalnum() or character in {"-", "_", "."})[:60] or "image-model"
+        attempt_value = max(1, min(999, int(attempt or 1)))
+        filename = f"bead-ai__{safe_model}__a{attempt_value}__{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jpg"
+        media = self.save_media(image, filename, mime_type, "private", user_id=user_id)
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT * FROM media_assets WHERE id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'",
+                (media["id"], user_id),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("AI 拼豆版本保存失败")
+            db.execute("UPDATE media_assets SET source_type='ai' WHERE id=?", (media["id"],))
+            row = db.execute("SELECT * FROM media_assets WHERE id=?", (media["id"],)).fetchone()
+        item = self._media_public(row)
+        item.update({"model": safe_model, "attempt": attempt_value, "source": "真实百炼图片编辑"})
+        return item
+
+    def list_bead_ai_previews(self, user_id: str) -> dict:
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            rows = db.execute(
+                """SELECT * FROM media_assets
+                   WHERE couple_id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'
+                     AND status='ready' AND purged_at IS NULL
+                   ORDER BY created_at DESC""",
+                (couple["id"], user_id),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = self._media_public(row)
+            parts = str(row["original_name"]).split("__")
+            item["model"] = parts[1] if len(parts) > 1 else "图片模型"
+            attempt_text = parts[2] if len(parts) > 2 else "a1"
+            item["attempt"] = int(attempt_text[1:]) if attempt_text.startswith("a") and attempt_text[1:].isdigit() else 1
+            item["source"] = "真实百炼图片编辑"
+            items.append(item)
+        return {"items": items}
+
+    def delete_bead_ai_preview(self, media_id: str, user_id: str) -> dict:
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            row = db.execute(
+                """SELECT id FROM media_assets
+                   WHERE id=? AND couple_id=? AND owner_id=? AND original_name LIKE 'bead-ai__%'
+                     AND status='ready' AND purged_at IS NULL""",
+                (media_id, couple["id"], user_id),
+            ).fetchone()
+            if not row:
+                raise KeyError("AI 拼豆版本不存在")
+        self.trash_media(media_id, user_id)
+        return self.purge_media(media_id, user_id)
+
     @staticmethod
     def _wheel_mode(value: object) -> str:
         mode = str(value or "normal").strip().lower()
@@ -319,6 +373,7 @@ class EntertainmentMixin:
             "creator_signature": note.get("creator_signature") if isinstance(note.get("creator_signature"), list) else [],
             "recipient_signature_name": str(note.get("recipient_signature_name") or ""),
             "recipient_signature": note.get("recipient_signature") if isinstance(note.get("recipient_signature"), list) else [],
+            "recipient_message": str(note.get("recipient_message") or ""),
             "created_at": str(note.get("created_at") or row["created_at"] or ""),
             "signed_at": str(note.get("signed_at") or ""), "version": int(row["version"]),
             "can_sign": status == "awaiting_recipient" and recipient_id == user_id,
@@ -348,9 +403,9 @@ class EntertainmentMixin:
         if template_id not in CARD_TEMPLATE_MAP: raise ValueError("卡片类型无效")
         if style_id not in CARD_STYLE_MAP: raise ValueError("卡片样式无效")
         template = CARD_TEMPLATE_MAP[template_id]
-        title = self._card_text(
-            payload.get("title") if template_id == "custom" else template[1], maximum=30, field="卡片标题",
-        )
+        # A template is a writing prompt, not a locked certificate.  Every
+        # sender can personalise both the title and the body before signing.
+        title = self._card_text(payload.get("title") or template[1], maximum=30, field="卡片标题")
         message = self._card_text(payload.get("message") or template[2], maximum=500)
         if payload.get("confirmed") is not True: raise ValueError("请先确认卡片内容并完成发卡人签名")
         creator_signature_name = self._card_text(payload.get("signature_name"), maximum=20, field="发卡人签名")
@@ -390,6 +445,11 @@ class EntertainmentMixin:
         if payload.get("confirmed") is not True: raise ValueError("请先确认已阅读卡片内容并自愿签署")
         signature = self._card_text(payload.get("signature_name"), maximum=20, field="收卡人签名")
         signature_points = self._card_signature(payload.get("signature"))
+        recipient_message_raw = " ".join(str(payload.get("recipient_message") or "").split())
+        recipient_message = (
+            self._card_text(recipient_message_raw, maximum=240, field="收卡留言")
+            if recipient_message_raw else ""
+        )
         expected = int(payload.get("expected_version") or 0)
         with self.connection() as db:
             couple, partner_id = self._couple_context(db, user_id)
@@ -406,7 +466,7 @@ class EntertainmentMixin:
             now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             note.update({
                 "status": "signed", "recipient_signature_name": signature,
-                "recipient_signature": signature_points, "signed_at": now,
+                "recipient_signature": signature_points, "recipient_message": recipient_message, "signed_at": now,
             })
             db.execute(
                 "UPDATE shared_list_items SET note=?,completed_at=?,version=version+1,updated_at=? WHERE id=?",
@@ -433,10 +493,10 @@ class EntertainmentMixin:
         asset_root = Path(self.db_path).parent / "theme-assets"
         sticker_sheets = {}
         for key, filename in {
-            "cards_1": "kitty-couple-cards-1-v2.webp",
-            "cards_2": "kitty-couple-cards-2-v2.webp",
-            "cards_3": "kitty-couple-cards-3-v2.webp",
-            "cards_4": "kitty-couple-cards-4-v2.webp",
+            "cards_1": "kitty-couple-cards-1-v3.webp",
+            "cards_2": "kitty-couple-cards-2-v3.webp",
+            "cards_3": "kitty-couple-cards-3-v3.webp",
+            "cards_4": "kitty-couple-cards-4-v3.webp",
         }.items():
             try: sticker_sheets[key] = (asset_root / filename).read_bytes()
             except OSError: pass

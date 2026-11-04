@@ -165,8 +165,8 @@ Promise.resolve(pushWork).then(async () => {
       type: "shared_comment",
       title: "恋屿有一条新的共同留言",
       body: "对方在共同内容中留下了评论，点击查看。",
-      url: "/?screen=life&shared_type=wishlist_item&shared_id=wish_12345678",
-      tag: "comment-comment_12345678"
+      url: "/?screen=life&shared_type=wishlist_item&shared_id=wish_test123",
+      tag: "comment-comment_test123"
     }) },
     waitUntil(promise) { commentPushWork = promise; }
   });
@@ -189,11 +189,11 @@ Promise.resolve(pushWork).then(async () => {
 
   let commentClickWork;
   listeners.notificationclick({
-    notification: { data: { url: "/?screen=life&shared_type=wishlist_item&shared_id=wish_12345678" }, close() {} },
+    notification: { data: { url: "/?screen=life&shared_type=wishlist_item&shared_id=wish_test123" }, close() {} },
     waitUntil(promise) { commentClickWork = promise; }
   });
   await commentClickWork;
-  assert.equal(navigation[1], "https://love.example/?screen=life&shared_type=wishlist_item&shared_id=wish_12345678");
+  assert.equal(navigation[1], "https://love.example/?screen=life&shared_type=wishlist_item&shared_id=wish_test123");
 
   let unsafeWork;
   listeners.notificationclick({

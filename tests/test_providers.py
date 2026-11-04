@@ -115,6 +115,15 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(detail["activities"]), 2)
         self.assertIn("情侣", detail["recommendation_reason"])
 
+    def test_food_plan_rejects_days_that_only_contain_meals(self) -> None:
+        payload = json.loads(self.model_payload()["choices"][0]["message"]["content"])
+        food = next(plan for plan in payload["plans"] if plan["style"] == "food")
+        for item in food["items"]:
+            item["type"] = "meal"
+            item["title"] = "早餐" if item["start_time"] < "12:00" else "午餐"
+        with self.assertRaisesRegex(ValueError, "不能只有三餐"):
+            self.planner._validate(payload, 3)
+
     def test_confirmed_destination_scope_rejects_foreign_same_name_place(self) -> None:
         payload = json.loads(self.model_payload()["choices"][0]["message"]["content"])
         for plan in payload["plans"]:
@@ -165,6 +174,33 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 6)
         self.assertTrue(all(plan.generation_source == "ai" for plan in plans))
         self.assertIn("分套生成", plans[0].generation_message)
+
+    def test_minor_model_json_syntax_is_repaired_before_retry(self) -> None:
+        content = self.model_payload()["choices"][0]["message"]["content"]
+        malformed = content[:-1].rstrip() + ",}"
+        with patch(
+            "love_moments.providers.request.urlopen",
+            return_value=FakeResponse({"choices": [{"message": {"content": f"```json\n{malformed}\n```"}}]}),
+        ) as mocked:
+            plans = self.planner.generate_variants("杭州", 300000)
+        self.assertEqual(mocked.call_count, 1)
+        self.assertTrue(all(plan.generation_source == "ai" for plan in plans))
+        self.assertTrue(all("自动修复" in plan.generation_message for plan in plans))
+
+    def test_one_failed_style_does_not_discard_other_ai_plans(self) -> None:
+        invalid = FakeResponse({"choices": [{"message": {"content": "{not-json"}}]})
+        styles = ["slow", "classic", "value", "food", "nature"]
+        responses = [invalid, invalid, invalid]
+        responses.extend(FakeResponse(self.single_model_payload(style)) for style in styles[1:])
+        with patch("love_moments.providers.request.urlopen", side_effect=responses) as mocked:
+            plans = self.planner.generate_variants(
+                "杭州", 300000, {"start_date": "2026-11-01", "end_date": "2026-11-03"},
+            )
+        self.assertEqual(mocked.call_count, 7)
+        self.assertEqual([plan.style for plan in plans], styles)
+        self.assertEqual(plans[0].generation_source, "rules")
+        self.assertTrue(all(plan.generation_source == "ai" for plan in plans[1:]))
+        self.assertIn("仅该方案", plans[0].generation_message)
 
     def test_single_style_recovery_accepts_full_or_unwrapped_model_envelope(self) -> None:
         payload = json.loads(self.model_payload()["choices"][0]["message"]["content"])

@@ -199,6 +199,8 @@ def _ornaments(pdf: Canvas, name: str, accent, gold) -> None:
             pdf.circle(x, y, 7, stroke=1, fill=0)
             pdf.line(x - 10, y, x + 10, y); pdf.line(x, y - 10, x, y + 10)
 
+    # A restrained satin ribbon and foil medallion make the card feel like a
+    # keepsake while remaining crisp on ordinary home printers.
     pdf.setFillAlpha(0.08)
     pdf.roundRect(26, _HEIGHT - 55, _WIDTH - 52, 18, 9, stroke=0, fill=1)
     pdf.setFillAlpha(0.2)
@@ -260,18 +262,31 @@ def render_couple_card_pdf(card: dict, *, sticker_sheets: dict[str, bytes] | Non
     pdf.setTitle(_text(card.get("title")))
     pdf.setAuthor("恋屿 Love Moments")
     gold = HexColor("#C79A42")
-    pdf.setFillColor(paper); pdf.rect(0, 0, _WIDTH, _HEIGHT, stroke=0, fill=1)
-    pdf.setStrokeColor(gold); pdf.setLineWidth(1.1); pdf.setStrokeAlpha(0.72)
-    pdf.roundRect(18, 18, _WIDTH - 36, _HEIGHT - 36, 28, stroke=1, fill=0)
-    pdf.setStrokeAlpha(1)
-    pdf.setFillColor(HexColor("#FFFFFF")); pdf.setFillAlpha(0.91)
-    pdf.roundRect(29, 29, _WIDTH - 58, _HEIGHT - 58, 24, stroke=0, fill=1)
-    pdf.setFillAlpha(1)
-    pdf.setStrokeColor(gold); pdf.setLineWidth(0.7)
-    pdf.roundRect(36, 36, _WIDTH - 72, _HEIGHT - 72, 21, stroke=1, fill=0)
     pattern = str(style.get("pattern") or "reconcile_letter")
+    # Build the printable card as a real keepsake envelope: themed outer paper,
+    # folded flaps, a raised letter sheet, gold edging and a wax seal.  The
+    # letter itself remains light so personalised text and signatures stay
+    # readable on an ordinary home printer.
+    pdf.setFillColor(paper); pdf.rect(0, 0, _WIDTH, _HEIGHT, stroke=0, fill=1)
     _pattern(pdf, pattern, accent, paper)
     _ornaments(pdf, pattern, accent, gold)
+    pdf.saveState()
+    pdf.setStrokeColor(gold); pdf.setLineWidth(1.1); pdf.setStrokeAlpha(0.78)
+    pdf.roundRect(16, 16, _WIDTH - 32, _HEIGHT - 32, 28, stroke=1, fill=0)
+    pdf.setStrokeAlpha(1)
+    pdf.setFillColor(accent); pdf.setFillAlpha(0.075)
+    flap = pdf.beginPath(); flap.moveTo(21, _HEIGHT - 21); flap.lineTo(_WIDTH - 21, _HEIGHT - 21); flap.lineTo(_WIDTH / 2, _HEIGHT - 168); flap.close()
+    pdf.drawPath(flap, stroke=0, fill=1)
+    left_fold = pdf.beginPath(); left_fold.moveTo(21, 21); left_fold.lineTo(21, _HEIGHT - 154); left_fold.lineTo(_WIDTH / 2, 21); left_fold.close()
+    right_fold = pdf.beginPath(); right_fold.moveTo(_WIDTH - 21, 21); right_fold.lineTo(_WIDTH - 21, _HEIGHT - 154); right_fold.lineTo(_WIDTH / 2, 21); right_fold.close()
+    pdf.setFillAlpha(0.09); pdf.drawPath(left_fold, stroke=0, fill=1); pdf.drawPath(right_fold, stroke=0, fill=1)
+    pdf.setFillAlpha(0.96); pdf.setFillColor(HexColor("#FFFCF7")); pdf.setStrokeColor(HexColor("#D8B56C")); pdf.setLineWidth(0.75)
+    pdf.roundRect(35, 31, _WIDTH - 70, _HEIGHT - 63, 20, stroke=1, fill=1)
+    pdf.setFillAlpha(1)
+    pdf.setStrokeColor(accent); pdf.setStrokeAlpha(0.18); pdf.setDash(1, 3)
+    pdf.roundRect(42, 38, _WIDTH - 84, _HEIGHT - 77, 17, stroke=1, fill=0)
+    pdf.setDash(); pdf.setStrokeAlpha(1)
+    pdf.restoreState()
     pdf.setFillColor(accent); pdf.roundRect(54, _HEIGHT - 91, 126, 27, 13, stroke=0, fill=1)
     pdf.setFillColor(HexColor("#FFFFFF")); pdf.setFont(_font(), 9)
     pdf.drawCentredString(117, _HEIGHT - 82, "LOVE MOMENTS · 恋屿珍藏")
@@ -284,9 +299,22 @@ def render_couple_card_pdf(card: dict, *, sticker_sheets: dict[str, bytes] | Non
     pdf.drawRightString(_WIDTH - 54, _HEIGHT - 82, f"NO. {_text(card.get('id'))[-12:].upper()}")
     pdf.setFillColor(gold); pdf.setFont(_font(), 7.5); pdf.drawString(54, _HEIGHT - 151, "OUR LITTLE PROMISE · 由我们共同签署与珍藏")
     y = _HEIGHT - 177
+    recipient_message = _text(card.get("recipient_message"))
     pdf.setFillColor(ink); pdf.setFont(_font(), 12)
-    for line in _lines(card.get("message"), _WIDTH - 116, 12, 5):
+    for line in _lines(card.get("message"), _WIDTH - 116, 12, 3 if recipient_message else 5):
         pdf.drawString(58, y, line); y -= 20
+    if recipient_message:
+        reply_lines = _lines(recipient_message, _WIDTH - 152, 9.5, 2)
+        reply_height, reply_y = 23 + len(reply_lines) * 14, 128
+        pdf.saveState(); pdf.setFillColor(paper); pdf.setFillAlpha(0.5); pdf.setStrokeColor(accent); pdf.setStrokeAlpha(0.28)
+        pdf.roundRect(54, reply_y, _WIDTH - 108, reply_height, 9, stroke=1, fill=1)
+        pdf.setFillAlpha(1); pdf.setStrokeAlpha(1); pdf.setFillColor(accent); pdf.setFont(_font(), 7.5)
+        pdf.drawString(66, reply_y + reply_height - 13, "TA 的回信")
+        pdf.setFillColor(ink); pdf.setFont(_font(), 9.5)
+        reply_text_y = reply_y + reply_height - 27
+        for line in reply_lines:
+            pdf.drawString(66, reply_text_y, line); reply_text_y -= 14
+        pdf.restoreState()
     pdf.setStrokeColor(gold); pdf.setStrokeAlpha(0.48); pdf.line(54, 122, _WIDTH - 54, 122); pdf.setStrokeAlpha(1)
     signature_width = (_WIDTH - 136) / 2
     _draw_signature(pdf, card.get("creator_signature"), 58, 65, signature_width, 45, accent)
@@ -296,7 +324,10 @@ def render_couple_card_pdf(card: dict, *, sticker_sheets: dict[str, bytes] | Non
     pdf.drawString(58, 39, _text(card.get("created_at"))[:16].replace("T", " "))
     pdf.drawString(78 + signature_width, 51, f"收卡人签名 · {_text(card.get('recipient_signature_name'))}")
     pdf.drawString(78 + signature_width, 39, _text(card.get("signed_at"))[:16].replace("T", " "))
-    pdf.setFillColor(gold); pdf.setFont(_font(), 15); pdf.drawCentredString(_WIDTH - 45, 43, "✦")
+    pdf.saveState(); pdf.setFillColor(accent); pdf.setStrokeColor(gold); pdf.setLineWidth(1.2)
+    pdf.circle(_WIDTH - 46, 47, 19, stroke=1, fill=1)
+    pdf.setFillColor(HexColor("#FFE7AD")); pdf.setFont(_font(), 7); pdf.drawCentredString(_WIDTH - 46, 45, "LM")
+    pdf.restoreState()
     pdf.save()
     value = output.getvalue()
     if not value.startswith(b"%PDF-") or len(value) > 4 * 1024 * 1024:

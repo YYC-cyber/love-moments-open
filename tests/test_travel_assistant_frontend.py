@@ -40,7 +40,10 @@ class TravelAssistantFrontendContractTests(unittest.TestCase):
 
     def test_all_new_assistant_cards_have_real_actions(self) -> None:
         script = (ROOT / "static/app.js").read_text()
-        for card_type in ("day_replan", "next_stop", "quote_group", "trip_recap"):
+        for card_type in (
+            "day_replan", "indoor_place_option", "place_replacement_option",
+            "itinerary_item_choice", "next_stop", "quote_group", "trip_recap",
+        ):
             self.assertIn(f'card.type === "{card_type}"', script)
         for action in (
             "assistant-recap-edit",
@@ -50,6 +53,9 @@ class TravelAssistantFrontendContractTests(unittest.TestCase):
             self.assertIn(f'action === "{action}"', script)
         self.assertIn("live_context", script)
         self.assertIn("source_label", script)
+        self.assertIn("card.day_options", script)
+        self.assertIn("card.options", script)
+        self.assertIn('data-action="${escapeHtml(option.action)}"', script)
 
     def test_exact_live_location_is_never_written_to_browser_storage(self) -> None:
         script = (ROOT / "static/app.js").read_text()
@@ -72,6 +78,17 @@ class TravelAssistantFrontendContractTests(unittest.TestCase):
         self.assertIn("liveDistanceMeters(previous.resultAnchorContext, context)", script)
         self.assertIn('deliveryMode: "browser_cache"', script)
         self.assertIn("缓存于", script)
+
+    def test_slow_trip_generation_runs_in_background_and_can_retry_in_place(self) -> None:
+        html = (ROOT / "static/index.html").read_text()
+        script = (ROOT / "static/app.js").read_text()
+        styles = (ROOT / "static/app.css").read_text()
+        self.assertIn('id="tripGenerationBanner"', html)
+        self.assertIn("/generation-jobs", script)
+        self.assertIn("queueTripGeneration", script)
+        self.assertIn('action === "retry-trip-generation"', script)
+        self.assertIn("上次生成条件已过期", script)
+        self.assertIn(".trip-generation-banner", styles)
 
 
 if __name__ == "__main__":

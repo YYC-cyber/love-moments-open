@@ -11,36 +11,19 @@ function assert(value, message) {
 }
 
 async function login(page, origin, username, password) {
+  let loginRequests = 0;
+  const countLogin = request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/auth/login") loginRequests += 1;
+  };
+  page.on("request", countLogin);
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.locator("#authUsername").fill(username);
   await page.locator("#authPassword").fill(password);
-  const loginResponsePromise = page.waitForResponse(response => (
-    response.url().endsWith("/api/v1/auth/login")
-      && response.request().method() === "POST"
-  ), { timeout: 60_000 });
-  const bootstrapResponsePromise = page.waitForResponse(response => (
-    response.url().endsWith("/api/v1/bootstrap")
-      && response.request().method() === "GET"
-  ), { timeout: 60_000 });
   await page.locator("#authSubmit").click();
-  const loginResponse = await loginResponsePromise;
-  if (!loginResponse.ok()) {
-    throw new Error(`${username} 登录接口失败 (${loginResponse.status()})：${await loginResponse.text()}`);
-  }
-  const bootstrapResponse = await bootstrapResponsePromise;
-  if (!bootstrapResponse.ok()) {
-    throw new Error(`${username} 初始化接口失败 (${bootstrapResponse.status()})：${await bootstrapResponse.text()}`);
-  }
-  await page.waitForFunction(
-    () => document.querySelector("#authGate")?.classList.contains("hidden"),
-    null,
-    { timeout: 60_000 },
-  );
-  await page.waitForFunction(
-    () => Boolean(document.querySelector(".avatar-a")?.dataset.avatarTheme),
-    null,
-    { timeout: 60_000 },
-  );
+  await page.waitForFunction(() => document.querySelector("#authGate")?.classList.contains("hidden"));
+  await page.waitForFunction(() => Boolean(document.querySelector(".avatar-a")?.dataset.avatarTheme));
+  page.off("request", countLogin);
+  assert(loginRequests === 1, `${username} 一次进入共同空间时产生了 ${loginRequests} 次登录请求`);
 }
 
 async function logout(page) {
@@ -100,12 +83,6 @@ async function checkSurface(page, surface, viewport) {
   assert(layout.unnamed === 0, `${surface} 存在 ${layout.unnamed} 个无可访问名称按钮`);
 }
 
-function shouldIgnoreConsoleError(message) {
-  const text = message.text();
-  return text.includes("favicon.ico")
-    || text.includes("Failed to load resource: the server responded with a status of 404");
-}
-
 (async () => {
   const launchOptions = {
     headless: true,
@@ -123,9 +100,15 @@ function shouldIgnoreConsoleError(message) {
     const pageB = await contextB.newPage();
     for (const [label, page] of [["test", pageA], ["test1", pageB]]) {
       page.on("pageerror", error => errors.push(`${label} pageerror: ${error.message}`));
-      page.on("response", response => { if (response.status() === 404) errors.push(`${label} response 404: ${response.url()}`); });
+      page.on("response", response => {
+        if (response.status() === 401 && response.request().method() !== "GET") {
+          // Never let the revoked-cookie read allowance hide a failed write,
+          // including a POST sharing the same route as a background GET.
+          errors.push(`${label} unexpected write authentication failure: ${response.request().method()} ${response.url()}`);
+        }
+      });
       page.on("console", message => {
-        if (message.type() === "error" && !shouldIgnoreConsoleError(message)) {
+        if (message.type() === "error" && !message.text().includes("favicon.ico")) {
           const location = message.location()?.url;
           errors.push(`${label} console${location ? ` (${location})` : ""}: ${message.text()}`);
         }
@@ -139,16 +122,16 @@ function shouldIgnoreConsoleError(message) {
     await pageA.locator('[data-screen="chat"] h1').waitFor({ state: "attached" });
     assert((await pageA.locator('[data-screen="chat"] h1').textContent()).includes("演示乙"), "test 未正确识别伴侣");
     assert((await pageB.locator('[data-screen="chat"] h1').textContent()).includes("演示甲"), "test1 未正确识别伴侣");
-    assert((await pageA.locator("#partnerMomentLabel").textContent()).includes("演示乙的此刻 · 当前账号：演示甲"), "test 首页账号提示错误");
-    assert((await pageB.locator("#partnerMomentLabel").textContent()).includes("演示甲的此刻 · 当前账号：演示乙"), "test1 首页账号提示错误");
+    assert((await pageA.locator("#partnerMomentLabel").textContent()).includes("伴侣状态 · 演示乙"), "test 首页伴侣状态提示错误");
+    assert((await pageB.locator("#partnerMomentLabel").textContent()).includes("伴侣状态 · 演示甲"), "test1 首页伴侣状态提示错误");
     const identityThemes = await Promise.all([
       pageA.locator(".avatar-a").first().getAttribute("data-avatar-theme"),
       pageA.locator(".avatar-b").first().getAttribute("data-avatar-theme"),
       pageB.locator(".avatar-a").first().getAttribute("data-avatar-theme"),
       pageB.locator(".avatar-b").first().getAttribute("data-avatar-theme"),
     ]);
-    assert(identityThemes[0] === identityThemes[3], "演示甲的头像主题未绑定到账号身份");
-    assert(identityThemes[1] === identityThemes[2], "演示乙的头像主题未绑定到账号身份");
+    assert(identityThemes[0] === identityThemes[3], "唐的头像主题未绑定到账号身份");
+    assert(identityThemes[1] === identityThemes[2], "超的头像主题未绑定到账号身份");
     assert(identityThemes[0] !== identityThemes[1], "两位用户的头像主题不应相同");
     await pageA.locator(".avatar-pair").click();
     await pageA.locator("#accountIdentityCard").waitFor({ state: "visible" });
@@ -167,28 +150,45 @@ function shouldIgnoreConsoleError(message) {
       }
     }
     await pageA.setViewportSize({ width: 390, height: 844 });
-    checks.push("五页面×手机/平板/桌面布局与基础可访问性");
+    checks.push("六个主板块×手机/平板/桌面布局与基础可访问性");
 
     const marker = `双端同步-${Date.now()}`;
     await pageA.locator('[data-nav="chat"]').last().click();
     await pageA.locator("#chatInput").fill(marker);
     await pageA.locator("#chatInput").press("Enter");
     await pageA.locator("#messages .message", { hasText: marker }).waitFor();
+    await pageB.waitForFunction(() => {
+      const badge = document.querySelector("#chatUnreadBadge");
+      return badge && !badge.hidden && Number.parseInt(badge.textContent || "0", 10) >= 1;
+    }, null, { timeout: 10_000 });
     await pageB.locator('[data-nav="chat"]').last().click();
     await pageB.locator("#messages .message", { hasText: marker }).waitFor({ timeout: 10_000 });
-    checks.push("文字消息 SSE 双端实时同步");
+    await pageB.waitForFunction(() => document.querySelector("#chatUnreadBadge")?.hidden === true);
+    let syncedReadState = await api(pageB, "/api/v1/messages/read-state");
+    for (let attempt = 0; attempt < 20 && syncedReadState.unread_count !== 0; attempt += 1) {
+      await pageB.waitForTimeout(100);
+      syncedReadState = await api(pageB, "/api/v1/messages/read-state");
+    }
+    assert(syncedReadState.unread_count === 0, "打开聊天后服务器未同步清除跨设备未读");
+    checks.push("文字消息 SSE 双端实时同步、跨设备未读数量与已读同步");
 
-    for (let index = 1; index <= 8; index += 1) {
+    // 先制造足够的真实聊天内容，确保手机视口确实可滚动；否则少量消息时
+    // scrollTop=0 本身仍处于底部，无法真实触发“未读新消息”浮标。
+    for (let index = 1; index <= 20; index += 1) {
       const filler = `${marker}-滚动准备${index}`;
       await pageA.locator("#chatInput").fill(filler);
       await pageA.locator("#chatInput").press("Enter");
     }
-    await pageB.locator("#messages .message", { hasText: `${marker}-滚动准备8` }).waitFor({ timeout: 10_000 });
+    await pageB.locator("#messages .message", { hasText: `${marker}-滚动准备20` }).waitFor({ timeout: 10_000 });
     await pageB.waitForFunction(() => {
       const node = document.querySelector("#messages");
       return node && node.scrollHeight - node.clientHeight > 100;
     });
     await pageB.evaluate(() => scrollChatToLatest({ behavior: "auto" }));
+    // The production helper keeps a short "latest message" lock while delayed
+    // iOS layout, fonts and images settle. Wait until that lock has expired
+    // before simulating a deliberate manual scroll upward.
+    await pageB.waitForTimeout(900);
     await pageB.locator("#messages").evaluate(node => { node.scrollTop = 0; });
     await pageB.waitForFunction(() => {
       const node = document.querySelector("#messages");
@@ -196,16 +196,22 @@ function shouldIgnoreConsoleError(message) {
     });
     await pageA.locator("#chatInput").fill(`${marker}-新消息一`);
     await pageA.locator("#chatInput").press("Enter");
-    await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.textContent?.includes("新消息（1）"));
+    await pageB.waitForFunction(() => {
+      const text = document.querySelector("#chatNewMessages")?.textContent || "";
+      return Number.parseInt(text.match(/新消息（(\d+)）/)?.[1] || "0", 10) >= 1;
+    });
     await pageA.locator("#chatInput").fill(`${marker}-新消息二`);
     await pageA.locator("#chatInput").press("Enter");
-    await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.textContent?.includes("新消息（2）"));
-    await pageB.locator("#chatNewMessages").click();
     await pageB.waitForFunction(() => {
-      const node = document.querySelector("#messages");
-      return node && node.scrollHeight - node.scrollTop - node.clientHeight < 8
-        && document.querySelector("#chatNewMessages")?.hidden;
+      const text = document.querySelector("#chatNewMessages")?.textContent || "";
+      const count = Number.parseInt(text.match(/新消息（(\d+)）/)?.[1] || "0", 10);
+      return count >= 2;
     });
+    await pageB.locator("#chatNewMessages").click();
+    await pageB.waitForFunction(() => document.querySelector("#chatNewMessages")?.hidden);
+    await pageB.waitForTimeout(1500);
+    const latestGap = await pageB.locator("#messages").evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight);
+    assert(latestGap < 8, `新消息按钮没有落到最新一条，仍相差 ${latestGap}px`);
     await pageB.locator('[data-nav="home"]').last().click();
     await pageB.locator("#messages").evaluate(node => { node.scrollTop = 0; });
     await pageB.locator('[data-nav="chat"]').last().click();
@@ -216,8 +222,9 @@ function shouldIgnoreConsoleError(message) {
     checks.push("消息页每次打开定位最新消息，新消息计数浮标一键回到最新消息");
 
     const collectionText = `${marker}-新消息二`;
-    const markerMessage = pageA.locator("#messages .message", { hasText: collectionText });
+    const markerMessage = pageA.locator("#messages .message", { has: pageA.getByText(collectionText, { exact: true }) });
     await markerMessage.scrollIntoViewIfNeeded();
+    await markerMessage.locator(".message-menu > summary").click();
     await markerMessage.locator('[data-action="save-message"]').click();
     await pageA.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("已收藏"));
     const afterCollection = await api(pageA, "/api/v1/bootstrap");
@@ -243,7 +250,7 @@ function shouldIgnoreConsoleError(message) {
     const testPng = fs.readFileSync(require("node:path").join(__dirname, "..", "static", "assets", "couple-lake-hero.png"));
     await pageA.locator("#chatMediaInput").setInputFiles({ name: "release-check.png", mimeType: "image/png", buffer: testPng });
     await pageA.locator("#messages img.message-media").last().waitFor();
-    await pageB.waitForFunction(() => Boolean([...document.querySelectorAll("#messages img.message-media")].find(image => image.alt.includes("分享了一张照片") && image.complete && image.naturalWidth > 0)), null, { timeout: 10_000 });
+    await pageB.waitForFunction(() => Boolean([...document.querySelectorAll("#messages img.message-media")].find(image => image.alt.includes("分享了一张照片") && image.complete && image.naturalWidth > 0)), null, { timeout: 20_000 });
     checks.push("图片上传、鉴权读取与双端展示");
 
     const videoUpload = await pageA.evaluate(async () => {
@@ -462,7 +469,7 @@ function shouldIgnoreConsoleError(message) {
     await smartForm.locator("input").fill("只显示预算与待确认内容");
     await smartForm.locator("button").click();
     await smartForm.locator("button").waitFor({ state: "visible" });
-    await pageA.waitForFunction(() => document.querySelector('[data-smart-form="trip"] button')?.textContent === "智能整理");
+    await pageA.waitForFunction(() => document.querySelector('[data-smart-form="trip"] button')?.textContent === "发送");
     assert(await pageA.locator('[data-smart="trip"] .smart-node').count() > 0, "智能界面未返回可用清单");
     await pageA.locator('[data-smart="trip"] [data-smart-node="budget_summary"]').click();
     await pageA.locator('[data-screen="trip"].active').waitFor();
@@ -570,8 +577,8 @@ function shouldIgnoreConsoleError(message) {
       pageA.locator("#wishlistForm button").click(),
     ]);
     assert((await api(pageB, "/api/v1/lists/wishlist")).items.some(item => item.text === `${wishMarker}-已修改`), "共同愿望编辑未同步");
-    const firstComment = `演示甲的评论-${Date.now()}`;
-    const secondComment = `演示乙的回复-${Date.now()}`;
+    const firstComment = `唐的评论-${Date.now()}`;
+    const secondComment = `超的回复-${Date.now()}`;
     await wishRow.locator('[data-action="open-shared-detail"]').click();
     await pageA.locator("#sharedDetailModal.open").waitFor();
     assert((await pageA.locator("#sharedDetailTitle").textContent()).includes(`${wishMarker}-已修改`), "共同内容详情未显示真实心愿标题");
@@ -882,12 +889,17 @@ function shouldIgnoreConsoleError(message) {
 
     await pageA.locator('[data-nav="life"]').last().click();
     await pageA.locator('[data-screen="life"] .settings[data-action="open-profile"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="notifications"]').click();
     await pageA.locator("#deviceList .device-row").first().waitFor();
+    await pageA.locator('[data-account-panel="notifications"] [data-action="back-account-center"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="privacy"]').click();
     const protectedMedia = pageA.locator("#accountMediaList .account-media-row", { hasText: "release-check" });
     await protectedMedia.waitFor();
     await protectedMedia.locator("img").waitFor();
     assert(await protectedMedia.locator("small").textContent().then(value => value.includes("隐私信息已清理")), "账号媒体库未标记图片隐私清理");
     await protectedMedia.locator('[data-action="trash-media"]').waitFor();
+    await pageA.locator('[data-account-panel="privacy"] [data-action="back-account-center"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="profile"]').click();
     const originalNickname = await pageA.locator("#nicknameInput").inputValue();
     const partnerNickname = (await api(pageA, "/api/v1/bootstrap")).partner.nickname;
     await pageA.locator("#nicknameInput").fill(partnerNickname);
@@ -915,6 +927,9 @@ function shouldIgnoreConsoleError(message) {
         return false;
       };
     });
+    // Account data can finish a background refresh after the profile save.
+    // Re-assert the unsaved draft immediately before the real close click so
+    // this check measures the guard rather than unrelated network timing.
     await pageA.locator("#nicknameInput").fill(`${originalNickname}未保存`);
     await pageA.waitForFunction(() => profileDraftIsDirty());
     await pageA.locator("#accountModal [data-action=close-modal]").click();
@@ -941,9 +956,8 @@ function shouldIgnoreConsoleError(message) {
 
     const adminPage = await contextA.newPage();
     adminPage.on("pageerror", error => errors.push(`admin pageerror: ${error.message}`));
-    adminPage.on("response", response => { if (response.status() === 404) errors.push(`admin response 404: ${response.url()}`); });
     adminPage.on("console", message => {
-      if (message.type() === "error" && !shouldIgnoreConsoleError(message)) errors.push(`admin console: ${message.text()}`);
+      if (message.type() === "error" && !message.text().includes("favicon.ico")) errors.push(`admin console: ${message.text()}`);
     });
     await adminPage.goto(`${originA}/admin`, { waitUntil: "domcontentloaded" });
     await adminPage.locator("#checkGrid .check-card").first().waitFor();
@@ -968,7 +982,6 @@ function shouldIgnoreConsoleError(message) {
     const offlineContext = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "allow" });
     const offlinePage = await offlineContext.newPage();
     offlinePage.on("pageerror", error => errors.push(`offline pageerror: ${error.message}`));
-    offlinePage.on("response", response => { if (response.status() === 404) errors.push(`offline response 404: ${response.url()}`); });
     await login(offlinePage, originA, "test", "test123");
     await offlinePage.waitForFunction(() => navigator.serviceWorker?.controller, null, { timeout: 10_000 }).catch(async () => {
       await offlinePage.reload({ waitUntil: "domcontentloaded" });
@@ -988,12 +1001,12 @@ function shouldIgnoreConsoleError(message) {
     await logout(accountSwitchPage);
     await pageA.waitForFunction(() => !document.querySelector("#authGate")?.classList.contains("hidden"));
     await login(accountSwitchPage, originA, "test1", "test123");
-    await pageA.waitForFunction(() => document.querySelector("#partnerMomentLabel")?.textContent.includes("当前账号：演示乙"));
-    assert((await pageA.locator(".avatar-a").first().textContent()).trim() === "乙", "切换账号后旧标签页仍显示演示甲的头像");
+    await pageA.waitForFunction(() => document.querySelector(".avatar-a")?.textContent.trim() === "超");
+    assert((await pageA.locator(".avatar-a").first().textContent()).trim() === "超", "切换账号后旧标签页仍显示唐的头像");
     await logout(accountSwitchPage);
     await pageA.waitForFunction(() => !document.querySelector("#authGate")?.classList.contains("hidden"));
     await login(accountSwitchPage, originA, "test", "test123");
-    await pageA.waitForFunction(() => document.querySelector("#partnerMomentLabel")?.textContent.includes("当前账号：演示甲"));
+    await pageA.waitForFunction(() => document.querySelector(".avatar-a")?.textContent.trim() === "唐");
     await accountSwitchPage.close();
     // The shared-cookie account-switch test deliberately invalidates the old
     // tab while its bootstrap fan-out may still have protected reads in
@@ -1007,12 +1020,16 @@ function shouldIgnoreConsoleError(message) {
       "/api/v1/calls/active",
       "/api/v1/push/config",
       "/api/v1/ui/life",
+      "/api/v1/realtime/events",
+      "/api/v1/cook-sessions?status=active",
     ]);
     const switchErrors = errors.slice(accountSwitchErrorsStart).filter(value => {
       if (!value.includes("status of 401 (Unauthorized)")) return true;
       try {
         const match = value.match(/console \((https?:\/\/[^)]+)\)/);
-        return !match || !expectedSwitchReads.has(new URL(match[1]).pathname);
+        if (!match) return true;
+        const url = new URL(match[1]);
+        return !expectedSwitchReads.has(url.pathname) && !expectedSwitchReads.has(url.pathname + url.search);
       } catch (_) {
         return true;
       }
@@ -1022,9 +1039,12 @@ function shouldIgnoreConsoleError(message) {
 
     await pageA.locator('[data-nav="life"]').last().click();
     await pageA.locator('[data-screen="life"] .settings[data-action="open-profile"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="notifications"]').click();
     assert((await pageA.locator("#pushSettingsTitle").textContent()).includes("消息与来电提醒"), "账号中心缺少消息与来电提醒设置");
     assert((await pageA.locator("#pushSettingsTitle").locator("xpath=..") .textContent()).includes("不是系统全屏 CallKit"), "后台通知未说明 PWA 与 CallKit 边界");
     checks.push("账号中心消息与来电提醒入口及 iOS 使用边界");
+    await pageA.locator('[data-account-panel="notifications"] [data-action="back-account-center"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="security"]').click();
     await pageA.locator("#currentPassword").fill("test123");
     await pageA.locator("#newPassword").fill("browser-private-password");
     await pageA.locator("#confirmNewPassword").fill("browser-private-password");

@@ -41,7 +41,8 @@ async function openAccount(page) {
   await page.locator('[data-nav="life"]').last().click();
   await page.locator('[data-screen="life"].active .settings').click();
   await page.locator("#accountModal.open").waitFor();
-  await page.locator("#deviceList .device-row").first().waitFor();
+  await page.locator('[data-action="open-account-section"][data-account-section="privacy"]').click();
+  await page.locator('[data-account-panel="privacy"]:not([hidden])').waitFor();
 }
 async function closeAccount(page) {
   await page.locator('#accountModal [data-action="close-modal"]').click();
@@ -164,7 +165,7 @@ async function closeAccount(page) {
       delivered = (await request(pageB, "/api/v1/messages")).items.some(item => item.content === inFlightMarker);
     }
     assert(delivered, "发送中的消息没有得到服务器回执");
-    await pageA.evaluate(() => loadAccountCenter());
+    await pageA.evaluate(() => loadAccountSection("privacy", { force: true }));
     await pageA.unroute("**/api/v1/messages", holdPost);
     await pageA.waitForFunction(() => !document.querySelector("#offlineSyncStatus .mock-badge")?.textContent.includes("发送中"));
     await closeAccount(pageA);
@@ -172,9 +173,13 @@ async function closeAccount(page) {
     const abortPrivacy = route => route.abort("failed");
     await pageA.route("**/api/v1/account/privacy", abortPrivacy);
     await openAccount(pageA);
-    assert(await pageA.locator("#deviceList .device-row").count() > 0, "隐私接口失败时设备中心也不可用");
+    await pageA.waitForFunction(() => document.querySelector("#privacyUsage")?.textContent.includes("暂时无法读取"));
     assert((await pageA.locator("#privacyUsage").textContent()).includes("暂时无法读取"), "隐私接口失败没有分区降级提示");
     await pageA.unroute("**/api/v1/account/privacy", abortPrivacy);
+    await pageA.locator('[data-account-panel="privacy"] [data-action="back-account-center"]').click();
+    await pageA.locator('[data-action="open-account-section"][data-account-section="notifications"]').click();
+    await pageA.locator("#deviceList .device-row").first().waitFor();
+    assert(await pageA.locator("#deviceList .device-row").count() > 0, "隐私接口失败时设备中心也不可用");
 
     const accountOverflow = await pageA.locator("#accountModal .sheet").evaluate(element => element.scrollWidth - element.clientWidth);
     assert(accountOverflow <= 1, "手机账号中心出现横向溢出");

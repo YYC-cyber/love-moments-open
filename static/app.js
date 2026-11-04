@@ -98,7 +98,7 @@ async function loadThemeArtwork(userId) {
     }
     let cardArtCount = 0;
     for (let index = 1; index <= 4; index += 1) {
-      const expected = `/api/v1/theme-assets/kitty-couple-cards-${index}-v2.webp`;
+      const expected = `/api/v1/theme-assets/kitty-couple-cards-${index}-v3.webp`;
       if (manifest.assets?.[`kitty_cards_${index}`] === expected) {
         document.body.style.setProperty(`--kitty-card-sheet-${index}`, `url("${expected}")`);
         cardArtCount += 1;
@@ -310,8 +310,10 @@ const state = {
   agoraRemoteTrack: null,
   data: null,
   selectedItemIds: new Set(),
+  tripPhotoRequests: new Set(),
+  accountCenter: { section: "overview", ownerUserId: "", loaded: new Set(), loading: new Set() },
   playTool: "",
-  bead: { image: null, sourceUrl: "", size: 29, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0 },
+  bead: { image: null, originalImage: null, sourceFile: null, sourceUrl: "", aiUrl: "", aiAttempt: 0, aiConfigured: null, aiVersions: [], variants: [], selectedVariant: "", size: 58, palette: [], paletteMeta: [], indices: [], generatedPalette: [], generatedPaletteMeta: [], generatedIndices: [], selectedColor: 0, catalogs: [], catalog: null, catalogId: "", catalogLoading: null, patternCatalog: null },
   wheel: { mode: "normal", data: null, selected: new Set(), loading: false, spinning: false, rotation: 0, requestSequence: 0 },
   cards: { data: null, templateId: "wish", styleId: "wish", signingId: null, creatorSignature: [], recipientSignature: [] },
   editingItemId: null,
@@ -405,6 +407,7 @@ const state = {
   serviceWorkerUpdate: null,
   serviceWorkerUpdateVersion: "",
   serviceWorkerUpdateApplying: false,
+  authSubmitting: false,
   profileDraft: { baseline: "", avatarFile: null, previewUrl: "", removePhoto: false },
   cooking: { session: null, tick: null, wakeLock: null, deepLinked: false, restoreChecked: false, serverOffsetMs: 0, capabilityNotice: "", pantryReceipts: [] },
   destinationCandidates: [],
@@ -556,8 +559,8 @@ async function api(path, options = {}) {
   return body;
 }
 
-function tripCreationRequest(payload) {
-  const fingerprint = JSON.stringify(payload);
+function tripGenerationRequest(payload, { tripId = null } = {}) {
+  const fingerprint = JSON.stringify({ payload, tripId });
   let pending = null;
   try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
   if (!pending || pending.fingerprint !== fingerprint) {
@@ -565,10 +568,30 @@ function tripCreationRequest(payload) {
       key: globalThis.crypto?.randomUUID?.() || `trip-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       fingerprint,
       jobId: null,
+      tripId,
+      payload,
+      failed: false,
     };
     privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
   }
   return pending;
+}
+
+function renderTripGenerationProgress(job = null, fallbackMessage = "你可以继续使用其他页面") {
+  const banner = document.getElementById("tripGenerationBanner");
+  if (!banner) return;
+  if (!job) { banner.hidden = true; return; }
+  const title = document.getElementById("tripGenerationTitle");
+  const message = document.getElementById("tripGenerationMessage");
+  const button = banner.querySelector("button");
+  const failed = job.status === "failed";
+  const running = job.status === "running";
+  banner.dataset.status = failed ? "failed" : running ? "running" : "queued";
+  title.textContent = failed ? "这次旅行方案没有生成成功" : running ? "DeepSeek 正在生成五套旅行方案" : "旅行方案已进入后台队列";
+  message.textContent = failed ? (job.error_message || fallbackMessage || "保留了原有方案，可以直接重试") : running ? "正在整理行程、预算与地点并逐套校验，可继续使用其他页面" : fallbackMessage;
+  button.textContent = failed ? "重试" : "查看";
+  button.dataset.action = failed ? "retry-trip-generation" : "open-trip-generation";
+  banner.hidden = false;
 }
 
 async function waitForTripGeneration(jobId, { timeoutMs = 150000 } = {}) {
@@ -578,12 +601,23 @@ async function waitForTripGeneration(jobId, { timeoutMs = 150000 } = {}) {
     try {
       const job = await api(`/api/v1/trip-generation-jobs/${encodeURIComponent(jobId)}`);
       lastNetworkError = null;
+      renderTripGenerationProgress(job);
       if (job.status === "completed" && job.trip) {
         privateStorage().removeItem("love-trip-generation");
+        renderTripGenerationProgress(null);
         return job.trip;
       }
       if (job.status === "failed" || job.status === "cancelled") {
-        privateStorage().removeItem("love-trip-generation");
+        let pending = null;
+        try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
+        if (pending) {
+          pending.failed = true;
+          pending.error = job.error_message || "旅行方案生成失败，请直接重试";
+          pending.jobId = null;
+          pending.key = globalThis.crypto?.randomUUID?.() || `trip-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
+        }
+        renderTripGenerationProgress({ status: "failed", error_message: job.error_message });
         throw new Error(job.error_message || "旅行方案生成失败，请修改条件后重试");
       }
     } catch (error) {
@@ -595,10 +629,18 @@ async function waitForTripGeneration(jobId, { timeoutMs = 150000 } = {}) {
   throw new Error(lastNetworkError ? "网络暂时中断，旅行仍在后台生成；恢复网络后会自动显示" : "旅行仍在后台生成，可以先使用其他页面，完成后会自动显示");
 }
 
-async function createTripInBackground(payload) {
-  const pending = tripCreationRequest(payload);
+async function queueTripGeneration(payload, { tripId = null } = {}) {
+  const pending = tripGenerationRequest(payload, { tripId });
+  pending.payload = payload;
+  pending.tripId = tripId;
+  pending.failed = false;
+  pending.error = "";
+  privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
   if (!pending.jobId) {
-    const job = await api("/api/v1/trip-generation-jobs", {
+    const endpoint = tripId
+      ? `/api/v1/trips/${encodeURIComponent(tripId)}/generation-jobs`
+      : "/api/v1/trip-generation-jobs";
+    const job = await api(endpoint, {
       method: "POST",
       headers: { "Idempotency-Key": pending.key },
       body: JSON.stringify(payload),
@@ -607,19 +649,26 @@ async function createTripInBackground(payload) {
     privateStorage().setItem("love-trip-generation", JSON.stringify(pending));
     if (job.status === "completed" && job.trip) {
       privateStorage().removeItem("love-trip-generation");
-      return job.trip;
+      renderTripGenerationProgress(null);
+      return job;
     }
+    renderTripGenerationProgress(job);
   }
-  return waitForTripGeneration(pending.jobId);
+  return pending;
 }
 
 async function resumePendingTripGeneration() {
   let pending = null;
   try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
+  if (pending?.failed && !pending?.jobId) {
+    renderTripGenerationProgress({ status: "failed", error_message: pending.error });
+    return;
+  }
   if (!pending?.jobId || !state.data || state.tripGenerationResuming) return;
   state.tripGenerationResuming = true;
+  renderTripGenerationProgress({ status: "queued" });
   try {
-    const trip = await waitForTripGeneration(pending.jobId, { timeoutMs: 150000 });
+    const trip = await waitForTripGeneration(pending.jobId, { timeoutMs: 600000 });
     if (!state.data) return;
     state.data.trip = trip;
     state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)];
@@ -628,7 +677,15 @@ async function resumePendingTripGeneration() {
     renderIdentity(); renderPlan(); renderHotel();
     toast("后台旅行规划已完成，五套方案已经可以查看");
   } catch (error) {
-    if (!/仍在后台生成|网络暂时中断/.test(error.message || "")) toast(error.message);
+    if (!/仍在后台生成|网络暂时中断/.test(error.message || "")) {
+      let latest = null;
+      try { latest = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
+      if (latest?.failed) renderTripGenerationProgress({ status: "failed", error_message: latest.error });
+      else renderTripGenerationProgress(null);
+      toast(error.message);
+    } else {
+      renderTripGenerationProgress({ status: "running" }, error.message);
+    }
   } finally { state.tripGenerationResuming = false; }
 }
 
@@ -655,12 +712,53 @@ function pushSubscriptionPayload(subscription) {
 async function serviceWorkerRegistration() {
   if (!("serviceWorker" in navigator)) throw new Error("当前浏览器不支持后台通知");
   if (!state.serviceWorkerRegistration) {
-    state.serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js");
-    await navigator.serviceWorker.ready;
+    state.serviceWorkerRegistration = await Promise.race([
+      navigator.serviceWorker.register("/sw.js"),
+      new Promise((_, reject) => window.setTimeout(() => reject(new Error("页面版本检查超时")), 1200)),
+    ]);
+    await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(resolve => window.setTimeout(resolve, 800)),
+    ]);
     watchServiceWorkerUpdates(state.serviceWorkerRegistration);
     state.serviceWorkerRegistration.update().catch(() => {});
   }
   return state.serviceWorkerRegistration;
+}
+
+function waitForServiceWorkerInstall(registration, timeout = 1600) {
+  const worker = registration?.installing;
+  if (!worker || ["installed", "activated", "redundant"].includes(worker.state)) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = window.setTimeout(resolve, timeout);
+    worker.addEventListener("statechange", () => {
+      if (!["installed", "activated", "redundant"].includes(worker.state)) return;
+      window.clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
+async function prepareLatestAppShell() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return false;
+  setAuthProgress(12, "正在确认页面版本…");
+  const registration = await serviceWorkerRegistration();
+  await Promise.race([
+    registration.update().catch(() => undefined),
+    new Promise(resolve => window.setTimeout(resolve, 1200)),
+  ]);
+  await waitForServiceWorkerInstall(registration);
+  const worker = registration.waiting;
+  if (!worker || !navigator.serviceWorker.controller) return false;
+  const waitingVersion = await serviceWorkerVersion(worker);
+  if (waitingVersion) sessionStorage.setItem("love-sw-applied-version", waitingVersion);
+  state.serviceWorkerUpdate = worker;
+  state.serviceWorkerUpdateVersion = waitingVersion;
+  state.serviceWorkerUpdateApplying = true;
+  setAuthProgress(28, "发现新版本，正在切换后继续登录…");
+  worker.postMessage({ type: "SKIP_WAITING" });
+  window.setTimeout(() => window.location.reload(), 1800);
+  return true;
 }
 
 function serviceWorkerVersion(worker, timeout = 1200) {
@@ -1559,9 +1657,19 @@ function renderSmartSurface(surface, manifest, message = "") {
     return;
   }
   const nodes = [...manifest.sections, ...manifest.personalOverlay];
+  const assistantNode = nodes.find(node => Array.isArray(node.props?.assistantCards) || Array.isArray(node.props?.quickPrompts));
+  const assistantCards = Array.isArray(assistantNode?.props?.assistantCards) ? assistantNode.props.assistantCards.slice(0, 8) : [];
+  const quickPrompts = Array.isArray(assistantNode?.props?.quickPrompts) ? assistantNode.props.quickPrompts.slice(0, 4) : [];
+  const assistantPanel = assistantCards.length || assistantNode?.props?.assistantAnswer
+    ? `<section class="smart-assistant-response" aria-live="polite"><p>${escapeHtml(assistantNode?.props?.assistantAnswer || "可以直接选择下面的内容继续。")}</p>${assistantCards.length ? `<div class="smart-assistant-cards">${assistantCards.map(card => `<article><span>${escapeHtml(card.badge || (card.kind === "external" ? "外部结果" : "内部数据"))}</span><strong>${escapeHtml(card.title || "查看内容")}</strong><small>${escapeHtml(card.subtitle || "")}</small><button type="button" data-smart-card-open="${escapeHtml(card.open || "couple_overview")}" data-smart-resource-type="${escapeHtml(card.resourceType || "")}" data-smart-resource-id="${escapeHtml(card.resourceId || "")}">查看</button></article>`).join("")}</div>` : ""}</section>`
+    : "";
+  const promptStrip = quickPrompts.length
+    ? `<div class="smart-quick-prompts" aria-label="快捷建议">${quickPrompts.map(prompt => `<button type="button" data-smart-prompt="${escapeHtml(prompt)}" data-smart-prompt-surface="${escapeHtml(surface)}">${escapeHtml(prompt)}</button>`).join("")}</div>`
+    : "";
   const actionLabels = { send_message: "预览发送", select_trip_variant: "预览切换", create_moment: "预览保存", create_calendar_entry: "预览保存", create_wishlist_item: "预览添加" };
   host.innerHTML = `<div class="smart-heading"><span>✦</span><div class="grow"><strong>问恋屿</strong><small>只使用当前页面必要信息 · 写操作先预览</small></div></div>
-    <form class="smart-intent" data-smart-form="${surface}"><input maxlength="500" aria-label="告诉恋屿怎样整理本页" value="${escapeHtml(state.smartIntentDrafts[surface] || "")}" placeholder="${escapeHtml(smartExamples[surface])}"><button>智能整理</button></form>
+    <form class="smart-intent" data-smart-form="${surface}"><input maxlength="500" aria-label="告诉恋屿想查什么或修改什么" value="${escapeHtml(state.smartIntentDrafts[surface] || "")}" placeholder="${escapeHtml(smartExamples[surface])}"><button>发送</button></form>
+    ${promptStrip}${assistantPanel}
     <div class="smart-layout">${nodes.map(node => {
       const writeAction = (node.actions || []).find(action => action.requiresConfirmation);
       return `<article class="smart-node smart-node-open ${writeAction ? "smart-node-write" : "smart-node-read"} ${node.id.endsWith(":personal") ? "smart-personal" : ""}" data-smart-node="${escapeHtml(node.type)}" role="button" tabindex="0" aria-label="查看${escapeHtml(node.props?.title || node.type)}"><div><strong>${escapeHtml(node.props?.title || node.type)}</strong><small>${escapeHtml(node.props?.subtitle || "")}</small></div>${writeAction ? `<button data-smart-action="${escapeHtml(writeAction.id)}">${escapeHtml(actionLabels[writeAction.type] || "查看建议")}</button>` : `<button data-smart-open="${escapeHtml(node.type)}">查看内容</button>`}</article>`;
@@ -1609,13 +1717,26 @@ async function loadSmartSurface(surface, { quiet = false } = {}) {
 async function composeSmartSurface(surface, intent, button) {
   if (!requireOnlineMutation("ai_compose", "智能整理")) return;
   state.composingSmartSurfaces.add(surface);
-  button.disabled = true; button.textContent = "整理中…";
+  button.disabled = true; button.textContent = "处理中…";
   try {
     const immediateTravelDestination = surface === "trip" ? extractTravelDestination(intent) : "";
     if (immediateTravelDestination) {
       state.smartIntentDrafts[surface] = "";
       openTripComposer(immediateTravelDestination);
       toast(`已识别目的地“${immediateTravelDestination}”，请补充日期和预算后生成五套真实方案`);
+      return;
+    }
+    // The travel and life assistants already own real domain tools. Route
+    // natural-language requests to them instead of merely reordering cards.
+    const isLayoutRequest = /(?:只显示|优先显示|整理(?:本页|页面)|隐藏|展开|收起|重新排列)/.test(intent);
+    if (surface === "trip" && state.data?.trip?.id && !isLayoutRequest) {
+      await askTripAssistant(intent);
+      setTripSection("assistant");
+      requestAnimationFrame(() => scrollToContent("#tripAssistantMessages"));
+      return;
+    }
+    if (["home", "life"].includes(surface) && /(?:安排|日历|待办|提醒|想吃|晚餐|午餐|早餐|采购|买菜|购物清单)/.test(intent)) {
+      await submitLifeAssistantIntent(intent);
       return;
     }
     let job = await api(`/api/v1/ui/${surface}/compose`, { method: "POST", body: JSON.stringify({ intent, resourceRefs: [], tripId: surface === "trip" ? state.data?.trip?.id : null }) });
@@ -1644,7 +1765,7 @@ async function composeSmartSurface(surface, intent, button) {
   } catch (error) { toast(error.message); }
   finally {
     state.composingSmartSurfaces.delete(surface);
-    button.disabled = false; button.textContent = "智能整理";
+    button.disabled = false; button.textContent = "发送";
   }
 }
 
@@ -2222,6 +2343,10 @@ function setTripSection(section = "overview", { scroll = true } = {}) {
     loadTripAssistant({ quiet: true }).catch(error => toast(error.message));
   }
   if (state.tripSection === "weather") loadTripWeather({ quiet: true }).catch(error => toast(error.message));
+  if (state.tripSection === "itinerary") {
+    const variant = tripVariant(state.plan);
+    loadItineraryPhotos((variant?.days || []).flatMap(day => day.items || [])).catch(() => {});
+  }
   if (state.tripSection === "tools") {
     if (state.tripToolSection === "expenses") loadTripExpenses({ quiet: true }).catch(error => toast(error.message));
     else loadTripTools({ quiet: true }).catch(error => toast(error.message));
@@ -2647,11 +2772,25 @@ function chatViewportNearBottom(viewport = document.getElementById("messages")) 
   return !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 72;
 }
 
-function scrollChatToLatest({ behavior = "smooth" } = {}) {
+function scrollChatToLatest({ behavior = "smooth", settleMs = 350 } = {}) {
   const viewport = document.getElementById("messages");
   if (!viewport) return;
   delete viewport.dataset.lastUnreadJump;
-  viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+  const settleFor = Math.max(0, Math.min(1600, Number(settleMs) || 0));
+  state.chatHistory.latestLockUntil = Date.now() + settleFor + 300;
+  const landAtLatest = () => {
+    if (state.screen !== "chat") return;
+    if (behavior === "smooth") viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+    else viewport.scrollTop = viewport.scrollHeight;
+  };
+  landAtLatest();
+  // Images, fonts and the iOS keyboard can change the message viewport just
+  // after the click. Repeat the exact landing after layout settles so the
+  // user never stops one card above the newest message.
+  requestAnimationFrame(landAtLatest);
+  [120, 350, 700, 1100, 1400]
+    .filter(delay => delay <= settleFor)
+    .forEach(delay => window.setTimeout(landAtLatest, delay));
   state.chatHistory.newCount = 0;
   state.chatHistory.unreadMessageIds.clear();
   const button = document.getElementById("chatNewMessages");
@@ -3095,7 +3234,7 @@ function openItineraryDetail(itemId) {
       ${itineraryDetailList("这里有什么好玩", details.highlights)}
       <section class="itinerary-reason"><span>为什么推荐</span><p>${escapeHtml(details.recommendation_reason)}</p></section>
       ${itineraryDetailList("实用提醒", details.practical_tips)}
-      ${(details.best_time || details.reservation_note) ? `<div class="itinerary-practical">${details.best_time ? `<p><b>最佳时段</b>${escapeHtml(details.best_time)}</p>` : ""}${details.reservation_note ? `<p><b>预约说明</b>${escapeHtml(details.reservation_note)}</p>` : ""}</div>` : ""}
+      ${(details.best_time || details.reservation_note || details.seasonal_note || details.backup_plan) ? `<div class="itinerary-practical">${details.best_time ? `<p><b>最佳时段</b>${escapeHtml(details.best_time)}</p>` : ""}${details.reservation_note ? `<p><b>预约说明</b>${escapeHtml(details.reservation_note)}</p>` : ""}${details.seasonal_note ? `<p><b>季节提醒</b>${escapeHtml(details.seasonal_note)}</p>` : ""}${details.backup_plan ? `<p><b>天气/停运备选</b>${escapeHtml(details.backup_plan)}</p>` : ""}</div>` : ""}
     ` : `<div class="itinerary-detail-empty"><strong>这条旧行程还没有扩展详情</strong><p>点击旅行页的“重新生成”，模型会把具体活动、好玩亮点和推荐原因一起保存；这里不会用通用硬编码冒充真实介绍。</p></div>`}
     ${dining ? `<section class="itinerary-detail-restaurants"><div class="restaurant-detail-heading"><div><span>NEARBY FOOD</span><h3>附近高分餐厅</h3></div><button data-action="refresh-item-food" data-item-id="${escapeHtml(item.id)}" data-search-area="${escapeHtml(areaHint)}">${restaurants.length ? "重新查询" : "查询真实餐厅"}</button></div><p>仅保留搜索点 5 公里内结果，优先显示高德评分较高的餐厅；公开口碑只展示有具体来源的结果。</p>${restaurants.length ? renderFoodRecommendations(item) : `<div class="restaurant-empty">尚未查询，不会用模型虚构店名。</div>`}${renderRestaurantEvidence(item)}</section>` : ""}
     <div class="shared-detail-actions"><button data-action="open-shared-detail" data-resource-type="itinerary_item" data-id="${escapeHtml(item.id)}">查看双方评论</button></div>
@@ -3131,6 +3270,67 @@ function renderFoodDayArea(day, trip) {
   return `<div class="food-day-area"><label><span>第 ${escapeHtml(day.day_number)} 天用餐区域</span><input value="${escapeHtml(value)}" data-food-area-day="${escapeHtml(day.day_number)}" placeholder="景区、古城、商圈或酒店名称" aria-label="第 ${escapeHtml(day.day_number)} 天用餐区域"></label><button data-action="refresh-food-day" data-day-number="${escapeHtml(day.day_number)}">查本日早中晚餐馆</button><small>只推荐该区域 5 公里内的真实店铺；可让每天使用不同区域。</small></div>`;
 }
 
+function itineraryPhotoApplicable(item) {
+  const type = String(item?.type || "").toLowerCase();
+  const title = String(item?.title || "");
+  if (["meal", "transport", "hotel", "flight", "train"].includes(type)) return false;
+  return !/(早餐|早饭|早点|午餐|午饭|晚餐|晚饭|夜宵|下午茶|餐厅|餐馆|饭店|小吃|用餐|出发|抵达|返程|返回|入住|退房|机场|火车站|高铁站|车站)/.test(title);
+}
+
+function itineraryPhotoNeedsRefresh(item) {
+  const details = item?.details || {};
+  const checkedAt = Date.parse(details.place_photo_checked_at || "");
+  if (!details.place_photo && !details.place_photo_status) return true;
+  if (!Number.isFinite(checkedAt)) return true;
+  const age = Date.now() - checkedAt;
+  if (details.place_photo_status === "unavailable") return age >= 24 * 60 * 60 * 1000;
+  return age >= 7 * 24 * 60 * 60 * 1000;
+}
+
+function renderItineraryPhoto(item) {
+  if (!itineraryPhotoApplicable(item)) return "";
+  const details = item?.details || {};
+  const photo = details.place_photo;
+  if (photo?.url) return `<figure class="route-place-photo" data-trip-photo="${escapeHtml(item.id)}"><img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.place_name || item.title)}实景" loading="lazy" decoding="async"><figcaption>${escapeHtml(photo.source_label || "高德地点实景图")} · ${escapeHtml(photo.place_name || item.title)}</figcaption></figure>`;
+  if (details.place_photo_status === "unavailable") return `<div class="route-place-photo unavailable" data-trip-photo="${escapeHtml(item.id)}"><span>暂无匹配的地点实景图</span></div>`;
+  return `<div class="route-place-photo loading" data-trip-photo="${escapeHtml(item.id)}" aria-label="正在查找地点实景图"><span>正在查找真实地点图片…</span></div>`;
+}
+
+function tripItineraryItem(itemId) {
+  return (state.data?.trip?.variants || []).flatMap(variant => variant.days || []).flatMap(day => day.items || []).find(item => item.id === itemId);
+}
+
+function updateItineraryPhotoNode(item) {
+  const node = document.querySelector(`[data-trip-photo="${CSS.escape(item.id)}"]`);
+  if (!node) return;
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = renderItineraryPhoto(item);
+  if (wrapper.firstElementChild) node.replaceWith(wrapper.firstElementChild);
+}
+
+async function loadItineraryPhotos(items = []) {
+  const tripId = state.data?.trip?.id;
+  if (!tripId || !navigator.onLine || state.screen !== "trip" || state.tripSection !== "itinerary") return;
+  const pending = items.map(sourceItem => tripItineraryItem(sourceItem.id) || sourceItem).filter(item => (
+    itineraryPhotoApplicable(item) && itineraryPhotoNeedsRefresh(item) && !state.tripPhotoRequests.has(item.id)
+  ));
+  pending.forEach(item => state.tripPhotoRequests.add(item.id));
+  for (const item of pending) {
+    try {
+      const result = await api(`/api/v1/trips/${encodeURIComponent(tripId)}/itinerary-items/${encodeURIComponent(item.id)}/photo`, { method: "POST", body: "{}" });
+      item.details = { ...(item.details || {}), place_photo_status: result.status, place_photo_checked_at: new Date().toISOString() };
+      if (result.photo) item.details.place_photo = result.photo;
+      else delete item.details.place_photo;
+      updateItineraryPhotoNode(item);
+    } catch (_error) {
+      const node = document.querySelector(`[data-trip-photo="${CSS.escape(item.id)}"]`);
+      if (node) node.innerHTML = "<span>地点图片暂时无法加载</span>";
+    } finally {
+      state.tripPhotoRequests.delete(item.id);
+    }
+  }
+}
+
 function renderPlan() {
   const variant = tripVariant(state.plan);
   const summary = variant?.summary || "当前旅行还没有生成这套方案，请点击重新生成。";
@@ -3150,10 +3350,15 @@ function renderPlan() {
   document.getElementById("tripVariantCount").textContent = `已保存 ${state.data?.trip?.variants?.length || 0} 套方案`;
   document.getElementById("tripDayTitle").textContent = variant?.name || "完整行程";
   document.getElementById("tripDayMeta").textContent = days.length ? `${days.length} 天 · ${items.length} 个地点 · ${variant.intensity || "节奏待确认"}` : "尚未生成可编辑行程";
-  document.getElementById("itinerary").innerHTML = items.length ? days.map(day => `<section class="itinerary-day"><header><strong>DAY ${escapeHtml(day.day_number)} · ${escapeHtml(day.title)}</strong><small>${escapeHtml(day.date)} · ${escapeHtml(day.intensity || variant.intensity || "")}</small></header>${isFoodPlan ? renderFoodDayArea(day, trip) : ""}${(day.items || []).map(item => {
+  document.getElementById("itinerary").innerHTML = items.length ? days.map(day => {
+    const weather = (day.items || []).map(item => item.details || {}).find(detail => detail.weather_fit || detail.weather_date) || {};
+    const weatherText = weather.weather_fit ? ` · ${weather.weather_fit}` : " · 天气预报暂不可用";
+    return `<section class="itinerary-day"><header><strong>DAY ${escapeHtml(day.day_number)} · ${escapeHtml(day.title)}</strong><small>${escapeHtml(day.date)} · ${escapeHtml(day.intensity || variant.intensity || "")}${escapeHtml(weatherText)}</small></header>${isFoodPlan ? renderFoodDayArea(day, trip) : ""}${(day.items || []).map(item => {
     const selected = state.selectedItemIds.has(item.id);
-    return `<div class="route-item"><time>${escapeHtml(item.start_time)}</time><button class="route-item-detail" data-action="view-itinerary-detail" data-item-id="${escapeHtml(item.id)}" aria-label="查看${escapeHtml(item.title)}的活动和推荐原因"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.note)}</small><em>查看活动、亮点与推荐原因 <b aria-hidden="true">→</b></em></button><button class="mix-toggle ${selected ? "" : "off"}" data-action="toggle-mix" data-item-id="${escapeHtml(item.id)}" aria-pressed="${selected}" aria-label="${escapeHtml(item.title)} ${selected ? "移出" : "加入"}混搭">${selected ? "✓" : "+"}</button></div>${renderFoodRecommendations(item)}`;
-  }).join("")}</section>`).join("") : `<div class="empty-view"><span>⌁</span><h3>这套方案尚未生成</h3><p>点击“AI 重新生成”会创建并保存真实方案。</p><button class="primary-button" data-action="generate-trip">AI 重新生成</button></div>`;
+    return `<div class="route-item"><time>${escapeHtml(item.start_time)}</time><button class="route-item-detail" data-action="view-itinerary-detail" data-item-id="${escapeHtml(item.id)}" aria-label="查看${escapeHtml(item.title)}的活动和推荐原因"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.note)}</small><em>查看活动、亮点与推荐原因 <b aria-hidden="true">→</b></em></button><div class="route-item-actions"><button class="route-edit" data-action="edit-trip-item" data-item-id="${escapeHtml(item.id)}" data-day-number="${escapeHtml(day.day_number)}" aria-label="调整第${escapeHtml(day.day_number)}天的${escapeHtml(item.title)}">✎</button><button class="mix-toggle ${selected ? "" : "off"}" data-action="toggle-mix" data-item-id="${escapeHtml(item.id)}" aria-pressed="${selected}" aria-label="${escapeHtml(item.title)} ${selected ? "移出" : "加入"}混搭">${selected ? "✓" : "+"}</button></div>${renderItineraryPhoto(item)}</div>${renderFoodRecommendations(item)}`;
+  }).join("")}</section>`;
+  }).join("") : `<div class="empty-view"><span>⌁</span><h3>这套方案尚未生成</h3><p>点击“AI 重新生成”会创建并保存真实方案。</p><button class="primary-button" data-action="generate-trip">AI 重新生成</button></div>`;
+  if (state.screen === "trip" && state.tripSection === "itinerary") loadItineraryPhotos(items).catch(() => {});
   const adoptedStyle = trip?.active_variant;
   document.querySelectorAll(".plan-tabs button").forEach(btn => {
     const item = tripVariant(btn.dataset.plan);
@@ -3188,7 +3393,7 @@ function renderPlan() {
   const missingAreas = isFoodPlan ? days.filter(day => !foodAreaForDay(day, trip)).map(day => day.day_number) : [];
   if (isFoodPlan) foodNotice.textContent = missingAreas.length ? `请先填写第 ${missingAreas.join("、")} 天所在的景区、古城、商圈或酒店；每一天可以不同，避免跨城推荐。` : restaurantCount ? `已保存 ${restaurantCount} 个真实店铺候选。每天都有早餐、午餐和晚餐，可分别选择一家；选择后双方需要重新确认。` : "每一天都会查询早餐、午餐和晚餐，并在本日区域 5 公里内给出多家真实特色店。";
   document.getElementById("mixCount").textContent = state.selectedItemIds.size;
-  state.editingItemId = items[1]?.id || items[0]?.id || null;
+  if (!items.some(item => item.id === state.editingItemId)) state.editingItemId = items[0]?.id || null;
 }
 
 function prefillQuoteForms(trip) {
@@ -3582,15 +3787,51 @@ function tripAssistantCard(card) {
   if (card.type === "hotel_quote") {
     const source = card.source_mode === "cached" || card.stale ? "缓存结果" : card.source_mode === "mock" ? "模拟报价" : "实时查询";
     const originalTitle = card.original_title && card.original_title !== card.title ? `<small>英文原名：${escapeHtml(card.original_title)}</small>` : "";
-    return `<article class="assistant-result-card"><span class="mock-badge">${escapeHtml(source)}</span><strong>${escapeHtml(card.title || "酒店")}</strong>${originalTitle}<small>${escapeHtml(card.subtitle || "")}</small><b>${money(card.amount_cents)}</b><p>${escapeHtml(card.terms || "最终价格和库存以预订平台为准")}</p><div class="assistant-card-meta"><span>${escapeHtml(card.provider || "未知来源")}</span><span>${card.includes_tax ? "税费说明见平台" : "可能未含税费"}</span></div><div class="assistant-card-actions"><button data-action="assistant-select-quote" data-quote-id="${escapeHtml(card.quote_id)}">选择这个</button>${quoteBookingLink(card, "去平台查看")}</div></article>`;
+    const selectLabel = card.selection_mode === "replace" ? "换成这家酒店" : "选择这个";
+    return `<article class="assistant-result-card"><span class="mock-badge">${escapeHtml(source)}</span><strong>${escapeHtml(card.title || "酒店")}</strong>${originalTitle}<small>${escapeHtml(card.subtitle || "")}</small><b>${money(card.amount_cents)}</b><p>${escapeHtml(card.terms || "最终价格和库存以预订平台为准")}</p><div class="assistant-card-meta"><span>${escapeHtml(card.provider || "未知来源")}</span><span>${card.includes_tax ? "税费说明见平台" : "可能未含税费"}</span></div><div class="assistant-card-actions"><button data-action="assistant-select-quote" data-quote-id="${escapeHtml(card.quote_id)}">${selectLabel}</button>${quoteBookingLink(card, "去平台查看")}</div></article>`;
   }
   if (card.type === "restaurant") {
     const meta = [card.rating != null ? `${Number(card.rating).toFixed(1)} 分` : "暂无评分", card.distance_meters != null ? `${Number(card.distance_meters)} 米` : "距离待确认", card.average_cost_cents ? `人均约 ${money(card.average_cost_cents)}` : "人均待确认"];
-    return `<article class="assistant-result-card"><span class="mock-badge">第 ${Number(card.day_number)} 天 · ${escapeHtml(({ breakfast: "早餐", lunch: "午餐", snack: "下午茶", dinner: "晚餐" })[card.meal_type] || "用餐")}</span><strong>${escapeHtml(card.name || "餐厅")}</strong><small>${escapeHtml(card.address || card.category || "")}</small><div class="assistant-card-meta">${meta.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</div><div class="assistant-card-actions"><button data-action="assistant-select-food" data-food-id="${escapeHtml(card.recommendation_id)}">加入行程</button>${card.navigation_url ? `<a href="${escapeHtml(card.navigation_url)}" target="_blank" rel="noopener">高德导航</a>` : ""}</div></article>`;
+    const selectLabel = card.selection_mode === "replace" ? "换成这家餐厅" : "加入行程";
+    return `<article class="assistant-result-card"><span class="mock-badge">第 ${Number(card.day_number)} 天 · ${escapeHtml(({ breakfast: "早餐", lunch: "午餐", snack: "下午茶", dinner: "晚餐" })[card.meal_type] || "用餐")}</span><strong>${escapeHtml(card.name || "餐厅")}</strong><small>${escapeHtml(card.address || card.category || "")}</small><div class="assistant-card-meta">${meta.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</div><div class="assistant-card-actions"><button data-action="assistant-select-food" data-food-id="${escapeHtml(card.recommendation_id)}">${selectLabel}</button>${card.navigation_url ? `<a href="${escapeHtml(card.navigation_url)}" target="_blank" rel="noopener">高德导航</a>` : ""}</div></article>`;
+  }
+  if (card.type === "place_result") {
+    const latitude = Number(card.latitude); const longitude = Number(card.longitude);
+    const mapUrl = Number.isFinite(latitude) && Number.isFinite(longitude) && (latitude || longitude)
+      ? `https://uri.amap.com/marker?position=${encodeURIComponent(`${longitude},${latitude}`)}&name=${encodeURIComponent(card.name || "地点")}`
+      : "";
+    const dayButtons = (card.day_options || []).slice(0, 8).map(day => `<button type="button" data-assistant-prompt="把${escapeHtml(card.name || "这个地点")}加入第${Number(day)}天行程" data-assistant-auto-submit="1">加入第 ${Number(day)} 天</button>`).join("");
+    return `<article class="assistant-result-card"><span class="mock-badge">${escapeHtml(card.provider || "地点服务")}</span><strong>${escapeHtml(card.name || "附近地点")}</strong><small>${escapeHtml(card.address || "地址待确认")}</small><p>${escapeHtml(card.category || "景点与活动")}</p><div class="assistant-card-actions">${mapUrl ? `<a href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener">在高德查看</a>` : ""}${dayButtons || `<button type="button" data-assistant-prompt="把${escapeHtml(card.name || "这个地点")}加入行程" data-assistant-auto-submit="1">选择加入日期</button>`}</div></article>`;
+  }
+  if (card.type === "indoor_place_option" || card.type === "place_replacement_option") {
+    const latitude = Number(card.latitude); const longitude = Number(card.longitude);
+    const mapUrl = Number.isFinite(latitude) && Number.isFinite(longitude) && (latitude || longitude)
+      ? `https://uri.amap.com/marker?position=${encodeURIComponent(`${longitude},${latitude}`)}&name=${encodeURIComponent(card.name || "室内地点")}`
+      : "";
+    const status = card.status || "draft";
+    const actionArea = status === "confirmed"
+      ? '<span class="assistant-action-status">✓ 已替换并保存地图地点</span>'
+      : status === "cancelled" || status === "expired"
+        ? `<span class="assistant-action-status muted">${status === "expired" ? "选择已过期" : "已取消"}</span>`
+        : `<button data-action="assistant-confirm-change" data-draft-id="${escapeHtml(card.draft_id)}">替换这个地点</button><button data-action="assistant-cancel-change" data-draft-id="${escapeHtml(card.draft_id)}">保留原安排</button>`;
+    const badge = card.replacement_kind === "indoor" ? "雨天室内备选" : "地点替换备选";
+    return `<article class="assistant-result-card indoor-place-option-card"><span class="mock-badge">${badge} · 第 ${Number(card.day_number)} 天</span><strong>${escapeHtml(card.name || "备选地点")}</strong><small>${escapeHtml(card.address || "地址待确认")}</small><p>${escapeHtml(card.category || "景点与活动")} · 将替换「${escapeHtml(card.replace_title || "原行程")}」</p><div class="assistant-card-meta"><span>${escapeHtml(card.provider || "地点服务")}</span><span>确认后才修改</span></div><div class="assistant-card-actions">${mapUrl ? `<a href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener">查看地点</a>` : ""}${actionArea}</div></article>`;
+  }
+  if (card.type === "itinerary_item_choice") {
+    return `<article class="assistant-result-card"><span class="mock-badge">选择原行程 · 第 ${Number(card.day_number)} 天</span><strong>${escapeHtml(card.title || "行程项目")}</strong><small>${escapeHtml(card.start_time || "时间待确认")}</small><p>点选后会查询同一旅行地区的真实替代地点，不会立即修改。</p><div class="assistant-card-actions"><button type="button" data-assistant-prompt="${escapeHtml(card.prompt || "")}" data-assistant-auto-submit="1">替换这一项</button></div></article>`;
   }
   if (card.type === "plan_variant") {
     const label = ({ slow: "松弛浪漫", classic: "经典充实", value: "性价比", food: "美食寻味", nature: "自然治愈" })[card.style] || card.style;
     return `<article class="assistant-result-card"><span class="mock-badge">${escapeHtml(label)}</span><strong>${escapeHtml(card.name || "旅行方案")}</strong><p>${escapeHtml(card.summary || "")}</p><div class="assistant-card-meta"><span>${money(card.estimated_budget_cents)}</span><span>${escapeHtml(card.intensity || "")}</span><span>${Number(card.transport_minutes || 0)} 分钟交通</span><span>${Number(card.day_count || 0)} 天</span></div><div class="assistant-card-actions"><button data-action="assistant-open-plan" data-style="${escapeHtml(card.style)}">查看方案</button></div></article>`;
+  }
+  if (card.type === "itinerary_add") {
+    const status = card.status || "draft";
+    const actionArea = status === "confirmed"
+      ? `<span class="assistant-action-status">✓ 已加入共同旅行</span>`
+      : status === "cancelled"
+        ? `<span class="assistant-action-status muted">已取消</span>`
+        : `<button data-action="assistant-confirm-change" data-draft-id="${escapeHtml(card.draft_id)}">确认加入</button><button data-action="assistant-cancel-change" data-draft-id="${escapeHtml(card.draft_id)}">取消</button>`;
+    return `<article class="assistant-result-card"><span class="mock-badge">新增预览 · 第 ${Number(card.day_number)} 天</span><strong>${escapeHtml(card.title || "新增行程")}</strong><small>${escapeHtml(card.after?.start_time || "15:00")} · 约 ${Number(card.after?.duration_minutes || 90)} 分钟</small><p>确认后才会加入共同旅行，并生成可恢复的版本记录。</p><div class="assistant-card-actions">${actionArea}</div></article>`;
   }
   if (card.type === "itinerary_change") {
     const before = Object.entries(card.before || {}).map(([key, value]) => `${key}: ${value ?? "—"}`).join(" · ");
@@ -3637,7 +3878,16 @@ function tripAssistantCard(card) {
         : `<button data-action="assistant-recap-edit" data-draft-id="${escapeHtml(card.id)}" data-version="${Number(card.version || 1)}">编辑草稿</button><button data-action="assistant-recap-confirm" data-draft-id="${escapeHtml(card.id)}">确认进入时光轴</button><button data-action="assistant-recap-cancel" data-draft-id="${escapeHtml(card.id)}">取消</button>`;
     return `<article class="assistant-result-card trip-recap-card"><span class="mock-badge">${card.is_early ? "提前草稿" : "旅行回忆草稿"}</span><strong>${escapeHtml(card.title || "我们的旅行回忆")}</strong><div class="trip-recap-body">${body}</div><p>${escapeHtml(card.notice || "确认后才会进入双方时光轴。")}</p><div class="assistant-card-actions">${actionArea}</div></article>`;
   }
-  if (card.type === "clarification") return `<article class="assistant-result-card"><p>${escapeHtml(card.message || "请补充旅行日期、预算或餐次。")}</p></article>`;
+  if (card.type === "suggestion_set") {
+    const options = (card.options || []).slice(0, 8).map(option => `<button type="button" data-assistant-prompt="${escapeHtml(option.prompt || option.label || "")}" data-assistant-auto-submit="1">${escapeHtml(option.label || "继续")}</button>`).join("");
+    return `<article class="assistant-result-card assistant-suggestion-card"><strong>${escapeHtml(card.message || "请选择下一步")}</strong><div class="assistant-card-actions assistant-choice-actions">${options}</div></article>`;
+  }
+  if (card.type === "clarification") {
+    const options = (card.options || []).slice(0, 8).map(option => option.action
+      ? `<button type="button" data-action="${escapeHtml(option.action)}">${escapeHtml(option.label || "继续")}</button>`
+      : `<button type="button" data-assistant-prompt="${escapeHtml(option.prompt || option.label || "")}" data-assistant-auto-submit="1">${escapeHtml(option.label || "继续")}</button>`).join("");
+    return `<article class="assistant-result-card assistant-clarification-card"><strong>需要你确认一下</strong><p>${escapeHtml(card.message || "请补充旅行日期、预算或餐次。")}</p>${options ? `<div class="assistant-card-actions assistant-choice-actions">${options}</div>` : ""}</article>`;
+  }
   return "";
 }
 
@@ -3684,6 +3934,22 @@ async function loadTripAssistant({ quiet = false } = {}) {
 
 function currentEditingTripItem() {
   return (state.data?.trip?.variants || []).flatMap(variant => variant.days || []).flatMap(day => day.items || []).find(item => item.id === state.editingItemId) || null;
+}
+
+function openTripItemEditor(itemId, dayNumber = null) {
+  if (itemId) state.editingItemId = itemId;
+  const context = itineraryItemContext(state.editingItemId);
+  const item = context?.item || currentEditingTripItem();
+  if (!item) { toast("当前方案还没有可调整的行程项目"); return; }
+  const resolvedDay = dayNumber || context?.day?.day_number || "";
+  state.pendingRevision = null;
+  document.getElementById("editModalTitle").textContent = resolvedDay ? `调整第 ${resolvedDay} 天 · ${item.title}` : `调整行程 · ${item.title}`;
+  document.getElementById("editItemTitle").value = item.title || "";
+  document.getElementById("editItemTime").value = item.start_time || "09:00";
+  document.getElementById("editItemNote").value = item.note || "";
+  document.getElementById("revisionPreview").hidden = true;
+  const applyButton = document.getElementById("applyRevisionButton"); applyButton.hidden = true; applyButton.disabled = true;
+  openModal("editModal");
 }
 
 function renderHotel() {
@@ -4688,16 +4954,13 @@ function renderProfileHistory(history) {
   host.innerHTML = items.length ? items.map(item => `<article class="device-row profile-history-row"><span class="avatar" data-avatar-theme="${avatarTheme(item)}">${escapeHtml(item.actor_avatar_label || item.actor_name?.slice(0, 1) || "♡")}</span><div class="grow"><strong>${escapeHtml(item.mine ? "我" : item.actor_name)}修改了${escapeHtml((item.changed_fields || []).join("、") || "个人资料")}</strong><small>${new Date(item.created_at).toLocaleString("zh-CN")}</small></div></article>`).join("") : `<p class="form-note">还没有资料修改记录。</p>`;
 }
 
-async function loadAccountCenter() {
-  const [result, media, trash, profileHistory] = await Promise.all([
-    api("/api/v1/account/devices"), api("/api/v1/media"), api("/api/v1/media/trash"), api("/api/v1/account/profile-history?limit=30"),
-  ]);
-  const [privacyResult, offlineResult] = await Promise.allSettled([
-    api("/api/v1/account/privacy"), listOfflineMutationsForAccount(),
-  ]);
-  const privacy = privacyResult.status === "fulfilled" ? privacyResult.value : { error: "AI 用量与授权暂时无法读取，请稍后重试。" };
-  const offlineQueue = offlineResult.status === "fulfilled" ? offlineResult.value : { supported: true, error: "离线待同步记录暂时无法读取；没有删除任何内容。", items: [] };
+function renderAccountIdentity() {
   const user = state.data?.user; const partner = state.data?.partner;
+  if (user?.id && state.accountCenter.ownerUserId !== user.id) {
+    state.accountCenter.ownerUserId = user.id;
+    state.accountCenter.loaded.clear();
+    state.accountCenter.loading.clear();
+  }
   const identityCard = document.getElementById("accountIdentityCard");
   if (identityCard && user && partner) {
     identityCard.innerHTML = `<span class="avatar" data-avatar-theme="${avatarTheme(user)}" aria-label="我的头像：${escapeHtml(user.nickname)}">${avatarIdentityHtml(user)}</span><div><small>我 · 当前登录账号</small><strong>${escapeHtml(user.nickname)}（${escapeHtml(user.username)}）</strong><span>伴侣 · ${escapeHtml(partner.nickname)}（${escapeHtml(partner.username)}）</span></div>`;
@@ -4711,16 +4974,59 @@ async function loadAccountCenter() {
     const layoutInput = document.querySelector(`#themeProfileForm input[name="layoutMode"][value="${normalizeLayoutMode(user.ui_layout_mode)}"]`);
     if (layoutInput) layoutInput.checked = true;
   }
-  document.getElementById("deviceList").innerHTML = result.items.map(item => `<article class="device-row"><div class="grow"><strong>${escapeHtml(item.device_name)}</strong><small>${item.current ? "当前设备 · " : ""}${new Date(item.last_seen_at).toLocaleString("zh-CN")} · ${escapeHtml(item.ip_address || "未知地址")}</small></div>${!item.current && item.active ? `<button data-action="revoke-device" data-id="${item.id}">撤销</button>` : `<span class="mock-badge">${item.active ? "当前" : "已失效"}</span>`}</article>`).join("");
+}
+
+function showAccountSection(section = "overview") {
+  const allowed = new Set(["overview", "profile", "appearance", "notifications", "privacy", "security"]);
+  const next = allowed.has(section) ? section : "overview";
+  state.accountCenter.section = next;
+  const menu = document.getElementById("accountCenterMenu");
+  if (menu) menu.hidden = next !== "overview";
+  document.querySelectorAll("[data-account-panel]").forEach(panel => { panel.hidden = panel.dataset.accountPanel !== next; });
+  const sheet = document.querySelector("#accountModal .scroll-sheet");
+  if (sheet) sheet.scrollTop = 0;
+}
+
+async function loadAccountSection(section, { force = false } = {}) {
+  if (["overview", "appearance", "security"].includes(section)) return;
+  if (!force && state.accountCenter.loaded.has(section)) return;
+  if (state.accountCenter.loading.has(section)) return;
+  state.accountCenter.loading.add(section);
+  let completed = true;
+  try {
+    if (section === "profile") {
+      renderProfileHistory(await api("/api/v1/account/profile-history?limit=30"));
+    } else if (section === "notifications") {
+      const result = await api("/api/v1/account/devices");
+      document.getElementById("deviceList").innerHTML = result.items.map(item => `<article class="device-row"><div class="grow"><strong>${escapeHtml(item.device_name)}</strong><small>${item.current ? "当前设备 · " : ""}${new Date(item.last_seen_at).toLocaleString("zh-CN")} · ${escapeHtml(item.ip_address || "未知地址")}</small></div>${!item.current && item.active ? `<button data-action="revoke-device" data-id="${item.id}">撤销</button>` : `<span class="mock-badge">${item.active ? "当前" : "已失效"}</span>`}</article>`).join("");
+      refreshPushStatus({ resync: true }).catch(error => renderPushStatus(error.message, "warning"));
+      refreshPushDiagnostics().catch(error => { const host = document.getElementById("pushDiagnostics"); if (host) host.innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`; });
+    } else if (section === "privacy") {
+      const [mediaResult, trashResult, privacyResult, offlineResult] = await Promise.allSettled([
+        api("/api/v1/media"), api("/api/v1/media/trash"), api("/api/v1/account/privacy"), listOfflineMutationsForAccount(),
+      ]);
+      completed = [mediaResult, trashResult, privacyResult, offlineResult].every(result => result.status === "fulfilled");
+      const media = mediaResult.status === "fulfilled" ? mediaResult.value : { items: [] };
+      const trash = trashResult.status === "fulfilled" ? trashResult.value : { items: [] };
+      const privacy = privacyResult.status === "fulfilled" ? privacyResult.value : { error: "AI 用量与授权暂时无法读取，请稍后重试。" };
+      const offlineQueue = offlineResult.status === "fulfilled" ? offlineResult.value : { supported: true, error: "离线待同步记录暂时无法读取；没有删除任何内容。", items: [] };
   const mediaRow = item => `<article class="account-media-row">${["image", "video"].includes(item.kind) ? `<span class="media-preview-wrap"><img src="${escapeHtml(item.thumbnail_url)}" alt="" loading="lazy">${item.kind === "video" ? `<i aria-hidden="true">▶</i>` : ""}</span>` : `<span class="media-kind">♫</span>`}<div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${item.visibility === "private" ? "仅自己" : item.visibility === "delayed" ? "延时公开" : "双方可见"} · ${(Number(item.size_bytes) / 1024 / 1024).toFixed(1)} MB${item.metadata_stripped ? " · 隐私信息已清理" : ""}</small></div>${item.owner_id === state.data?.user?.id ? `<button data-action="trash-media" data-id="${item.id}">清理</button>` : ""}</article>`;
   document.getElementById("accountMediaList").innerHTML = media.items.length ? media.items.map(mediaRow).join("") : `<p class="form-note">还没有上传媒体。</p>`;
   document.getElementById("accountMediaTrash").innerHTML = trash.items.length ? trash.items.map(item => `<article class="account-media-row"><div class="grow"><strong>${escapeHtml(item.original_name)}</strong><small>${new Date(item.deleted_at).toLocaleString("zh-CN")}</small></div><button data-action="restore-media" data-id="${item.id}" data-version="${item.version}">恢复</button><button class="danger-text" data-action="purge-media" data-id="${item.id}">永久删除</button></article>`).join("") : `<p class="form-note">回收站为空。</p>`;
-  renderProfileHistory(profileHistory);
   renderAccountPrivacy(privacy);
   renderOfflineSyncStatus(offlineQueue);
+    }
+    if (completed) state.accountCenter.loaded.add(section);
+    else state.accountCenter.loaded.delete(section);
+  } finally {
+    state.accountCenter.loading.delete(section);
+  }
+}
+
+async function loadAccountCenter() {
+  renderAccountIdentity();
+  showAccountSection("overview");
   openModal("accountModal");
-  refreshPushStatus({ resync: true }).catch(error => renderPushStatus(error.message, "warning"));
-  refreshPushDiagnostics().catch(error => { const host = document.getElementById("pushDiagnostics"); if (host) host.innerHTML = `<p class="form-note">${escapeHtml(error.message)}</p>`; });
 }
 
 function lifeAssistantCountLabel(key) {
@@ -5161,7 +5467,9 @@ function setAuthProgress(percent, message, { busy = true } = {}) {
   progress.hidden = !busy;
   bar.style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
   label.textContent = message || "正在打开共同空间…";
-  submit.disabled = busy;
+  document.querySelectorAll("#authForm input, #authSubmit, [data-auth-mode]").forEach(control => {
+    control.disabled = busy;
+  });
   submit.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
@@ -5195,6 +5503,7 @@ function showAccountAuth(mode = "login") {
     : "这座恋屿已经关闭公开注册，请使用现有的两个账号登录。需要更换账号时，由管理员临时开启注册。";
   document.getElementById("authSubmit").textContent = mode === "register" ? "创建恋屿账号" : "登录";
   document.getElementById("authPassword").autocomplete = mode === "register" ? "new-password" : "current-password";
+  setAuthProgress(0, "", { busy: false });
 }
 
 function showPairing() {
@@ -5216,6 +5525,7 @@ function hideAuth() {
 
 async function initializeAuth() {
   try {
+    setAuthProgress(36, "正在确认登录状态…");
     const result = await api("/api/v1/auth/me");
     renderEntryNotice(result.entry);
     state.registrationEnabled = result.registration_enabled !== false;
@@ -5227,6 +5537,27 @@ async function initializeAuth() {
     if (!restored) showAccountAuth();
     toast(restored ? "当前显示最近保存的离旅行程" : error.message);
   }
+}
+
+async function confirmAuthenticatedSession(expectedUserId) {
+  let lastError = null;
+  for (const delay of [0, 80, 180]) {
+    if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
+    try {
+      const session = await api("/api/v1/auth/me");
+      if (session.authenticated && session.user?.id === expectedUserId) return session;
+    } catch (error) { lastError = error; }
+  }
+  throw lastError || new Error("登录状态没有保存成功，请检查网络后重试");
+}
+
+async function initializeApplication() {
+  try {
+    if (await prepareLatestAppShell()) return;
+  } catch (_) {
+    // Version checks must never prevent an offline-capable login attempt.
+  }
+  await initializeAuth();
 }
 
 function toast(message, action = null) {
@@ -6100,7 +6431,10 @@ function openEntertainmentTool(tool) {
   document.getElementById("playHubPanel").hidden = true;
   const panelId = { beads: "beadToolPanel", wheel: "wheelToolPanel", cards: "cardToolPanel" }[tool];
   document.querySelectorAll(".play-tool").forEach(panel => { panel.hidden = panel.id !== panelId; });
-  if (tool === "beads") renderSavedBeadPatterns();
+  if (tool === "beads") {
+    renderSavedBeadPatterns(); loadBeadAiVersions({ quiet: true }).catch(() => {}); prepareBeadSmartMode();
+    loadBeadPaletteCatalogs().catch(error => toast(`拼豆色卡读取失败：${error.message}`));
+  }
   else if (tool === "wheel") loadCoupleWheel().catch(error => toast(error.message));
   else loadCoupleCards().catch(error => toast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -6190,7 +6524,7 @@ function applyCardVisual(node, style = {}) {
   const sticker = node.matches(".card-kitty-sticker") ? node : node.querySelector(".card-kitty-sticker");
   if (!sticker) return;
   const index = Number(style.sticker_index || 0), sheet = Math.max(1, Math.min(4, Math.floor(index / 6) + 1)), local = Math.max(0, Math.min(5, index % 6));
-  sticker.style.backgroundImage = `url("/api/v1/theme-assets/kitty-couple-cards-${sheet}-v2.webp")`;
+  sticker.style.backgroundImage = `url("/api/v1/theme-assets/kitty-couple-cards-${sheet}-v3.webp")`;
   sticker.style.backgroundSize = "300% 200%";
   sticker.style.backgroundPosition = `${(local % 3) * 50}% ${Math.floor(local / 3) * 100}%`;
 }
@@ -6198,9 +6532,10 @@ function applyRenderedCardStyles(root = document) {
   const styles = new Map((state.cards.data?.styles || []).map(item => [item.id, item]));
   root.querySelectorAll("[data-card-style-id]").forEach(node => applyCardVisual(node, styles.get(node.dataset.cardStyleId) || {}));
 }
-function coupleCardFace({ style = {}, title = "双人卡", message = "", eyebrow = "LOVE MOMENTS · 双人珍藏", status = "等待双方签名", serial = "PREVIEW" } = {}) {
+function coupleCardFace({ style = {}, title = "双人卡", message = "", recipientMessage = "", eyebrow = "LOVE MOMENTS · 双人珍藏", status = "等待双方签名", serial = "PREVIEW" } = {}) {
   const pattern = String(style.pattern || "letter").replace(/[^a-z_]/g, "");
-  return `<div class="signed-card-face" data-card-pattern="${escapeHtml(pattern)}" data-card-style-id="${escapeHtml(style.id || "wish")}"><span class="card-foil-corner" aria-hidden="true">✦</span><span class="card-kitty-sticker" aria-hidden="true">♡</span><header class="card-certificate-head"><small>${escapeHtml(eyebrow)}</small><em>NO. ${escapeHtml(serial)}</em></header><div class="card-ribbon">OUR LITTLE PROMISE</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p><footer class="card-certificate-foot"><b>${escapeHtml(status)}</b><span>♡ 由我们共同签署与珍藏</span></footer></div>`;
+  const reply = recipientMessage ? `<blockquote class="card-recipient-message"><small>TA 的回信</small><span>${escapeHtml(recipientMessage)}</span></blockquote>` : "";
+  return `<div class="signed-card-face" data-card-pattern="${escapeHtml(pattern)}" data-card-style-id="${escapeHtml(style.id || "wish")}"><span class="card-envelope-flap" aria-hidden="true"></span><span class="card-envelope-fold card-envelope-fold-left" aria-hidden="true"></span><span class="card-envelope-fold card-envelope-fold-right" aria-hidden="true"></span><span class="card-lace-edge" aria-hidden="true"></span><span class="card-kitty-sticker" aria-hidden="true">♡</span><article class="card-letter-sheet"><header class="card-certificate-head"><small>${escapeHtml(eyebrow)}</small><em>NO. ${escapeHtml(serial)}</em></header><div class="card-ribbon">A LETTER, JUST FOR YOU</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p>${reply}<footer class="card-certificate-foot"><b>${escapeHtml(status)}</b><span>♡ 写给我们，也只由我们珍藏</span></footer></article><span class="card-wax-seal" aria-hidden="true"><i>LM</i></span><span class="card-foil-corner" aria-hidden="true">✦</span></div>`;
 }
 function selectedCardTemplate() { return state.cards.data?.templates?.find(item => item.id === state.cards.templateId); }
 function selectedCardStyle() { return state.cards.data?.styles?.find(item => item.id === state.cards.styleId); }
@@ -6210,11 +6545,12 @@ function renderCoupleCards() {
   templates.innerHTML = data.templates.map(item => `<button type="button" class="card-template-choice${item.id === state.cards.templateId ? " active" : ""}" data-card-template="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.prompt)}</small></button>`).join("");
   styles.innerHTML = data.styles.map(item => `<button type="button" class="card-style-choice${item.id === state.cards.styleId ? " active" : ""}" data-card-style="${escapeHtml(item.id)}" data-card-style-id="${escapeHtml(item.id)}"><span class="card-kitty-sticker" aria-hidden="true">♡</span><strong>${escapeHtml(item.name)}</strong><small>${item.family === "girl" ? "女生系" : item.family === "boy" ? "男生系" : "中性系"}</small></button>`).join("");
   const template = selectedCardTemplate(), style = selectedCardStyle();
-  document.getElementById("customCardTitleField").hidden = state.cards.templateId !== "custom";
+  const title = document.getElementById("customCardTitle");
   const message = document.getElementById("coupleCardMessage"); if (!message.dataset.edited) message.value = template?.prompt || "";
-  document.getElementById("cardLivePreview").innerHTML = coupleCardFace({ style, eyebrow: style?.name || "Kitty 卡面", title: state.cards.templateId === "custom" ? document.getElementById("customCardTitle").value || "自定义卡" : template?.name || "双人卡", message: message.value || template?.prompt || "" });
+  if (!title.dataset.edited) title.value = template?.name || "双人卡";
+  document.getElementById("cardLivePreview").innerHTML = coupleCardFace({ style, eyebrow: style?.name || "Kitty 卡面", title: title.value || template?.name || "双人卡", message: message.value || template?.prompt || "" });
   document.getElementById("cardPendingCount").textContent = data.pending_for_me ? `${data.pending_for_me} 张待我签` : "";
-  list.innerHTML = data.cards.length ? data.cards.map(card => `<article class="saved-couple-card">${coupleCardFace({ style: card.style, eyebrow: card.style_name, title: card.title, message: card.message, status: card.status === "signed" ? "双方已签名 · 永久收藏" : card.can_sign ? "等待我签名" : "等待 TA 签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<div class="saved-card-meta"><span>${escapeHtml(card.creator_name)} → ${escapeHtml(card.recipient_name)}</span><span>${escapeHtml(new Date(card.created_at).toLocaleString("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }))}</span></div><p class="card-safety-note">${escapeHtml(card.template_notice)}</p><div class="saved-card-actions">${card.can_sign ? `<button type="button" class="primary-button" data-action="open-card-sign" data-id="${escapeHtml(card.id)}">查看并签名</button>` : ""}${card.can_download ? `<a class="secondary-button" href="/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/pdf" download>下载珍藏版 PDF</a>` : ""}</div></article>`).join("") : '<div class="empty-view"><p>制作第一张卡，等 TA 签名后就能永久收藏。</p></div>';
+  list.innerHTML = data.cards.length ? data.cards.map(card => `<article class="saved-couple-card">${coupleCardFace({ style: card.style, eyebrow: card.style_name, title: card.title, message: card.message, recipientMessage: card.recipient_message, status: card.status === "signed" ? "双方已签名 · 永久收藏" : card.can_sign ? "等待我签名" : "等待 TA 签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<div class="saved-card-meta"><span>${escapeHtml(card.creator_name)} → ${escapeHtml(card.recipient_name)}</span><span>${escapeHtml(new Date(card.created_at).toLocaleString("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }))}</span></div><p class="card-safety-note">${escapeHtml(card.template_notice)}</p><div class="saved-card-actions">${card.can_sign ? `<button type="button" class="primary-button" data-action="open-card-sign" data-id="${escapeHtml(card.id)}">查看并签名</button>` : ""}${card.can_download ? `<a class="secondary-button" href="/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/pdf" download>下载珍藏版 PDF</a>` : ""}</div></article>`).join("") : '<div class="empty-view"><p>制作第一张卡，等 TA 签名后就能永久收藏。</p></div>';
   applyRenderedCardStyles(document.getElementById("cardToolPanel"));
 }
 async function loadCoupleCards({ quiet = false } = {}) {
@@ -6235,11 +6571,15 @@ function prepareSignatureCanvas(kind) {
   canvas.addEventListener("pointermove", event => { if (!drawing) return; signatureState(kind).at(-1).push(point(event)); renderSignature(kind); });
   const stop = () => { drawing = false; }; canvas.addEventListener("pointerup", stop); canvas.addEventListener("pointercancel", stop); canvas.addEventListener("pointerleave", stop); renderSignature(kind);
 }
+function renderCardSignSummary(card) {
+  const recipientMessage = document.getElementById("cardRecipientMessage")?.value.trim() || "";
+  document.getElementById("cardSignSummary").innerHTML = `${coupleCardFace({ style: card.style, eyebrow: `${card.creator_name} 发给你`, title: card.title, message: card.message, recipientMessage, status: "等待你的珍贵签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<p class="card-safety-note">${escapeHtml(card.template_notice)}</p>`;
+  applyCardVisual(document.querySelector("#cardSignSummary .signed-card-face"), card.style);
+}
 function openCardSign(cardId) {
   const card = state.cards.data?.cards?.find(item => item.id === cardId); if (!card?.can_sign) { toast("这张卡当前不需要你签名"); return; }
   state.cards.signingId = cardId; state.cards.recipientSignature = [];
-  document.getElementById("cardSignSummary").innerHTML = `${coupleCardFace({ style: card.style, eyebrow: `${card.creator_name} 发给你`, title: card.title, message: card.message, status: "等待你的珍贵签名", serial: String(card.id || "").slice(-10).toUpperCase() })}<p class="card-safety-note">${escapeHtml(card.template_notice)}</p>`;
-  applyCardVisual(document.querySelector("#cardSignSummary .signed-card-face"), card.style);
+  document.getElementById("cardRecipientMessage").value = ""; renderCardSignSummary(card);
   document.getElementById("cardRecipientSignatureName").value = state.data?.user?.nickname || ""; document.getElementById("cardRecipientConfirmed").checked = false; openModal("coupleCardSignModal"); requestAnimationFrame(() => prepareSignatureCanvas("recipient"));
 }
 
@@ -6247,32 +6587,9 @@ function beadHex(color) {
   return `#${color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 }
 
-// Generic colour families avoid pretending that different bead brands share
-// one number system. Expanded colours remain usable and get a common fallback.
-const BEAD_COLOR_CATALOG = [
-  ["W01", "瓷白", "FFFDF7", 1], ["W02", "奶油白", "F4E8D5", 1], ["N01", "黑色", "211D1D", 1], ["N02", "深灰", "4A4648", 1], ["N03", "中灰", "7D797B", 1], ["N04", "浅灰", "B9B5B2", 1],
-  ["B01", "深咖", "3A241F", 1], ["B02", "咖啡", "674238", 1], ["B03", "棕色", "8B5D4B", 1], ["B04", "焦糖", "B77A51", 1], ["B05", "浅驼", "D1A47E", 1], ["B06", "米杏", "E9C9A5", 1],
-  ["S01", "深肤", "9A604B", 1], ["S02", "暖肤", "C98568", 1], ["S03", "自然肤", "E5AB8D", 1], ["S04", "浅肤", "F3C9AD", 1], ["S05", "粉肤", "F7D7C4", 1],
-  ["R01", "酒红", "7A2637", 1], ["R02", "正红", "C93143", 1], ["R03", "珊瑚红", "EB665F", 1], ["O01", "橙色", "EA7A32", 1], ["O02", "浅橙", "F5A35C", 1],
-  ["Y01", "深黄", "D5A51E", 1], ["Y02", "亮黄", "F4D739", 1], ["Y03", "奶黄", "FFF09A", 1],
-  ["G01", "墨绿", "244E3D", 1], ["G02", "草绿", "4E8A55", 1], ["G03", "亮绿", "7FBD52", 1], ["G04", "浅绿", "B9DB83", 1], ["G05", "薄荷绿", "A8DCC5", 1],
-  ["C01", "深青", "1E5961", 1], ["C02", "湖蓝", "368E9B", 1], ["C03", "浅青", "85CED3", 1],
-  ["U01", "藏蓝", "273B62", 1], ["U02", "宝蓝", "345FA8", 1], ["U03", "天蓝", "67A7DB", 1], ["U04", "浅蓝", "A9D2ED", 1],
-  ["P01", "深紫", "52335F", 1], ["P02", "紫色", "79538D", 1], ["P03", "浅紫", "B69ACB", 1],
-  ["K01", "玫红", "B93669", 1], ["K02", "粉红", "E77FA4", 1], ["K03", "浅粉", "F3B6CB", 1], ["K04", "樱花粉", "F8D4DF", 1],
-  ["W03", "冷瓷白", "F2F6F8", 1], ["N05", "银灰", "D7D8DC", 1], ["B07", "红木深棕", "512A2D", 1], ["B08", "沙金棕", "C68F65", 1], ["B09", "淡沙米", "EBD8BD", 1],
-  ["S06", "橄榄肤", "B77C5B", 1], ["S07", "蜜桃肤", "F2BFA0", 1], ["R04", "深绯红", "551D32", 1], ["R05", "玫瑰红", "D94D68", 1], ["R06", "淡珊瑚", "F59A92", 1],
-  ["O03", "焦橙", "C95427", 1], ["O04", "杏橙", "FFC083", 1], ["Y04", "芥末黄", "B88618", 1], ["Y05", "淡柠檬", "FFF6BD", 1],
-  ["G06", "森林绿", "173C2D", 1], ["G07", "翡翠绿", "1F7651", 1], ["G08", "鼠尾草", "91A982", 1], ["G09", "淡薄荷", "D4EFE0", 1],
-  ["C04", "深海青", "12434D", 1], ["C05", "水蓝", "55B9C1", 1], ["C06", "淡水青", "BDE7E7", 1],
-  ["U05", "午夜蓝", "172647", 1], ["U06", "矢车菊蓝", "557BC4", 1], ["U07", "婴儿蓝", "C8E3F4", 1],
-  ["P04", "李子紫", "44234F", 1], ["P05", "薰衣草", "9B79B2", 1], ["P06", "淡丁香", "DED0E8", 1],
-  ["K05", "深莓粉", "8E2859", 1], ["K06", "蔷薇粉", "D85E91", 1], ["K07", "腮红粉", "F9E4EA", 1],
-  ["X01", "炭黑", "100E12", 0], ["X02", "蓝灰", "687887", 0], ["X03", "雾灰", "9B9294", 0], ["X04", "烟粉", "B98E94", 0], ["X05", "豆沙", "A85E68", 0], ["X06", "灰紫", "88758E", 0],
-  ["X07", "灰绿", "718678", 0], ["X08", "橄榄绿", "788044", 0], ["X09", "荧光绿", "B7E84B", 0], ["X10", "柠檬黄", "F5EE56", 0], ["X11", "蜜桃", "F2A58D", 0],
-  ["X12", "杏粉", "EBC0AF", 0], ["X13", "冰蓝", "C6E7E8", 0], ["X14", "丁香紫", "CDB9D8", 0], ["X15", "莓紫", "9E4778", 0], ["X16", "砖红", "A84A3F", 0],
-].map(([code, name, hex, common]) => ({ code, name, rgb: [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16)), common: Boolean(common) }));
-
+// Physical colour numbers are loaded from validated server-side catalogue
+// files.  A new brand or a corrected batch therefore never requires a web
+// client code change.
 function beadRgbToLab(color) {
   const linear = color.map(value => { const next = value / 255; return next <= .04045 ? next / 12.92 : ((next + .055) / 1.055) ** 2.4; });
   const x = (linear[0] * .4124 + linear[1] * .3576 + linear[2] * .1805) / .95047;
@@ -6287,21 +6604,78 @@ function beadLabDistance(first, second) {
   return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2 + (first[2] - second[2]) ** 2;
 }
 
-BEAD_COLOR_CATALOG.forEach(color => { color.lab = beadRgbToLab(color.rgb); });
+function beadColorCatalog() {
+  return state.bead.catalog?.colors || [];
+}
+
+function beadCatalogueSnapshot(catalog = state.bead.catalog) {
+  if (!catalog) return null;
+  return { id: catalog.id, name: catalog.name, brand: catalog.brand, series: catalog.series, version: catalog.version, beadSizeMm: Number(catalog.bead_size_mm), boardPitchMm: Number(catalog.board_pitch_mm), verified: Boolean(catalog.verified), colorValueKind: catalog.color_value_kind };
+}
+
+function renderBeadPaletteStatus(catalog = state.bead.catalog) {
+  const status = document.getElementById("beadPaletteStatus");
+  if (!status) return;
+  if (!catalog) { status.textContent = "暂时没有读取到可用色卡，生成按钮会保持停用。"; return; }
+  const accuracy = catalog.verified ? (catalog.color_value_kind === "measured_physical" ? "实物测色已校准" : "官方数字色值") : "工程参考色值 · 购买前请用实物色卡复核";
+  status.textContent = `${catalog.brand} · ${catalog.series || catalog.name} · ${Number(catalog.colors?.length ?? catalog.color_count)} 色 · ${Number(catalog.bead_size_mm)}mm · ${accuracy} · ${catalog.version}`;
+}
+
+function normalizeBeadCatalogue(payload) {
+  return { ...payload, colors: (payload.colors || []).map(item => {
+    const hex = String(item.hex || "#000000").replace("#", "");
+    const rgb = [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16));
+    return { ...item, rgb, common: Boolean(item.common), lab: beadRgbToLab(rgb) };
+  }) };
+}
+
+async function selectBeadCatalogue(id, { remember = true } = {}) {
+  const selected = state.bead.catalogs.find(item => item.id === id);
+  if (!selected) throw new Error("所选拼豆色卡不存在");
+  const payload = await api(`/api/v1/entertainment/beads/palettes/${encodeURIComponent(id)}`);
+  state.bead.catalog = normalizeBeadCatalogue(payload); state.bead.catalogId = id;
+  if (remember) privateStorage().setItem("love-bead-palette-id", id);
+  const select = document.getElementById("beadPaletteCatalog"); if (select) select.value = id;
+  renderBeadPaletteStatus();
+  return state.bead.catalog;
+}
+
+async function loadBeadPaletteCatalogs() {
+  if (state.bead.catalogLoading) return state.bead.catalogLoading;
+  state.bead.catalogLoading = (async () => {
+    const manifest = await api("/api/v1/entertainment/beads/palettes");
+    state.bead.catalogs = Array.isArray(manifest.items) ? manifest.items : [];
+    if (!state.bead.catalogs.length) throw new Error("服务器没有可用的拼豆色卡");
+    const select = document.getElementById("beadPaletteCatalog");
+    if (select) select.innerHTML = state.bead.catalogs.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.brand)} · ${escapeHtml(item.series || item.name)} · ${Number(item.bead_size_mm)}mm · ${Number(item.color_count)} 色${item.verified ? " · 已校准" : " · 参考"}</option>`).join("");
+    const remembered = privateStorage().getItem("love-bead-palette-id");
+    const target = state.bead.catalogs.some(item => item.id === remembered) ? remembered : manifest.default_id || state.bead.catalogs[0].id;
+    renderBeadPaletteStatus(state.bead.catalogs.find(item => item.id === target));
+    await selectBeadCatalogue(target, { remember: false });
+    return state.bead.catalog;
+  })().catch(error => {
+    state.bead.catalog = null; renderBeadPaletteStatus(); throw error;
+  }).finally(() => { state.bead.catalogLoading = null; });
+  return state.bead.catalogLoading;
+}
 
 function beadCommonSubstitute(color) {
-  return BEAD_COLOR_CATALOG.filter(item => item.common).reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best);
+  const available = beadColorCatalog().filter(item => item.common);
+  if (!available.length) return color;
+  return available.reduce((best, item) => beadLabDistance(color.lab, item.lab) < beadLabDistance(color.lab, best.lab) ? item : best);
 }
 
 function beadPaletteMeta(color, fallbackIndex = 0) {
+  const catalog = beadColorCatalog();
+  if (!catalog.length) return { code: `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: "已保存颜色", common: true, substituteCode: "", substituteName: "", substituteRgb: null };
   const lab = beadRgbToLab(color);
-  const entry = BEAD_COLOR_CATALOG.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best);
+  const entry = catalog.reduce((best, item) => beadLabDistance(lab, item.lab) < beadLabDistance(lab, best.lab) ? item : best);
   const substitute = entry.common ? null : beadCommonSubstitute(entry);
   return { code: entry.code || `C${String(fallbackIndex + 1).padStart(2, "0")}`, name: entry.name || "自定义色", common: entry.common, substituteCode: substitute?.code || "", substituteName: substitute?.name || "", substituteRgb: substitute?.rgb || null };
 }
 
 function beadDetailWeights(colors, size, detailMode) {
-  const strength = detailMode === "simple" ? .45 : detailMode === "balanced" ? 1.15 : 2.15;
+  const strength = detailMode === "simple" ? .45 : detailMode === "easy" ? 2.05 : detailMode === "balanced" ? 1.15 : 2.15;
   const luminance = colors.map(color => .2126 * color[0] + .7152 * color[1] + .0722 * color[2]);
   return colors.map((_, index) => {
     const x = index % size; const y = Math.floor(index / size);
@@ -6309,12 +6683,15 @@ function beadDetailWeights(colors, size, detailMode) {
     if (x) neighbors.push(index - 1); if (x + 1 < size) neighbors.push(index + 1);
     if (y) neighbors.push(index - size); if (y + 1 < size) neighbors.push(index + size);
     const edge = neighbors.reduce((maximum, other) => Math.max(maximum, Math.abs(luminance[index] - luminance[other])), 0) / 255;
-    return 1 + strength * Math.min(1, edge * 3.2);
+    const nx = (x + .5) / size - .5; const ny = (y + .5) / size - .5;
+    const focus = Math.max(0, 1 - Math.hypot(nx, ny) / .72);
+    const subjectBoost = detailMode === "detail" ? 1 + focus * .42 : detailMode === "easy" ? 1 + focus * .4 : detailMode === "balanced" ? 1 + focus * .18 : 1;
+    return (1 + strength * Math.min(1, edge * 3.2)) * subjectBoost;
   });
 }
 
 function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
-  if (detailMode === "detail" || size < 8) return indices;
+  if (size < 8) return indices;
   let current = [...indices];
   const passes = detailMode === "simple" ? 2 : 1;
   for (let pass = 0; pass < passes; pass += 1) {
@@ -6326,11 +6703,14 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
       if (!neighbors.length) continue;
       const counts = new Map(); neighbors.forEach(other => counts.set(current[other], (counts.get(current[other]) || 0) + 1));
       const [majority, amount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (majority === current[index] || amount < (detailMode === "simple" ? 5 : 6)) continue;
+      const threshold = detailMode === "simple" ? 5 : detailMode === "easy" ? 5 : detailMode === "balanced" ? 6 : 7;
+      if (majority === current[index] || amount < threshold) continue;
       const lab = beadRgbToLab(colors[index]);
       const ownDistance = beadLabDistance(lab, beadRgbToLab(palette[current[index]]));
       const majorityDistance = beadLabDistance(lab, beadRgbToLab(palette[majority]));
-      if (majorityDistance <= ownDistance * 1.25 + 36) next[index] = majority;
+      const tolerance = detailMode === "detail" ? 1.08 : detailMode === "easy" ? 1.03 : 1.25;
+      const allowance = detailMode === "detail" ? 12 : detailMode === "easy" ? 4 : 36;
+      if (majorityDistance <= ownDistance * tolerance + allowance) next[index] = majority;
     }
     current = next;
   }
@@ -6338,6 +6718,8 @@ function cleanupBeadIndices(indices, colors, palette, size, detailMode) {
 }
 
 function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqrt(pixels.length / 4)), detailMode = "detail" } = {}) {
+  const catalog = beadColorCatalog();
+  if (!catalog.length) throw new Error("拼豆色卡尚未加载，请稍后重试");
   const colors = [];
   const active = [];
   for (let index = 0; index < pixels.length; index += 4) {
@@ -6348,14 +6730,14 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
   if (!active.some(Boolean)) return { palette: [], paletteMeta: [], indices: active.map(() => -1) };
   const labs = colors.map(beadRgbToLab);
   const weights = beadDetailWeights(colors, size, detailMode).map((weight, index) => active[index] ? weight : 0);
-  const count = Math.max(1, Math.min(Number(requestedCount) || 12, BEAD_COLOR_CATALOG.length));
-  const distances = BEAD_COLOR_CATALOG.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
+  const count = Math.max(1, Math.min(Number(requestedCount) || 12, catalog.length));
+  const distances = catalog.map(candidate => labs.map(lab => beadLabDistance(lab, candidate.lab)));
   const selected = [];
   let bestDistances = new Array(colors.length).fill(Infinity);
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   while (selected.length < count) {
     let bestCandidate = -1; let bestCost = Infinity;
-    BEAD_COLOR_CATALOG.forEach((candidate, candidateIndex) => {
+    catalog.forEach((candidate, candidateIndex) => {
       if (selected.includes(candidateIndex)) return;
       let cost = candidate.common ? 0 : totalWeight * 4;
       for (let pixel = 0; pixel < colors.length; pixel += 1) cost += weights[pixel] * Math.min(bestDistances[pixel], distances[candidateIndex][pixel]);
@@ -6366,45 +6748,147 @@ function quantizeBeadPixels(pixels, requestedCount, { size = Math.round(Math.sqr
     bestDistances = bestDistances.map((distance, pixel) => Math.min(distance, distances[bestCandidate][pixel]));
   }
   let indices = labs.map((_, pixel) => active[pixel] ? selected.reduce((best, candidate, paletteIndex) => distances[candidate][pixel] < distances[selected[best]][pixel] ? paletteIndex : best, 0) : -1);
-  let palette = selected.map(index => [...BEAD_COLOR_CATALOG[index].rgb]);
+  let palette = selected.map(index => [...catalog[index].rgb]);
   indices = cleanupBeadIndices(indices, colors, palette, size, detailMode);
   const used = [...new Set(indices.filter(index => index >= 0))];
   const remap = new Map(used.map((oldIndex, newIndex) => [oldIndex, newIndex]));
   palette = used.map(index => palette[index]);
-  const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(BEAD_COLOR_CATALOG[selected[index]].rgb, paletteIndex));
+  const paletteMeta = used.map((index, paletteIndex) => beadPaletteMeta(catalog[selected[index]].rgb, paletteIndex));
   return { palette, paletteMeta, indices: indices.map(index => index < 0 ? -1 : remap.get(index)) };
 }
 
-function removeBeadBackground(imageData, size, sensitivity = 42) {
+function removeBeadBackground(imageData, size, sensitivity = 26, maxRemoval = .84) {
   const data = imageData.data;
-  const border = [];
-  for (let x = 0; x < size; x += 1) border.push(x, (size - 1) * size + x);
-  for (let y = 1; y < size - 1; y += 1) border.push(y * size, y * size + size - 1);
-  const bins = new Map();
-  border.forEach(pixel => {
-    const offset = pixel * 4;
-    if (data[offset + 3] < 32) return;
-    const key = `${data[offset] >> 5}-${data[offset + 1] >> 5}-${data[offset + 2] >> 5}`;
-    const item = bins.get(key) || { count: 0, r: 0, g: 0, b: 0 };
-    item.count += 1; item.r += data[offset]; item.g += data[offset + 1]; item.b += data[offset + 2]; bins.set(key, item);
-  });
-  const dominant = [...bins.values()].sort((first, second) => second.count - first.count)[0];
-  if (!dominant) return imageData;
-  const reference = [dominant.r / dominant.count, dominant.g / dominant.count, dominant.b / dominant.count];
-  const limit = Math.max(18, Math.min(90, Number(sensitivity) || 42)) ** 2 * 3;
-  const visited = new Uint8Array(size * size); const queue = new Int32Array(size * size); let head = 0; let tail = 0;
-  const matches = pixel => {
-    const offset = pixel * 4;
-    if (data[offset + 3] < 32) return true;
-    return (data[offset] - reference[0]) ** 2 + (data[offset + 1] - reference[1]) ** 2 + (data[offset + 2] - reference[2]) ** 2 <= limit;
+  const original = new Uint8ClampedArray(data);
+  const total = size * size; const borderEntries = [];
+  for (let x = 0; x < size; x += 1) borderEntries.push([x, 0], [(size - 1) * size + x, 2]);
+  for (let y = 1; y < size - 1; y += 1) borderEntries.push([y * size, 3], [y * size + size - 1, 1]);
+  const colourStep = (first, second) => {
+    const a = first * 4; const b = second * 4;
+    return Math.sqrt((original[a] - original[b]) ** 2 + (original[a + 1] - original[b + 1]) ** 2 + (original[a + 2] - original[b + 2]) ** 2);
   };
-  const enqueue = pixel => { if (!visited[pixel] && matches(pixel)) { visited[pixel] = 1; queue[tail++] = pixel; } };
-  border.forEach(enqueue);
-  while (head < tail) {
-    const pixel = queue[head++]; const x = pixel % size; const y = Math.floor(pixel / size);
-    if (x) enqueue(pixel - 1); if (x + 1 < size) enqueue(pixel + 1); if (y) enqueue(pixel - size); if (y + 1 < size) enqueue(pixel + size);
+  const neighbours = pixel => {
+    const x = pixel % size; const y = Math.floor(pixel / size); const result = [];
+    if (x) result.push(pixel - 1); if (x + 1 < size) result.push(pixel + 1);
+    if (y) result.push(pixel - size); if (y + 1 < size) result.push(pixel + size);
+    return result;
+  };
+  const localEdge = new Float32Array(total);
+  for (let pixel = 0; pixel < total; pixel += 1) localEdge[pixel] = neighbours(pixel).reduce((maximum, other) => Math.max(maximum, colourStep(pixel, other)), 0);
+  const bins = new Map();
+  borderEntries.forEach(([pixel, side]) => {
+    const offset = pixel * 4; if (original[offset + 3] < 32) return;
+    const key = `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`;
+    const item = bins.get(key) || { key, pixels: [], sides: new Set() };
+    item.pixels.push(pixel); item.sides.add(side); bins.set(key, item);
+  });
+  const opaqueBorder = borderEntries.filter(([pixel]) => original[pixel * 4 + 3] >= 32).length;
+  // A hat, hair, shoulder or pet may occupy a large run of one crop edge.
+  // Treat a colour as background only when it is observed on at least two
+  // different sides; a large run on a single side is not semantic evidence.
+  const candidates = [...bins.values()].filter(item => item.sides.size >= 2).sort((a, b) => b.pixels.length - a.pixels.length);
+  const selectedBins = new Set(); let covered = 0;
+  for (const item of candidates) { selectedBins.add(item.key); covered += item.pixels.length; if (covered >= opaqueBorder * .72) break; }
+  if (!selectedBins.size) { imageData.beadBackgroundDiagnostics = { safe: false, reason: "没有可靠的边缘背景" }; return imageData; }
+
+  // Find the weakest colour-edge barrier from reliable border seeds. The
+  // result depends on image structure, never on a hard-coded portrait area.
+  const barrier = new Float32Array(total); barrier.fill(Infinity); const heap = [];
+  const push = (pixel, cost) => { let index = heap.length; heap.push([cost, pixel]); while (index) { const parent = (index - 1) >> 1; if (heap[parent][0] <= cost) break; heap[index] = heap[parent]; index = parent; } heap[index] = [cost, pixel]; };
+  const pop = () => { const first = heap[0]; const last = heap.pop(); if (heap.length) { let index = 0; while (true) { const left = index * 2 + 1; if (left >= heap.length) break; const right = left + 1; const child = right < heap.length && heap[right][0] < heap[left][0] ? right : left; if (heap[child][0] >= last[0]) break; heap[index] = heap[child]; index = child; } heap[index] = last; } return first; };
+  const seedEdges = borderEntries.map(([pixel]) => localEdge[pixel]).sort((a, b) => a - b);
+  const seedEdgeLimit = Math.max(7, seedEdges[Math.floor(seedEdges.length * .62)] * 1.35);
+  borderEntries.forEach(([pixel]) => {
+    const offset = pixel * 4; const key = `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`;
+    // A foreground object may touch the crop border. Do not seed textured
+    // border cells merely because their colour resembles the background.
+    if (original[offset + 3] < 32 || (selectedBins.has(key) && localEdge[pixel] <= seedEdgeLimit)) { barrier[pixel] = 0; push(pixel, 0); }
+  });
+  while (heap.length) {
+    const [cost, pixel] = pop(); if (cost !== barrier[pixel]) continue;
+    neighbours(pixel).forEach(other => {
+      // Anti-aliased fur, hair and pale clothing may change through several
+      // small colour steps. Use the local edge on both sides as an additional
+      // barrier so those soft boundaries do not become a path into the subject.
+      const structuralEdge = Math.min(localEdge[pixel], localEdge[other]) * .9;
+      const nextCost = Math.max(cost, colourStep(pixel, other), structuralEdge);
+      if (nextCost < barrier[other]) { barrier[other] = nextCost; push(other, nextCost); }
+    });
   }
-  for (let pixel = 0; pixel < visited.length; pixel += 1) if (visited[pixel]) data[pixel * 4 + 3] = 0;
+  const quantile = (values, ratio) => { const sorted = [...values].filter(Number.isFinite).sort((a, b) => a - b); return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] : 0; };
+  const band = Math.max(2, Math.round(size * .12)); const borderSteps = [];
+  for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
+    if (x >= band && y >= band && x < size - band && y < size - band) continue;
+    const pixel = y * size + x; neighbours(pixel).forEach(other => { if (other > pixel) borderSteps.push(colourStep(pixel, other)); });
+  }
+  const safeSensitivity = Math.max(12, Math.min(56, Number(sensitivity) || 26));
+  const base = Math.max(6, Math.min(34, quantile(borderSteps, .62) * 1.45 + safeSensitivity * .2));
+  const pixelBin = pixel => { const offset = pixel * 4; return `${original[offset] >> 5}-${original[offset + 1] >> 5}-${original[offset + 2] >> 5}`; };
+  const saliencyLimit = Math.max(18, quantile(localEdge, .78)); const salient = []; const protectedColours = [];
+  for (let pixel = 0; pixel < total; pixel += 1) {
+    if (original[pixel * 4 + 3] < 32) continue;
+    if (localEdge[pixel] >= saliencyLimit) salient.push(pixel);
+    if (!selectedBins.has(pixelBin(pixel))) protectedColours.push(pixel);
+  }
+  const edgeBand = Math.max(2, Math.round(size * .18)); const edgeSubjectCandidates = [];
+  for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
+    const centralHorizontal = x >= size * .2 && x < size * .8;
+    const centralVertical = y >= size * .2 && y < size * .8;
+    const nearCentralEdge = (centralHorizontal && (y < edgeBand || y >= size - edgeBand)) || (centralVertical && (x < edgeBand || x >= size - edgeBand));
+    const pixel = y * size + x;
+    if (nearCentralEdge && original[pixel * 4 + 3] >= 32 && !selectedBins.has(pixelBin(pixel)) && localEdge[pixel] >= saliencyLimit * .7) edgeSubjectCandidates.push(pixel);
+  }
+  const topTextureCandidates = [];
+  for (let y = 0; y < Math.ceil(size * .22); y += 1) for (let x = Math.floor(size * .12); x < Math.ceil(size * .88); x += 1) {
+    const pixel = y * size + x;
+    if (original[pixel * 4 + 3] >= 32 && localEdge[pixel] >= saliencyLimit * .65) topTextureCandidates.push(pixel);
+  }
+  // Grow a competing foreground region from non-background detail. A pixel is
+  // removed only when the border reaches it through a weaker path than the
+  // foreground. This protects pale hats, hair and fur that share a colour bin
+  // with the background but are connected to real subject detail.
+  const foregroundSeeds = salient.filter(pixel => {
+    const x = pixel % size; const y = Math.floor(pixel / size);
+    return !selectedBins.has(pixelBin(pixel)) && x >= size * .08 && x < size * .92 && y >= size * .02 && y < size * .96;
+  });
+  edgeSubjectCandidates.forEach(pixel => { if (!foregroundSeeds.includes(pixel)) foregroundSeeds.push(pixel); });
+  const foregroundBarrier = new Float32Array(total); foregroundBarrier.fill(Infinity); const foregroundHeap = [];
+  const foregroundPush = (pixel, cost) => { let index = foregroundHeap.length; foregroundHeap.push([cost, pixel]); while (index) { const parent = (index - 1) >> 1; if (foregroundHeap[parent][0] <= cost) break; foregroundHeap[index] = foregroundHeap[parent]; index = parent; } foregroundHeap[index] = [cost, pixel]; };
+  const foregroundPop = () => { const first = foregroundHeap[0]; const last = foregroundHeap.pop(); if (foregroundHeap.length) { let index = 0; while (true) { const left = index * 2 + 1; if (left >= foregroundHeap.length) break; const right = left + 1; const child = right < foregroundHeap.length && foregroundHeap[right][0] < foregroundHeap[left][0] ? right : left; if (foregroundHeap[child][0] >= last[0]) break; foregroundHeap[index] = foregroundHeap[child]; index = child; } foregroundHeap[index] = last; } return first; };
+  foregroundSeeds.forEach(pixel => { foregroundBarrier[pixel] = 0; foregroundPush(pixel, 0); });
+  while (foregroundHeap.length) {
+    const [cost, pixel] = foregroundPop(); if (cost !== foregroundBarrier[pixel]) continue;
+    neighbours(pixel).forEach(other => {
+      const structuralEdge = Math.min(localEdge[pixel], localEdge[other]) * .9;
+      const nextCost = Math.max(cost, colourStep(pixel, other), structuralEdge);
+      if (nextCost < foregroundBarrier[other]) { foregroundBarrier[other] = nextCost; foregroundPush(other, nextCost); }
+    });
+  }
+  let best = null;
+  [base * .62, base * .8, base, base * 1.18].forEach(threshold => {
+    const mask = new Uint8Array(total); let removed = 0;
+    for (let pixel = 0; pixel < total; pixel += 1) if (barrier[pixel] <= threshold && barrier[pixel] + 2.5 < foregroundBarrier[pixel]) { mask[pixel] = 1; removed += 1; }
+    // A strong edge occupies cells on both sides of a boundary. Removing the
+    // background-side cell is correct, so count the edge as preserved when
+    // either it or one of its direct neighbours remains foreground.
+    const retainedSalient = salient.reduce((count, pixel) => count + (!mask[pixel] || neighbours(pixel).some(other => !mask[other]) ? 1 : 0), 0);
+    const salientRetention = salient.length ? retainedSalient / salient.length : 1;
+    const strictSalientRetention = salient.length ? salient.reduce((count, pixel) => count + (mask[pixel] ? 0 : 1), 0) / salient.length : 1;
+    const protectedRetention = protectedColours.length ? protectedColours.reduce((count, pixel) => count + (mask[pixel] ? 0 : 1), 0) / protectedColours.length : 1;
+    const edgeSubjectRetention = edgeSubjectCandidates.length ? edgeSubjectCandidates.reduce((count, pixel) => count + (mask[pixel] ? 0 : 1), 0) / edgeSubjectCandidates.length : 1;
+    const topTextureRetention = topTextureCandidates.length ? topTextureCandidates.reduce((count, pixel) => count + (mask[pixel] ? 0 : 1), 0) / topTextureCandidates.length : 1;
+    const removedRatio = removed / total;
+    const coreStart = Math.floor(size * .25); const coreEnd = Math.ceil(size * .75); let coreTotal = 0; let coreRetained = 0;
+    for (let y = coreStart; y < coreEnd; y += 1) for (let x = coreStart; x < coreEnd; x += 1) {
+      coreTotal += 1; if (!mask[y * size + x]) coreRetained += 1;
+    }
+    const coreRetention = coreTotal ? coreRetained / coreTotal : 1;
+    const safeRemovalLimit = Math.max(.12, Math.min(.84, Number(maxRemoval) || .84));
+    if (removedRatio >= .04 && removedRatio <= safeRemovalLimit && salientRetention >= .9 && strictSalientRetention >= .35 && protectedRetention >= .88 && edgeSubjectRetention >= .74 && topTextureRetention >= .42 && coreRetention >= .68 && (!best || removed > best.removed)) best = { mask, removed, removedRatio, salientRetention, strictSalientRetention, protectedRetention, edgeSubjectRetention, topTextureRetention, coreRetention, threshold };
+  });
+  if (!best) { data.set(original); imageData.beadBackgroundDiagnostics = { safe: false, reason: "主体与背景边界不够可靠，已保留原背景" }; return imageData; }
+  for (let pixel = 0; pixel < total; pixel += 1) if (best.mask[pixel]) data[pixel * 4 + 3] = 0;
+  imageData.beadBackgroundDiagnostics = { safe: true, removedRatio: best.removedRatio, salientRetention: best.salientRetention, strictSalientRetention: best.strictSalientRetention, protectedRetention: best.protectedRetention, edgeSubjectRetention: best.edgeSubjectRetention, topTextureRetention: best.topTextureRetention, coreRetention: best.coreRetention, threshold: best.threshold };
   return imageData;
 }
 
@@ -6438,6 +6922,26 @@ function adjustBeadTones(imageData, size, mode = "auto") {
   return imageData;
 }
 
+function sharpenBeadDetails(imageData, size, detailMode = "detail") {
+  if (detailMode === "simple" || size < 8) return imageData;
+  const source = new Uint8ClampedArray(imageData.data);
+  const data = imageData.data;
+  const baseAmount = detailMode === "detail" ? .62 : detailMode === "easy" ? .78 : .3;
+  for (let y = 1; y < size - 1; y += 1) for (let x = 1; x < size - 1; x += 1) {
+    const pixel = y * size + x; const offset = pixel * 4;
+    if (source[offset + 3] < 128) continue;
+    const nx = (x + .5) / size - .5; const ny = (y + .5) / size - .5;
+    const focus = Math.max(0, 1 - Math.hypot(nx, ny) / .72);
+    const amount = baseAmount * (.68 + focus * .62);
+    const neighbors = [pixel - 1, pixel + 1, pixel - size, pixel + size];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const average = neighbors.reduce((sum, other) => sum + source[other * 4 + channel], 0) / neighbors.length;
+      data[offset + channel] = Math.max(0, Math.min(255, Math.round(source[offset + channel] + amount * (source[offset + channel] - average))));
+    }
+  }
+  return imageData;
+}
+
 function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {}, background = {}, toneMode = "auto") {
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
@@ -6445,7 +6949,7 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
   context.clearRect(0, 0, size, size);
-  context.filter = detailMode === "detail" ? "contrast(1.08) saturate(1.06)" : detailMode === "simple" ? "contrast(.96) saturate(.92)" : "none";
+  context.filter = detailMode === "detail" ? "contrast(1.08) saturate(1.06)" : detailMode === "easy" ? "contrast(1.2) saturate(.9)" : detailMode === "simple" ? "contrast(.96) saturate(.92)" : "none";
   let scale = cropMode === "contain"
     ? Math.min(size / image.naturalWidth, size / image.naturalHeight)
     : Math.max(size / image.naturalWidth, size / image.naturalHeight);
@@ -6459,8 +6963,11 @@ function beadSourcePixels(image, size, cropMode, detailMode = "detail", crop = {
   context.drawImage(image, left, top, width, height);
   context.filter = "none";
   let imageData = context.getImageData(0, 0, size, size);
-  if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity);
+  if (background.mode === "remove") imageData = removeBeadBackground(imageData, size, background.sensitivity, background.maxRemoval);
+  const backgroundDiagnostics = imageData.beadBackgroundDiagnostics;
   imageData = adjustBeadTones(imageData, size, toneMode);
+  imageData = sharpenBeadDetails(imageData, size, detailMode);
+  if (backgroundDiagnostics) imageData.data.beadBackgroundDiagnostics = backgroundDiagnostics;
   return imageData.data;
 }
 
@@ -6470,30 +6977,115 @@ function beadCounts(pattern = state.bead) {
   return counts;
 }
 
-function paintBeadCanvas(canvas, pattern, { grid = true } = {}) {
+function paintBeadCanvas(canvas, pattern, { grid = true, showEmpty = true, labels = grid, coordinates = false } = {}) {
   if (!canvas || !pattern?.size || !pattern?.indices?.length) return;
   const side = canvas.width;
   canvas.height = side;
   const context = canvas.getContext("2d");
-  const cell = side / pattern.size;
+  const coordinateMargin = coordinates ? Math.max(34, Math.round(side * .025)) : 0;
+  const boardSide = side - coordinateMargin * 2;
+  const cell = boardSide / pattern.size;
+  canvas.dataset.beadInset = String(coordinateMargin / side);
   context.clearRect(0, 0, side, side);
+  if (coordinates) { context.fillStyle = "#fffaf6"; context.fillRect(0, 0, side, side); }
   pattern.indices.forEach((paletteIndex, index) => {
-    const x = (index % pattern.size) * cell;
-    const y = Math.floor(index / pattern.size) * cell;
-    if (paletteIndex < 0) return;
+    const x = coordinateMargin + (index % pattern.size) * cell;
+    const y = coordinateMargin + Math.floor(index / pattern.size) * cell;
+    if (paletteIndex < 0) {
+      if (showEmpty) {
+        context.fillStyle = (index % pattern.size + Math.floor(index / pattern.size)) % 2 ? "#eee9e5" : "#faf7f4";
+        context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell));
+      }
+      return;
+    }
     context.fillStyle = beadHex(pattern.palette[paletteIndex] || [255, 255, 255]);
     context.fillRect(x, y, Math.ceil(cell), Math.ceil(cell));
   });
+  if (labels && pattern.paletteMeta?.length) {
+    context.textAlign = "center"; context.textBaseline = "middle";
+    pattern.indices.forEach((paletteIndex, index) => {
+      if (paletteIndex < 0) return;
+      const code = String(pattern.paletteMeta[paletteIndex]?.code || `C${paletteIndex + 1}`);
+      const color = pattern.palette[paletteIndex] || [255, 255, 255];
+      const luminance = .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
+      const fontSize = Math.max(3.2, Math.min(cell * .48, cell * 1.48 / Math.max(2, code.length)));
+      const x = coordinateMargin + (index % pattern.size) * cell + cell / 2;
+      const y = coordinateMargin + Math.floor(index / pattern.size) * cell + cell / 2;
+      context.font = `800 ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+      context.fillStyle = luminance < 138 ? "rgba(255,255,255,.96)" : "rgba(45,31,34,.9)";
+      context.fillText(code, x, y + fontSize * .04, cell * .92);
+    });
+    context.textAlign = "start"; context.textBaseline = "alphabetic";
+  }
   if (!grid) return;
   context.strokeStyle = pattern.size > 32 ? "rgba(45,31,34,.28)" : "rgba(45,31,34,.42)";
   context.lineWidth = pattern.size > 32 ? .55 : .8;
   context.beginPath();
   for (let index = 0; index <= pattern.size; index += 1) {
-    const position = Math.round(index * cell) + .5;
-    context.moveTo(position, 0); context.lineTo(position, side);
-    context.moveTo(0, position); context.lineTo(side, position);
+    const position = coordinateMargin + Math.round(index * cell) + .5;
+    context.moveTo(position, coordinateMargin); context.lineTo(position, side - coordinateMargin);
+    context.moveTo(coordinateMargin, position); context.lineTo(side - coordinateMargin, position);
   }
   context.stroke();
+  const guideWidth = Math.max(2, Math.round(side / 522));
+  context.fillStyle = "rgba(78,38,48,.62)"; context.beginPath();
+  for (let index = 5; index < pattern.size; index += 5) {
+    const position = coordinateMargin + Math.round(index * cell) - Math.floor(guideWidth / 2);
+    context.rect(position, coordinateMargin, guideWidth, boardSide);
+    context.rect(coordinateMargin, position, boardSide, guideWidth);
+  }
+  context.fill();
+  if (coordinates) {
+    const axisFont = Math.max(8, Math.min(18, cell * .58));
+    context.font = `700 ${axisFont}px ui-sans-serif, system-ui, sans-serif`;
+    context.fillStyle = "#5d4b4f"; context.textAlign = "center"; context.textBaseline = "middle";
+    for (let index = 0; index < pattern.size; index += 1) {
+      const number = String(index + 1); const centre = coordinateMargin + index * cell + cell / 2;
+      context.fillText(number, centre, coordinateMargin / 2, cell * 1.5);
+      context.fillText(number, centre, side - coordinateMargin / 2, cell * 1.5);
+      context.fillText(number, coordinateMargin / 2, centre, coordinateMargin * .8);
+      context.fillText(number, side - coordinateMargin / 2, centre, coordinateMargin * .8);
+    }
+    context.textAlign = "start"; context.textBaseline = "alphabetic";
+  }
+}
+
+function beadPatternQuality(pattern) {
+  const filled = pattern.indices.reduce((total, index) => total + (index >= 0 ? 1 : 0), 0);
+  const coverage = filled / Math.max(1, pattern.indices.length);
+  let isolated = 0;
+  for (let y = 1; y < pattern.size - 1; y += 1) for (let x = 1; x < pattern.size - 1; x += 1) {
+    const offset = y * pattern.size + x; const color = pattern.indices[offset];
+    if (color < 0) continue;
+    const neighbors = [offset - 1, offset + 1, offset - pattern.size, offset + pattern.size];
+    if (!neighbors.some(index => pattern.indices[index] === color)) isolated += 1;
+  }
+  const rare = pattern.paletteMeta.filter(meta => !meta.common).length;
+  const detail = Math.min(24, Math.round(pattern.size / 4));
+  const coveragePenalty = coverage < .18 ? 24 : coverage < .3 ? 12 : 0;
+  const noisePenalty = Math.min(10, Math.round(isolated / Math.max(1, filled) * 90));
+  const rarePenalty = Math.min(6, rare);
+  return Math.max(40, Math.min(99, 82 + detail - coveragePenalty - noisePenalty - rarePenalty));
+}
+
+function beadIroningAdvice(pattern = state.bead) {
+  const chosen = state.bead.variants.find(item => item.id === state.bead.selectedVariant);
+  const large = pattern.size >= 58;
+  const easy = chosen?.id === "easy";
+  const finish = easy ? "留孔半融 · 双面轻定型" : "留孔半融 · 单面主烫";
+  const setup = large
+    ? "大画面建议先用耐热美纹胶带分区固定、扎排气孔，再移出底板烫；可减少底板变形和整幅翘曲。"
+    : "小画面可留在底板上覆专用烫纸，先轻烫一面定型，再按需要补烫背面。";
+  return `<strong>推荐烫法：${finish}</strong><p>${setup}</p><ol><li>使用拼豆烫纸或无蜡烘焙纸；不要让熨斗直接接触豆子，也不要垫软毛巾烫，软面容易受力不均。</li><li>熨斗关闭蒸汽，用中低温小范围画圈；看到孔洞缩小约三分之一、豆子刚连在一起就停。</li><li>趁温热夹在平整重物下冷却 10～15 分钟，确认完全冷却后再揭纸。</li></ol><small>亮闪、透明、夜光等特殊豆通常比普通豆更怕久烫：先用同批豆做 5×5 试片，降低一档温度并缩短停留时间。想要亮面可在最后隔烫纸极短补烫，不建议把人像正面烫到完全无孔，否则五官容易糊成一片。</small>`;
+}
+
+function renderBeadVariantChoices() {
+  const host = document.getElementById("beadVariantChoices");
+  if (!host) return;
+  const variants = state.bead.variants || [];
+  host.hidden = variants.length < 2;
+  host.innerHTML = variants.map(variant => `<button type="button" class="${state.bead.selectedVariant === variant.id ? "selected" : ""}" data-action="bead-use-variant" data-id="${escapeHtml(variant.id)}" aria-pressed="${state.bead.selectedVariant === variant.id}"><canvas width="112" height="112" data-bead-variant-preview="${escapeHtml(variant.id)}" aria-hidden="true"></canvas><span><strong>${escapeHtml(variant.label)}</strong><small>${variant.size} × ${variant.size} · ${variant.palette.length} 色</small><em>${escapeHtml(variant.description)}</em><b>质量 ${variant.quality} 分</b></span></button>`).join("");
+  variants.forEach(variant => paintBeadCanvas(host.querySelector(`[data-bead-variant-preview="${CSS.escape(variant.id)}"]`), variant, { grid: false }));
 }
 
 function renderBeadPalette() {
@@ -6507,16 +7099,36 @@ function renderBeadPalette() {
   }).join("");
 }
 
+function renderBeadLegend() {
+  const host = document.getElementById("beadLegend");
+  if (!host || !state.bead.palette.length) return;
+  const counts = beadCounts();
+  host.innerHTML = `<strong>图纸色号与数量</strong><div>${state.bead.palette.map((color, index) => {
+    const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
+    return `<span><i style="--bead-color:${beadHex(color)}"></i><b>${escapeHtml(meta.code)}</b><small>${counts[index]} 颗</small></span>`;
+  }).join("")}</div>`;
+}
+
 function renderBeadPattern() {
-  paintBeadCanvas(document.getElementById("beadCanvas"), state.bead);
+  paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true });
   renderBeadPalette();
+  renderBeadLegend();
+  renderBeadVariantChoices();
   const total = beadCounts().reduce((sum, count) => sum + count, 0);
   const empty = state.bead.size * state.bead.size - total;
   const expanded = state.bead.paletteMeta.filter(item => !item.common).length;
-  document.getElementById("beadResultSummary").textContent = `${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}`;
+  const chosen = state.bead.variants.find(item => item.id === state.bead.selectedVariant);
+  const catalog = state.bead.patternCatalog || beadCatalogueSnapshot();
+  const physical = catalog?.boardPitchMm ? ` · 成品约 ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} × ${(state.bead.size * catalog.boardPitchMm / 10).toFixed(1)} cm` : "";
+  const catalogText = catalog ? ` · ${catalog.brand} ${catalog.series || catalog.name} ${catalog.beadSizeMm}mm${catalog.verified ? "（已校准）" : "（参考色）"}` : "";
+  document.getElementById("beadResultSummary").textContent = `${chosen ? `${chosen.label} · ` : ""}${state.bead.size} × ${state.bead.size} · ${state.bead.palette.length} 种实体拼豆色 · 共 ${total} 颗${physical}${catalogText}${empty ? ` · 去除背景 ${empty} 格` : ""}${expanded ? ` · ${expanded} 个冷门色已给替代` : " · 均为常用色"}${chosen ? ` · 质量 ${chosen.quality} 分` : ""}`;
+  const ironing = document.getElementById("beadIroningAdvice");
+  if (ironing) ironing.innerHTML = beadIroningAdvice(state.bead);
   const replaceButton = document.querySelector('[data-action="bead-replace-rare"]');
   if (replaceButton) { replaceButton.hidden = !expanded; replaceButton.textContent = `一键替换 ${expanded} 个冷门色`; }
   document.getElementById("beadResult").hidden = false;
+  const inspector = document.getElementById("beadCellInspector");
+  if (inspector) inspector.textContent = "四边有坐标，三版每格都写入色号；放大后可清楚查看";
 }
 
 function beadCropSettings() {
@@ -6549,7 +7161,7 @@ function replaceRareBeadColors() {
   state.bead.palette.forEach((color, index) => {
     const meta = state.bead.paletteMeta[index] || beadPaletteMeta(color, index);
     const target = meta.common ? { color, meta } : (() => {
-      const entry = BEAD_COLOR_CATALOG.find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color) });
+      const entry = beadColorCatalog().find(item => item.code === meta.substituteCode) || beadCommonSubstitute({ lab: beadRgbToLab(color), rgb: color });
       return { color: [...entry.rgb], meta: beadPaletteMeta(entry.rgb, index) };
     })();
     if (!byCode.has(target.meta.code)) {
@@ -6590,7 +7202,8 @@ function loadBeadImage(file) {
   const image = new Image();
   image.onload = () => {
     if (state.bead.sourceUrl) URL.revokeObjectURL(state.bead.sourceUrl);
-    state.bead.image = image; state.bead.sourceUrl = url;
+    if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+    state.bead.image = image; state.bead.originalImage = image; state.bead.sourceFile = file; state.bead.sourceUrl = url; state.bead.aiUrl = ""; state.bead.aiAttempt = 0; state.bead.variants = []; state.bead.selectedVariant = "";
     const preview = document.getElementById("beadSourcePreview");
     preview.src = url; preview.hidden = false;
     document.getElementById("beadUploadZone").classList.add("has-image");
@@ -6598,37 +7211,276 @@ function loadBeadImage(file) {
     document.querySelector(".bead-upload-button").hidden = true;
     document.querySelector(".bead-change-image").hidden = false;
     document.querySelector('[data-action="bead-generate"]').disabled = false;
+    document.getElementById("beadAiActions").hidden = true;
+    document.getElementById("beadResult").hidden = true;
     updateBeadCropPreview();
-    toast("照片已在本机打开，可以调整尺寸后生成");
+    toast("照片已准备好，点击一键智能生成即可");
   };
   image.onerror = () => { URL.revokeObjectURL(url); toast("这张照片无法读取，请换一张重试"); };
   image.src = url;
 }
 
-async function generateBeadPattern() {
+async function prepareBeadSmartMode() {
+  if (state.bead.aiConfigured !== null) return;
+  const mode = document.getElementById("beadGenerationMode");
+  const note = document.getElementById("beadSmartNote");
+  try {
+    const status = await api("/api/v1/entertainment/beads/ai-status");
+    state.bead.aiConfigured = Boolean(status.configured);
+    mode.value = state.bead.aiConfigured ? "ai" : "local";
+    if (note) note.innerHTML = state.bead.aiConfigured
+      ? `<strong>AI 智能模式可用</strong><span>自动识别人、宠物或互动合照；只调用一次 AI，再在本机生成三套方案。</span>`
+      : `<strong>本机智能模式</strong><span>当前没有配置图片模型，将直接生成三套本机方案，照片不会上传。</span>`;
+    renderBeadAiVersions();
+  } catch (_) {
+    state.bead.aiConfigured = false; mode.value = "local";
+  }
+}
+
+async function beadImageFromBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("AI 生成的照片无法读取")); };
+    image.src = url;
+  });
+}
+
+function renderBeadAiVersions() {
+  const section = document.getElementById("beadAiLibrary");
+  const host = document.getElementById("beadAiVersionList");
+  if (!section || !host) return;
+  const items = state.bead.aiVersions || [];
+  section.hidden = !state.bead.aiConfigured && !items.length;
+  if (!items.length) {
+    host.innerHTML = `<div class="empty-view"><p>还没有 AI 精修版本。生成后会自动保存在这里。</p></div>`;
+    return;
+  }
+  host.innerHTML = items.map((item, index) => `<article class="bead-ai-version-card">
+    <img src="${escapeHtml(item.thumbnail_url || item.url)}" alt="AI 精修历史版本预览" loading="lazy">
+    <div><strong>精修版本 · ${escapeHtml(new Date(item.created_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</strong><small>${escapeHtml(item.model || "百炼图片模型")} · 本次第 ${Number(item.attempt || index + 1)} 次生成</small><em>仅自己可见</em></div>
+    <div><button type="button" data-action="bead-ai-use" data-id="${escapeHtml(item.id)}">使用这一版</button><button type="button" class="danger-text" data-action="bead-ai-delete" data-id="${escapeHtml(item.id)}">删除</button></div>
+  </article>`).join("");
+}
+
+async function loadBeadAiVersions({ quiet = false } = {}) {
+  try {
+    const result = await api("/api/v1/entertainment/beads/ai-previews");
+    state.bead.aiVersions = Array.isArray(result.items) ? result.items : [];
+    renderBeadAiVersions();
+  } catch (error) {
+    if (!quiet) toast(error.message);
+    throw error;
+  }
+}
+
+async function loadBeadAiVersion(mediaId) {
+  const item = state.bead.aiVersions.find(version => version.id === mediaId);
+  if (!item) throw new Error("这个 AI 版本已经不存在，请刷新后重试");
+  const response = await fetch(item.url, { cache: "no-store", credentials: "same-origin" });
+  if (!response.ok) throw new Error("无法读取这个 AI 版本");
+  const loaded = await beadImageFromBlob(await response.blob());
+  if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+  state.bead.aiUrl = loaded.url; state.bead.image = loaded.image; state.bead.aiAttempt = Number(item.attempt || 1);
+  const preview = document.getElementById("beadSourcePreview");
+  preview.src = loaded.url; preview.hidden = false;
+  document.getElementById("beadUploadZone").classList.add("has-image");
+  document.getElementById("beadCropControls").hidden = false;
+  document.querySelector(".bead-upload-button").hidden = true;
+  document.querySelector(".bead-change-image").hidden = false;
+  document.querySelector('[data-action="bead-generate"]').disabled = false;
+  document.getElementById("beadAiActions").hidden = !state.bead.sourceFile;
+  updateBeadCropPreview();
+  generateSmartBeadVariants();
+  toast("已恢复这一版，并自动生成三套可选网格");
+}
+
+async function requestAiBeadPreview({ retry = false } = {}) {
+  if (!state.bead.sourceFile) throw new Error("请重新选择原始照片");
+  const attempt = retry ? state.bead.aiAttempt + 1 : 1;
+  const progress = document.getElementById("beadAiProgress");
+  const strong = progress.querySelector("strong"); const small = progress.querySelector("small");
+  progress.hidden = false; let seconds = 0;
+  strong.textContent = retry ? `AI 正在重新生成第 ${attempt} 版` : "AI 正在精修照片";
+  small.textContent = "已等待 0 秒 · 一般需要 20～60 秒，请保持页面打开。";
+  const timer = setInterval(() => { seconds += 1; small.textContent = `已等待 ${seconds} 秒 · 正在保留人物或宠物特征并简化背景。`; }, 1000);
+  try {
+    const uploadFile = await compressImageForUpload(state.bead.sourceFile);
+    if (uploadFile.size > 10 * 1024 * 1024) throw new Error("照片仍超过 10 MB，请先在系统相册中缩小后重试");
+    const response = await fetch("/api/v1/entertainment/beads/ai-preview", {
+      method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: {
+        "Content-Type": uploadFile.type || "image/jpeg",
+        "X-Bead-Attempt": String(attempt),
+        "X-Bead-Quality": "preview",
+      },
+      body: uploadFile,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw Object.assign(new Error(result.error || `AI 生成失败 (${response.status})`), { status: response.status, code: result.code });
+    if (!result.preview?.url) throw new Error("AI 结果没有保存成功");
+    const generatedResponse = await fetch(result.preview.url, { cache: "no-store", credentials: "same-origin" });
+    if (!generatedResponse.ok) throw new Error("AI 结果已生成，但读取保存版本失败");
+    const loaded = await beadImageFromBlob(await generatedResponse.blob());
+    if (state.bead.aiUrl) URL.revokeObjectURL(state.bead.aiUrl);
+    state.bead.aiUrl = loaded.url; state.bead.image = loaded.image; state.bead.aiAttempt = attempt;
+    const preview = document.getElementById("beadSourcePreview"); preview.src = loaded.url;
+    document.getElementById("beadAiActions").hidden = false;
+    state.bead.aiVersions = [result.preview, ...state.bead.aiVersions.filter(item => item.id !== result.preview.id)];
+    renderBeadAiVersions();
+    toast(`AI 第 ${attempt} 版已生成，正在转换成实体拼豆色`);
+    return result;
+  } finally {
+    clearInterval(timer); progress.hidden = true;
+  }
+}
+
+function createBeadPatternData(settings = {}) {
+  const size = Number(settings.size || document.getElementById("beadBoardSize").value);
+  const colorCount = Number(settings.colorCount || document.getElementById("beadColorCount").value);
+  const cropMode = settings.cropMode || document.getElementById("beadCropMode").value;
+  const detailMode = settings.detailMode || document.getElementById("beadDetailMode").value;
+  const backgroundMode = settings.backgroundMode || document.getElementById("beadBackgroundMode")?.value || "keep";
+  const backgroundSensitivity = Number(settings.backgroundSensitivity || document.getElementById("beadBackgroundSensitivity")?.value || 42);
+  const backgroundMaxRemoval = Number(settings.backgroundMaxRemoval || .84);
+  const toneMode = settings.toneMode || document.getElementById("beadToneMode")?.value || "auto";
+  const baseCrop = beadCropSettings();
+  const crop = { ...baseCrop, ...(settings.crop || {}) };
+  if (settings.cropZoomMultiplier) crop.zoom = Math.max(1, crop.zoom * Number(settings.cropZoomMultiplier));
+  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, crop, { mode: backgroundMode, sensitivity: backgroundSensitivity, maxRemoval: backgroundMaxRemoval }, toneMode);
+  if (backgroundMode === "remove" && pixels.beadBackgroundDiagnostics?.safe === false) throw new Error(pixels.beadBackgroundDiagnostics.reason);
+  const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
+  if (!result.palette.length) throw new Error("背景去除范围过大，已没有可生成的主体；请降低去背景力度");
+  const pattern = { size, palette: result.palette, paletteMeta: result.paletteMeta, indices: result.indices, backgroundMode, catalog: beadCatalogueSnapshot() };
+  pattern.quality = beadPatternQuality(pattern);
+  return pattern;
+}
+
+function applyBeadVariant(pattern, { scroll = true } = {}) {
+  state.bead.selectedVariant = pattern.id || "";
+  state.bead.size = pattern.size; state.bead.palette = pattern.palette.map(color => [...color]);
+  state.bead.paletteMeta = pattern.paletteMeta.map(meta => ({ ...meta })); state.bead.indices = [...pattern.indices];
+  state.bead.patternCatalog = pattern.catalog ? { ...pattern.catalog } : beadCatalogueSnapshot();
+  state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
+  state.bead.generatedIndices = [...state.bead.indices]; state.bead.selectedColor = 0;
+  renderBeadPattern();
+  if (scroll) document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function smartBeadPlans() {
+  const purpose = document.getElementById("beadPurpose")?.value || "collectible";
+  const finish = plans => {
+    if (!document.getElementById("beadAdvancedSettings")?.open) return plans;
+    const manual = {
+      id: "recommended", label: "我的高级设置", description: "按你展开后选择的参数生成",
+      size: Number(document.getElementById("beadBoardSize").value), colorCount: Number(document.getElementById("beadColorCount").value),
+      cropMode: document.getElementById("beadCropMode").value, detailMode: document.getElementById("beadDetailMode").value,
+      backgroundMode: document.getElementById("beadBackgroundMode").value, toneMode: document.getElementById("beadToneMode").value,
+    };
+    return [manual, ...plans.slice(1)];
+  };
+  if (purpose === "charm") return finish([
+    { id: "recommended", label: "可爱挂件", description: "小尺寸、轮廓优先", size: 29, colorCount: 24, detailMode: "simple", backgroundMode: "keep" },
+    { id: "faithful", label: "细节挂件", description: "多保留一些表情与花纹", size: 32, colorCount: 36, detailMode: "detail", backgroundMode: "keep" },
+    { id: "clean", label: "净背景挂件", description: "仅在主体边界可信时清除背景，否则自动改为主体近景", size: 29, colorCount: 20, detailMode: "balanced", backgroundMode: "remove", backgroundSensitivity: 32, backgroundMaxRemoval: .72 },
+  ]);
+  if (purpose === "standard") return finish([
+    { id: "recommended", label: "推荐摆件", description: "清楚且制作量适中", size: 58, colorCount: 48, detailMode: "detail", backgroundMode: "keep" },
+    { id: "easy", label: "更容易做", description: "保持 58 格清晰度，用 8 个左右的大色块和强化轮廓降低制作难度", size: 58, colorCount: 8, detailMode: "easy", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "仅在边界可信时清除背景，人物轮廓不可信则自动改为主体近景", size: 58, colorCount: 20, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 32, backgroundMaxRemoval: .72 },
+  ]);
+  return finish([
+    { id: "recommended", label: "专业拼豆版", description: "清晰整理五官、毛发、轮廓与互动动作", size: 87, colorCount: 60, detailMode: "detail", backgroundMode: "keep" },
+    { id: "easy", label: "易制作版", description: "与专业版同为 87 格，用 8 个左右的大色块和强化轮廓保留清楚五官", size: 87, colorCount: 8, detailMode: "easy", backgroundMode: "keep" },
+    { id: "clean", label: "净背景版", description: "仅在边界可信时清除背景，人物轮廓不可信则自动改为主体近景", size: 87, colorCount: 24, detailMode: "detail", backgroundMode: "remove", backgroundSensitivity: 32, backgroundMaxRemoval: .72 },
+  ]);
+}
+
+function generateSmartBeadVariants() {
+  const variants = [];
+  smartBeadPlans().forEach(sourcePlan => {
+    let plan = { ...sourcePlan };
+    let pattern;
+    if (plan.id === "clean" && plan.backgroundMode === "remove" && !state.bead.aiUrl) {
+      const professional = variants[0];
+      const easy = variants.find(item => item.id === "easy");
+      const fallbackColors = professional ? Math.max((easy?.palette.length || 10) + 4, Math.round(professional.palette.length * .7)) : Math.min(20, plan.colorCount);
+      pattern = createBeadPatternData({ ...plan, backgroundMode: "keep", colorCount: fallbackColors, toneMode: "original", cropZoomMultiplier: 1.2 });
+      plan = {
+        ...plan,
+        backgroundMode: "keep",
+        label: "主体近景版",
+        description: `本机模式不冒险误删人物；放大主体并减少背景，使用 ${pattern.palette.length} 色。需要净背景可先选 AI 精修`,
+      };
+    } else {
+      try { pattern = createBeadPatternData(plan); }
+      catch (error) {
+        if (plan.backgroundMode !== "remove") throw error;
+        const professional = variants[0];
+        const easy = variants.find(item => item.id === "easy");
+        const fallbackColors = professional ? Math.max((easy?.palette.length || 10) + 4, Math.round(professional.palette.length * .7)) : Math.min(20, plan.colorCount);
+        pattern = createBeadPatternData({ ...plan, backgroundMode: "keep", colorCount: fallbackColors, toneMode: "original", cropZoomMultiplier: 1.2 });
+        plan = {
+          ...plan,
+          backgroundMode: "keep",
+          label: "主体近景版",
+          description: `分割置信度不足，为避免误删人物已改用安全近景；放大主体并减少背景，使用 ${pattern.palette.length} 色`,
+        };
+      }
+    }
+    if (pattern.quality < 60 && plan.backgroundMode === "remove") {
+      const professional = variants[0];
+      const fallbackColors = professional ? Math.max(14, Math.round(professional.palette.length * .7)) : Math.min(20, plan.colorCount);
+      pattern = createBeadPatternData({ ...plan, backgroundMode: "keep", colorCount: fallbackColors, toneMode: "original", cropZoomMultiplier: 1.2 });
+      plan = { ...plan, label: "主体近景版", description: `分割可信度不足，为避免误删人物已改用安全近景；使用 ${pattern.palette.length} 色` };
+    }
+    if (plan.id === "easy" && variants[0] && pattern.palette.length >= variants[0].palette.length * .8) {
+      const targetColors = Math.max(10, Math.floor(variants[0].palette.length * .55));
+      pattern = createBeadPatternData({ ...plan, colorCount: targetColors, backgroundMode: "keep" });
+      plan.description = `${plan.description}（实际压缩到 ${pattern.palette.length} 色）`;
+    }
+    variants.push({ ...pattern, id: plan.id, label: plan.label, description: plan.description });
+  });
+  state.bead.variants = variants;
+  applyBeadVariant(variants[0]);
+}
+
+function buildBeadPatternFromCurrentImage() {
+  state.bead.variants = [];
+  applyBeadVariant(createBeadPatternData());
+}
+
+async function generateBeadPattern({ retryAi = false } = {}) {
   if (!state.bead.image) { toast("请先选择照片"); return; }
+  if (!state.bead.catalog) {
+    try { await loadBeadPaletteCatalogs(); }
+    catch (error) { toast(`暂时无法生成：${error.message}`); return; }
+  }
   const generateButton = document.querySelector('[data-action="bead-generate"]');
+  const retryButton = document.querySelector('[data-action="bead-ai-retry"]');
   const originalLabel = generateButton?.textContent || "生成拼豆板图";
-  if (generateButton) { generateButton.disabled = true; generateButton.textContent = "正在计算明暗与拼豆位置…"; }
+  const mode = document.getElementById("beadGenerationMode")?.value || "local";
+  if (mode === "ai") {
+    const boardSize = document.getElementById("beadBoardSize");
+    const colorCount = document.getElementById("beadColorCount");
+    const adjusted = [];
+    if (Number(boardSize?.value || 0) < 58) { boardSize.value = "58"; adjusted.push("58 × 58 画板"); }
+    if (Number(colorCount?.value || 0) < 48) { colorCount.value = "48"; adjusted.push("48 色"); }
+    if (adjusted.length) toast(`为避免人像糊成大色块，已自动调整为 ${adjusted.join(" + ")}`);
+  }
+  if (generateButton) { generateButton.disabled = true; generateButton.textContent = mode === "ai" ? "AI 正在精修，请稍候…" : "正在计算明暗与拼豆位置…"; }
+  if (retryButton) retryButton.disabled = true;
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   try {
-  const size = Number(document.getElementById("beadBoardSize").value);
-  const colorCount = Number(document.getElementById("beadColorCount").value);
-  const cropMode = document.getElementById("beadCropMode").value;
-  const detailMode = document.getElementById("beadDetailMode").value;
-  const backgroundMode = document.getElementById("beadBackgroundMode")?.value || "keep";
-  const backgroundSensitivity = Number(document.getElementById("beadBackgroundSensitivity")?.value || 42);
-  const toneMode = document.getElementById("beadToneMode")?.value || "auto";
-  const pixels = beadSourcePixels(state.bead.image, size, cropMode, detailMode, beadCropSettings(), { mode: backgroundMode, sensitivity: backgroundSensitivity }, toneMode);
-  const result = quantizeBeadPixels(pixels, colorCount, { size, detailMode });
-  if (!result.palette.length) { toast("背景去除范围过大，已没有可生成的主体；请降低去背景力度"); return; }
-  state.bead.size = size; state.bead.palette = result.palette; state.bead.paletteMeta = result.paletteMeta; state.bead.indices = result.indices;
-  state.bead.generatedPalette = result.palette.map(color => [...color]); state.bead.generatedPaletteMeta = result.paletteMeta.map(meta => ({ ...meta }));
-  state.bead.generatedIndices = [...result.indices]; state.bead.selectedColor = 0;
-  renderBeadPattern();
-  document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (mode === "ai") await requestAiBeadPreview({ retry: retryAi });
+    else { state.bead.image = state.bead.originalImage || state.bead.image; document.getElementById("beadSourcePreview").src = state.bead.sourceUrl; document.getElementById("beadAiActions").hidden = true; }
+    generateSmartBeadVariants();
+  } catch (error) {
+    toast(error.message || "拼豆板图生成失败");
   } finally {
     if (generateButton) { generateButton.disabled = false; generateButton.textContent = originalLabel; }
+    if (retryButton) retryButton.disabled = false;
   }
 }
 
@@ -6638,7 +7490,7 @@ function saveCurrentBeadPattern() {
   const record = {
     id: globalThis.crypto?.randomUUID?.() || `bead-${Date.now()}`,
     title: `拼豆作品 · ${now.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`,
-    size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices],
+    size: state.bead.size, palette: state.bead.palette.map(color => [...color]), paletteMeta: state.bead.paletteMeta.map(meta => ({ ...meta, substituteRgb: meta.substituteRgb ? [...meta.substituteRgb] : null })), indices: [...state.bead.indices], catalog: state.bead.patternCatalog ? { ...state.bead.patternCatalog } : beadCatalogueSnapshot(),
     createdAt: now.toISOString(), updatedAt: now.toISOString(),
   };
   writeSavedBeadPatterns([record, ...readSavedBeadPatterns()]);
@@ -6648,8 +7500,10 @@ function saveCurrentBeadPattern() {
 function openSavedBeadPattern(id) {
   const item = readSavedBeadPatterns().find(entry => entry.id === id);
   if (!item) { toast("这份本机草稿已经不存在"); return; }
+  state.bead.variants = []; state.bead.selectedVariant = "";
   state.bead.size = Number(item.size); state.bead.palette = item.palette.map(color => [...color]);
   state.bead.paletteMeta = state.bead.palette.map((color, index) => item.paletteMeta?.[index] || beadPaletteMeta(color, index)); state.bead.indices = [...item.indices];
+  state.bead.patternCatalog = item.catalog ? { ...item.catalog } : null;
   state.bead.generatedPalette = state.bead.palette.map(color => [...color]); state.bead.generatedPaletteMeta = state.bead.paletteMeta.map(meta => ({ ...meta }));
   state.bead.generatedIndices = [...item.indices]; state.bead.selectedColor = 0;
   renderBeadPattern(); document.getElementById("beadResult").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -6657,7 +7511,7 @@ function openSavedBeadPattern(id) {
 
 function exportBeadPattern() {
   if (!state.bead.indices.length) { toast("请先生成板图"); return; }
-  const cell = state.bead.size <= 32 ? 24 : 16;
+  const cell = state.bead.size <= 32 ? 30 : 24;
   const boardSide = state.bead.size * cell;
   const counts = beadCounts();
   const columns = state.bead.palette.length > 18 ? 3 : 2;
@@ -6667,12 +7521,13 @@ function exportBeadPattern() {
   const canvas = document.createElement("canvas");
   canvas.width = boardSide; canvas.height = boardSide + footer;
   const board = document.createElement("canvas"); board.width = boardSide; board.height = boardSide;
-  paintBeadCanvas(board, state.bead);
+  paintBeadCanvas(board, state.bead, { labels: true, coordinates: true });
   const context = canvas.getContext("2d");
   context.fillStyle = "#fffaf6"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(board, 0, 0);
   context.fillStyle = "#2d1f22"; context.font = "700 22px sans-serif"; context.fillText(`${state.bead.size}×${state.bead.size} 拼豆板图`, 18, boardSide + 34);
   const totalBeads = counts.reduce((sum, count) => sum + count, 0);
-  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${totalBeads} 颗 · 空白 ${state.bead.size * state.bead.size - totalBeads} 格 · 购买时请按门店品牌色卡复核`, 18, boardSide + 58);
+  const catalog = state.bead.patternCatalog || beadCatalogueSnapshot();
+  context.font = "14px sans-serif"; context.fillStyle = "#7c6b68"; context.fillText(`共 ${totalBeads} 颗 · 空白 ${state.bead.size * state.bead.size - totalBeads} 格 · ${catalog?.brand || "未知品牌"} ${catalog?.series || ""} ${catalog?.beadSizeMm || "?"}mm${catalog?.verified ? " 已校准" : " 参考色，采购前请实物复核"}`, 18, boardSide + 58);
   const columnWidth = canvas.width / columns;
   state.bead.palette.forEach((color, index) => {
     const column = index % columns; const row = Math.floor(index / columns);
@@ -6708,6 +7563,19 @@ document.addEventListener("click", async event => {
     const action = beadAction.dataset.action;
     if (action === "bead-pick-image") document.getElementById("beadImageInput").click();
     else if (action === "bead-generate") generateBeadPattern();
+    else if (action === "bead-ai-retry") generateBeadPattern({ retryAi: true });
+    else if (action === "bead-toggle-zoom") {
+      const wrap = document.querySelector(".bead-canvas-wrap");
+      const zoomed = wrap?.classList.toggle("zoomed");
+      beadAction.textContent = zoomed ? "缩回全图" : "放大查看全部色号";
+      beadAction.setAttribute("aria-pressed", String(Boolean(zoomed)));
+      paintBeadCanvas(document.getElementById("beadCanvas"), state.bead, { labels: true, coordinates: true });
+    }
+    else if (action === "bead-use-variant") {
+      const variant = state.bead.variants.find(item => item.id === beadAction.dataset.id);
+      if (!variant) toast("这套方案已经失效，请重新生成");
+      else { applyBeadVariant(variant, { scroll: false }); toast(`已切换到${variant.label}`); }
+    }
     else if (action === "bead-reset-edits") {
       state.bead.palette = state.bead.generatedPalette.map(color => [...color]); state.bead.paletteMeta = state.bead.generatedPaletteMeta.map(meta => ({ ...meta }));
       state.bead.indices = [...state.bead.generatedIndices]; state.bead.selectedColor = 0; renderBeadPattern(); toast("已恢复刚生成的板图");
@@ -6717,6 +7585,15 @@ document.addEventListener("click", async event => {
     else if (action === "bead-export") exportBeadPattern();
     else if (action === "bead-open") openSavedBeadPattern(beadAction.dataset.id);
     else if (action === "bead-delete") { writeSavedBeadPatterns(readSavedBeadPatterns().filter(item => item.id !== beadAction.dataset.id)); renderSavedBeadPatterns(); toast("本机草稿已删除"); }
+    else if (action === "bead-ai-use") { try { await loadBeadAiVersion(beadAction.dataset.id); } catch (error) { toast(error.message); } }
+    else if (action === "bead-ai-delete") {
+      if (!window.confirm("确定永久删除这一版 AI 精修图吗？其他版本不会受影响。")) return;
+      try {
+        await api(`/api/v1/entertainment/beads/ai-previews/${encodeURIComponent(beadAction.dataset.id)}`, { method: "DELETE", body: "{}" });
+        state.bead.aiVersions = state.bead.aiVersions.filter(item => item.id !== beadAction.dataset.id);
+        renderBeadAiVersions(); toast("这一版已删除，其他版本仍保留");
+      } catch (error) { toast(error.message); }
+    }
     return;
   }
   const playTool = event.target.closest('[data-action="open-play-tool"]');
@@ -6724,7 +7601,7 @@ document.addEventListener("click", async event => {
   if (event.target.closest('[data-action="back-play-hub"]')) { showEntertainmentHub(); return; }
   if (event.target.closest('[data-action="clear-play-search"]')) { const input = document.getElementById("playSearch"); input.value = ""; filterEntertainmentFeatures(); input.focus(); return; }
   const cardTemplate = event.target.closest("[data-card-template]");
-  if (cardTemplate) { state.cards.templateId = cardTemplate.dataset.cardTemplate; state.cards.styleId = cardTemplate.dataset.cardTemplate; document.getElementById("coupleCardMessage").dataset.edited = ""; renderCoupleCards(); return; }
+  if (cardTemplate) { state.cards.templateId = cardTemplate.dataset.cardTemplate; state.cards.styleId = cardTemplate.dataset.cardTemplate; document.getElementById("coupleCardMessage").dataset.edited = ""; document.getElementById("customCardTitle").dataset.edited = ""; renderCoupleCards(); return; }
   const cardStyle = event.target.closest("[data-card-style]");
   if (cardStyle) { state.cards.styleId = cardStyle.dataset.cardStyle; renderCoupleCards(); return; }
   const signCard = event.target.closest('[data-action="open-card-sign"]');
@@ -6794,7 +7671,8 @@ document.addEventListener("click", async event => {
   if (assistantPrompt) {
     const input = document.getElementById("tripAssistantInput");
     input.value = assistantPrompt.dataset.assistantPrompt;
-    input.focus();
+    if (assistantPrompt.dataset.assistantAutoSubmit === "1") document.getElementById("tripAssistantForm")?.requestSubmit();
+    else input.focus();
     return;
   }
   const lifeSection = event.target.closest("[data-life-section]");
@@ -6824,6 +7702,36 @@ document.addEventListener("click", async event => {
   if (smartAction) {
     if (!requireOnlineMutation("shared_confirm", "智能操作预览")) return;
     try { await previewSmartAction(smartAction.dataset.smartAction); } catch (error) { toast(error.message); }
+    return;
+  }
+  const smartPrompt = event.target.closest("[data-smart-prompt]");
+  if (smartPrompt) {
+    const surface = smartPrompt.dataset.smartPromptSurface;
+    const form = document.querySelector(`[data-smart-form="${CSS.escape(surface)}"]`);
+    const input = form?.querySelector("input");
+    if (form && input) {
+      input.value = smartPrompt.dataset.smartPrompt;
+      state.smartIntentDrafts[surface] = input.value;
+      form.requestSubmit();
+    }
+    return;
+  }
+  const smartCard = event.target.closest("[data-smart-card-open]");
+  if (smartCard) {
+    try {
+      const resourceType = smartCard.dataset.smartResourceType;
+      const resourceId = smartCard.dataset.smartResourceId;
+      if (resourceType === "message" && resourceId) {
+        navigate("chat");
+        requestAnimationFrame(() => document.querySelector(`[data-message-id="${CSS.escape(resourceId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+      } else if (resourceType === "recipe" && resourceId) {
+        navigate("life"); setLifeSection("meals"); setMealSection("recipes");
+        await openRecipeDetail(resourceId);
+      } else if (["moment", "calendar_entry"].includes(resourceType) && resourceId) {
+        await openSharedDetail(resourceType, resourceId);
+      } else await openSmartNode(smartCard.dataset.smartCardOpen);
+    }
+    catch (error) { toast(error.message); }
     return;
   }
   const smartNode = event.target.closest("[data-smart-node]");
@@ -6885,7 +7793,10 @@ document.addEventListener("click", async event => {
   if (action === "toggle-chat-search") { setChatSearchOpen(!state.chatHistory.searchOpen); return; }
   if (action === "close-chat-search") { setChatSearchOpen(false); return; }
   if (action === "load-older-messages") { await loadOlderMessages(); return; }
-  if (action === "jump-new-messages") { scrollChatToLatest(); return; }
+  // A counter click is an explicit request to land on the newest message.
+  // Avoid smooth-scroll races on iOS/PWA where the button can disappear
+  // before the scrolling element has reached its final position.
+  if (action === "jump-new-messages") { scrollChatToLatest({ behavior: "auto", settleMs: 1400 }); return; }
   if (action === "open-chat-search-result") {
     try { await openChatSearchResult(actionEl.dataset.messageId); }
     catch (error) { toast(error.message); }
@@ -8274,29 +9185,32 @@ document.addEventListener("click", async event => {
   }
   if (action === "speaker") { actionEl.classList.toggle("selected"); toast("网页音频输出由手机或电脑的系统声音设置控制"); }
   if (action === "view-itinerary-detail") openItineraryDetail(actionEl.dataset.itemId);
+  if (action === "edit-trip-item") openTripItemEditor(actionEl.dataset.itemId, actionEl.dataset.dayNumber);
   if (action === "edit-plan") {
-    const item = currentEditingTripItem();
-    if (!item) { toast("当前方案还没有可调整的行程项目"); return; }
-    state.pendingRevision = null;
-    document.getElementById("editItemTitle").value = item.title || "";
-    document.getElementById("editItemTime").value = item.start_time || "09:00";
-    document.getElementById("editItemNote").value = item.note || "";
-    document.getElementById("revisionPreview").hidden = true;
-    const applyButton = document.getElementById("applyRevisionButton"); applyButton.hidden = true; applyButton.disabled = true;
-    openModal("editModal");
+    openTripItemEditor(state.editingItemId);
   }
   if (action === "generate-trip") {
     if (!requireOnlineMutation("ai_compose", "生成旅行方案")) return;
-    actionEl.disabled = true; actionEl.textContent = "生成中…";
+    actionEl.disabled = true; actionEl.textContent = "正在提交…";
     try {
-      state.data.trip = await api(`/api/v1/trips/${state.data.trip.id}/generate`, { method: "POST", body: "{}" });
-      state.plan = "slow"; state.selectedItemIds.clear(); renderPlan(); renderHotel();
-      const generated = tripVariant("slow");
-      toast(generated?.generation_source === "ai"
-        ? "大模型已生成五套方案，人工确认前不会覆盖其他内容"
-        : `大模型本次未完成，已保留可编辑的本地方案：${generated?.generation_message || "请稍后重试"}`);
+      await queueTripGeneration({ preserve_manual: true }, { tripId: state.data.trip.id });
+      toast("已转入后台生成，你可以继续使用其他页面");
+      resumePendingTripGeneration();
     } catch (error) { toast(error.message); }
     finally { actionEl.disabled = false; actionEl.textContent = "重新生成"; }
+  }
+  if (action === "open-trip-generation") navigate("trip");
+  if (action === "retry-trip-generation") {
+    let pending = null;
+    try { pending = JSON.parse(privateStorage().getItem("love-trip-generation") || "null"); } catch (_) {}
+    if (!pending?.payload) { toast("上次生成条件已过期，请重新打开旅行编辑页"); return; }
+    actionEl.disabled = true; actionEl.textContent = "提交中…";
+    try {
+      await queueTripGeneration(pending.payload, { tripId: pending.tripId || null });
+      toast("已按原条件重新提交，不需要重新填写");
+      resumePendingTripGeneration();
+    } catch (error) { toast(error.message); }
+    finally { actionEl.disabled = false; }
   }
   if (action === "search-destination") {
     const query = document.getElementById("tripDestination").value.trim();
@@ -8433,6 +9347,12 @@ document.addEventListener("click", async event => {
     try {
       const deleted = await api(`/api/v1/trips/${encodeURIComponent(trip.id)}`, { method: "DELETE", body: JSON.stringify({ expected_version: trip.version }) });
       evictTripOfflineSnapshot(trip.id);
+      // The realtime invalidation emitted by the DELETE can refresh the smart
+      // surface before bootstrap selects the next trip. Remove the deleted trip
+      // from local state immediately so that refresh never asks the server for
+      // a manifest belonging to an already-deleted resource.
+      state.data.trip = null;
+      state.data.trips = (state.data.trips || []).filter(item => item.id !== trip.id);
       privateStorage().removeItem("love-trip-id"); privateStorage().removeItem(`love-ui-trip:${trip.id}`);
       state.manifests.trip = null; state.pinnedSmartSurfaces.delete("trip");
       await loadBootstrap({ quiet: true });
@@ -8530,7 +9450,25 @@ document.addEventListener("click", async event => {
       await loadBootstrap({ quiet: true }); toast(visibility === "private" ? "已设为仅自己可见" : "已设为双方可见");
     } catch (error) { toast(error.message); }
   }
-  if (["open-profile", "privacy-center"].includes(action)) { try { await loadAccountCenter(); } catch (error) { toast(error.message); } }
+  if (["open-profile", "privacy-center"].includes(action)) {
+    try {
+      await loadAccountCenter();
+      if (action === "privacy-center") {
+        showAccountSection("privacy");
+        await loadAccountSection("privacy");
+      }
+    } catch (error) { toast(error.message); }
+  }
+  if (action === "open-account-section") {
+    const section = actionEl.dataset.accountSection || "overview";
+    showAccountSection(section);
+    // Device, notification, offline-queue and media state can change while the
+    // account sheet stays open. Refresh those panels on every explicit visit,
+    // while keeping profile history lazy and cached until it is edited.
+    const force = section === "notifications" || section === "privacy";
+    try { await loadAccountSection(section, { force }); } catch (error) { toast(error.message); }
+  }
+  if (action === "back-account-center") showAccountSection("overview");
   if (action === "add-life" || action === "open-calendar") {
     openCalendarComposer(actionEl.dataset.entryType || "event");
   }
@@ -8598,37 +9536,37 @@ document.addEventListener("click", async event => {
     try { await api(`/api/v1/chat-imports/${state.chatImport.id}/cancel`, { method: "POST", body: "{}" }); } catch (_) {} state.chatImport = null; closeModals(); toast("导入草稿已取消");
   }
   if (action === "revoke-device") {
-    try { await api(`/api/v1/account/devices/${actionEl.dataset.id}/revoke`, { method: "POST", body: "{}" }); await loadAccountCenter(); toast("该设备已撤销"); } catch (error) { toast(error.message); }
+    try { await api(`/api/v1/account/devices/${actionEl.dataset.id}/revoke`, { method: "POST", body: "{}" }); await loadAccountSection("notifications", { force: true }); toast("该设备已撤销"); } catch (error) { toast(error.message); }
   }
   if (action === "revoke-ai-grant") {
     if (window.confirm("撤回后会阻止这项内容被后续 AI 调用；已经发送给模型的数据无法收回。确定撤回？")) try {
       const result = await api(`/api/v1/account/privacy/grants/${encodeURIComponent(actionEl.dataset.id)}/revoke`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) });
-      await loadAccountCenter();
+      await loadAccountSection("privacy", { force: true });
       toast(result.idempotent ? "这项 AI 授权此前已撤回" : "AI 授权已撤回，后续调用已被阻止");
     } catch (error) { toast(error.status === 409 ? "授权状态已变化，请刷新后再试" : error.message); }
   }
   if (action === "retry-offline-mutation") {
     try {
       const result = await retryOfflineMutation(actionEl.dataset.id);
-      await loadAccountCenter();
+      await loadAccountSection("privacy", { force: true });
       toast(result.synced ? "离线操作已由服务器确认同步" : navigator.onLine ? "重试尚未完成，原记录仍保留" : "已重新排队，联网后会自动同步");
     } catch (error) { toast(error.message); }
   }
   if (action === "discard-offline-mutation") {
     if (window.confirm("丢弃后这项离线操作不会发送到服务器，且无法恢复。确定丢弃？")) try {
       await discardOfflineMutation(actionEl.dataset.id);
-      await loadAccountCenter();
+      await loadAccountSection("privacy", { force: true });
       toast("已从当前设备丢弃，这项操作不会发送到服务器");
     } catch (error) { toast(error.message); }
   }
   if (action === "trash-media") {
-    if (window.confirm("把这个未引用的媒体移入回收站？")) try { await api(`/api/v1/media/${actionEl.dataset.id}/trash`, { method: "POST", body: "{}" }); await loadAccountCenter(); toast("媒体已移入回收站"); } catch (error) { toast(error.message); }
+    if (window.confirm("把这个未引用的媒体移入回收站？")) try { await api(`/api/v1/media/${actionEl.dataset.id}/trash`, { method: "POST", body: "{}" }); await loadAccountSection("privacy", { force: true }); toast("媒体已移入回收站"); } catch (error) { toast(error.message); }
   }
   if (action === "restore-media") {
-    try { await api(`/api/v1/media/${actionEl.dataset.id}/restore`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) }); await loadAccountCenter(); toast("媒体已恢复"); } catch (error) { toast(error.status === 409 ? "媒体状态已变化，请刷新后再试" : error.message); }
+    try { await api(`/api/v1/media/${actionEl.dataset.id}/restore`, { method: "POST", body: JSON.stringify({ expected_version: Number(actionEl.dataset.version) }) }); await loadAccountSection("privacy", { force: true }); toast("媒体已恢复"); } catch (error) { toast(error.status === 409 ? "媒体状态已变化，请刷新后再试" : error.message); }
   }
   if (action === "purge-media") {
-    if (window.confirm("永久删除原图和缩略图后无法恢复，确定继续？")) try { await api(`/api/v1/media/${actionEl.dataset.id}`, { method: "DELETE", body: "{}" }); await loadAccountCenter(); toast("媒体已永久删除"); } catch (error) { toast(error.message); }
+    if (window.confirm("永久删除原图和缩略图后无法恢复，确定继续？")) try { await api(`/api/v1/media/${actionEl.dataset.id}`, { method: "DELETE", body: "{}" }); await loadAccountSection("privacy", { force: true }); toast("媒体已永久删除"); } catch (error) { toast(error.message); }
   }
   if (action === "export-account") { window.location.assign("/api/v1/account/export.zip"); toast("正在准备完整数据导出"); }
   if (action === "unlink-couple") {
@@ -8853,7 +9791,7 @@ document.addEventListener("input", event => {
   const form = event.target.closest?.("[data-smart-form]");
   if (form && event.target.matches("input")) state.smartIntentDrafts[form.dataset.smartForm] = event.target.value;
   if (["coupleCardMessage", "customCardTitle"].includes(event.target.id)) {
-    if (event.target.id === "coupleCardMessage") event.target.dataset.edited = "1";
+    event.target.dataset.edited = "1";
     if (state.cards.data) renderCoupleCards();
   }
 });
@@ -8979,6 +9917,46 @@ document.getElementById("tripExpenseForm").addEventListener("submit", async even
 
 renderEmergencyFormFields({});
 
+async function submitLifeAssistantIntent(intent) {
+  const job = await api("/api/v1/assistant/jobs", {
+    method: "POST",
+    body: JSON.stringify({ intent, client_request_id: clientKey("assistant-job") })
+  });
+  let completed = job;
+  for (let attempt = 0; completed.status !== "completed" && completed.status !== "failed" && attempt < 80; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    completed = await api("/api/v1/assistant/jobs/" + encodeURIComponent(job.id));
+  }
+  if (!completed.plan) throw new Error(completed.error_message || "方案仍在整理，请稍后从方案记录继续查看");
+  await loadLifeAssistant({ quiet: true });
+  await openLifeAssistantPlan(completed.plan.id);
+  toast("已生成可点击的操作卡片，双方确认后才会写入");
+  return completed.plan;
+}
+
+async function askTripAssistant(message) {
+  const trip = state.data?.trip;
+  if (!trip) throw new Error("请先创建并选择一段旅行");
+  const key = `assistant-message-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`;
+  const liveContext = state.tripLive.tripId === trip.id
+    && state.tripLive.ownerUserId === state.data?.user?.id
+    && liveContextIsFresh(state.tripLive.context) ? state.tripLive.context : null;
+  const result = await api(`/api/v1/trips/${encodeURIComponent(trip.id)}/assistant/messages`, {
+    method: "POST",
+    body: JSON.stringify({ message, idempotency_key: key, ...(liveContext ? { live_context: liveContext } : {}) })
+  });
+  state.tripAssistantLoadSequence += 1;
+  const currentItems = state.tripAssistant.tripId === trip.id ? (state.tripAssistant.items || []) : [];
+  state.tripAssistant = {
+    tripId: trip.id,
+    loading: false,
+    items: [...currentItems, { id: `local-${key}`, role: "user", content: message, author_name: state.data?.user?.nickname, cards: [] }, result.assistant]
+  };
+  renderTripAssistant();
+  await loadTripAssistant({ quiet: true });
+  return result;
+}
+
 document.getElementById("lifeAssistantForm").addEventListener("submit", async event => {
   event.preventDefault();
   if (!requireOnlineMutation("ai_compose", "生活助理")) return;
@@ -8989,17 +9967,8 @@ document.getElementById("lifeAssistantForm").addEventListener("submit", async ev
   button.disabled = true;
   button.textContent = "正在整理…";
   try {
-    const job = await api("/api/v1/assistant/jobs", {
-      method: "POST",
-      body: JSON.stringify({ intent, client_request_id: clientKey("assistant-job") })
-    });
-    let completed = job;
-    if (job.status !== "completed") completed = await api("/api/v1/assistant/jobs/" + encodeURIComponent(job.id));
-    if (!completed.plan) throw new Error(completed.error_message || "方案仍在整理，请稍后查看方案记录");
+    await submitLifeAssistantIntent(intent);
     input.value = "";
-    await loadLifeAssistant({ quiet: true });
-    await openLifeAssistantPlan(completed.plan.id);
-    toast("方案已生成，两个人现在都能查看");
   } catch (error) { toast(error.message); }
   finally {
     button.disabled = false;
@@ -9018,17 +9987,8 @@ document.getElementById("tripAssistantForm").addEventListener("submit", async ev
   if (!message) return;
   button.disabled = true; button.textContent = "思考中…";
   try {
-    const key = `assistant-message-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`;
-    const liveContext = state.tripLive.tripId === trip.id
-      && state.tripLive.ownerUserId === state.data?.user?.id
-      && liveContextIsFresh(state.tripLive.context) ? state.tripLive.context : null;
-    const result = await api(`/api/v1/trips/${encodeURIComponent(trip.id)}/assistant/messages`, { method: "POST", body: JSON.stringify({ message, idempotency_key: key, ...(liveContext ? { live_context: liveContext } : {}) }) });
+    await askTripAssistant(message);
     input.value = "";
-    state.tripAssistantLoadSequence += 1;
-    const currentItems = state.tripAssistant.tripId === trip.id ? (state.tripAssistant.items || []) : [];
-    state.tripAssistant = { tripId: trip.id, loading: false, items: [...currentItems, { id: `local-${key}`, role: "user", content: message, author_name: state.data?.user?.nickname, cards: [] }, result.assistant] };
-    renderTripAssistant();
-    await loadTripAssistant({ quiet: true });
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.textContent = "发送"; }
 });
@@ -9094,6 +10054,8 @@ document.getElementById("messages").addEventListener("scroll", event => {
 
 document.getElementById("authForm").addEventListener("submit", async event => {
   event.preventDefault();
+  if (state.authSubmitting) return;
+  state.authSubmitting = true;
   const payload = {
     username: document.getElementById("authUsername").value,
     password: document.getElementById("authPassword").value
@@ -9103,17 +10065,22 @@ document.getElementById("authForm").addEventListener("submit", async event => {
     const endpoint = state.authMode === "register" ? "/api/v1/auth/register" : "/api/v1/auth/login";
     const result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
     setAuthProgress(48, "账号验证成功，正在打开共同空间…");
+    await confirmAuthenticatedSession(result.user?.id);
     await clearMealOfflineData();
     setAuthProgress(62, "正在读取消息、回忆和旅行…");
     resetTripLive();
     state.pushSynced = false;
     document.getElementById("authPassword").value = "";
-    if (!result.pairing?.paired) showPairing(); else await loadBootstrap({ quiet: true });
+    if (!result.pairing?.paired) showPairing();
+    else {
+      await loadBootstrap({ quiet: true });
+      if (state.data?.user?.id !== result.user?.id) throw new Error("共同空间尚未读取完成，请检查网络后重试");
+    }
     setAuthProgress(100, "共同空间已准备好");
     broadcastAuthChange(state.authMode, result.user?.username || payload.username);
     toast(state.authMode === "register" ? "账号创建成功" : "登录成功");
   } catch (error) { toast(error.message); }
-  finally { setAuthProgress(0, "", { busy: false }); }
+  finally { state.authSubmitting = false; setAuthProgress(0, "", { busy: false }); }
 });
 
 document.getElementById("changePasswordForm").addEventListener("submit", async event => {
@@ -9127,7 +10094,8 @@ document.getElementById("changePasswordForm").addEventListener("submit", async e
   try {
     const result = await api("/api/v1/account/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, new_password_confirmation: confirmation }) });
     event.target.reset();
-    await loadAccountCenter();
+    renderAccountIdentity();
+    showAccountSection("security");
     toast(`密码已更换，已退出其他 ${result.revoked_sessions || 0} 个会话`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
@@ -9177,7 +10145,10 @@ document.getElementById("avatarProfileForm").addEventListener("submit", async ev
     state.data.user = result.user;
     renderIdentity();
     resetProfileDraft(result.user);
-    await loadAccountCenter();
+    renderAccountIdentity();
+    state.accountCenter.loaded.delete("profile");
+    await loadAccountSection("profile");
+    showAccountSection("profile");
     toast(result.nickname_matches_partner ? "资料已保存；你们现在使用相同昵称" : `你的昵称和头像已经更新，${partnerNickname()}也会看到`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
@@ -9205,7 +10176,8 @@ document.getElementById("themeProfileForm").addEventListener("submit", async eve
     state.data.user = result.user;
     applyUiTheme(result.user.ui_theme);
     applyUiDisplayPreferences(result.user);
-    await loadAccountCenter();
+    renderAccountIdentity();
+    showAccountSection("appearance");
     toast("显示偏好已经保存，只影响你的账号");
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
@@ -9326,7 +10298,8 @@ document.getElementById("tripForm").addEventListener("submit", async event => {
   button.disabled = true; button.textContent = "生成中…";
   try {
     const editingTrip = form.dataset.tripId ? state.data?.trip : null;
-    if (!state.destinationCandidateId && !state.destinationExistingPlace) {
+    const confirmedExistingPlace = Boolean(editingTrip?.destination_place && state.destinationExistingPlace);
+    if (!state.destinationCandidateId && !confirmedExistingPlace) {
       throw new Error("请先点击“查找并确认具体地点”，核对城市和完整地址后再生成方案");
     }
     const startDate = document.getElementById("tripStart").value; const endDate = document.getElementById("tripEnd").value;
@@ -9345,18 +10318,24 @@ document.getElementById("tripForm").addEventListener("submit", async event => {
       budget: document.getElementById("tripBudget").value,
       preferences: { pace: document.getElementById("tripPace").value, transport: document.getElementById("tripTransport").value, interests: document.getElementById("tripInterests").value, diet: document.getElementById("tripDiet").value, hotel: document.getElementById("tripHotel").value, must_visits: document.getElementById("tripMustVisits").value }
     };
-    let trip;
+    let trip = null;
     if (editingTrip) {
       trip = await api(`/api/v1/trips/${encodeURIComponent(editingTrip.id)}`, { method: "PATCH", body: JSON.stringify({ ...payload, expected_version: editingTrip.version }) });
-      if (state.destinationCandidateId) {
-        trip = await api(`/api/v1/trips/${encodeURIComponent(editingTrip.id)}/generate`, { method: "POST", body: JSON.stringify({ preserve_manual: false }) });
-      }
+      state.data.trip = trip;
+      state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)];
+      await queueTripGeneration({ preserve_manual: !state.destinationCandidateId }, { tripId: editingTrip.id });
     } else {
       button.textContent = "已提交 · 后台规划中…";
-      trip = await createTripInBackground(payload);
+      await queueTripGeneration(payload);
     }
-    state.data.trip = trip; state.data.trips = [trip, ...(state.data.trips || []).filter(item => item.id !== trip.id)]; state.plan = "slow"; state.selectedItemIds.clear(); privateStorage().setItem("love-trip-id", trip.id); closeModals(); renderIdentity(); renderPlan(); renderHotel(); navigate("trip"); setTripSection("plans");
-    toast(editingTrip ? "具体地点已确认，旧地理范围已清除并重新生成五套方案" : (trip.date_conflicts?.length ? `已创建，但与“${trip.date_conflicts.map(item => item.title).join("、")}”日期重叠，请检查` : "新旅行与五套方案已创建"));
+    if (trip) {
+      state.plan = trip.active_variant || "slow";
+      privateStorage().setItem("love-trip-id", trip.id);
+      renderIdentity(); renderPlan(); renderHotel();
+    }
+    state.selectedItemIds.clear(); closeModals(); navigate("trip"); setTripSection("plans");
+    toast(editingTrip ? "地点已保存，五套方案正在后台重新生成" : "旅行已提交后台规划，可以继续使用其他页面");
+    resumePendingTripGeneration();
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.textContent = form.dataset.tripId ? "保存地点并重新生成五套方案" : "生成五套旅行方案"; }
 });
@@ -9628,21 +10607,61 @@ document.getElementById("coupleCardForm").addEventListener("submit", async event
   event.preventDefault(); const button = event.submitter; button.disabled = true;
   try {
     const result = await api("/api/v1/entertainment/cards", { method: "POST", body: JSON.stringify({ template_id: state.cards.templateId, style_id: state.cards.styleId, title: document.getElementById("customCardTitle").value.trim(), message: document.getElementById("coupleCardMessage").value.trim(), signature_name: document.getElementById("cardCreatorSignatureName").value.trim(), signature: state.cards.creatorSignature, confirmed: document.getElementById("cardCreatorConfirmed").checked }) });
-    state.cards.creatorSignature = []; document.getElementById("cardCreatorConfirmed").checked = false; document.getElementById("coupleCardMessage").dataset.edited = ""; await loadCoupleCards(); toast(`已签名并发送${result.template_name}`);
+    state.cards.creatorSignature = []; document.getElementById("cardCreatorConfirmed").checked = false; document.getElementById("coupleCardMessage").dataset.edited = ""; document.getElementById("customCardTitle").dataset.edited = ""; await loadCoupleCards(); toast(`已签名并发送${result.template_name}`);
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
 
 document.getElementById("coupleCardSignForm").addEventListener("submit", async event => {
   event.preventDefault(); const card = state.cards.data?.cards?.find(item => item.id === state.cards.signingId); if (!card) return; const button = event.submitter; button.disabled = true;
   try {
-    await api(`/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/sign`, { method: "POST", body: JSON.stringify({ signature_name: document.getElementById("cardRecipientSignatureName").value.trim(), signature: state.cards.recipientSignature, confirmed: document.getElementById("cardRecipientConfirmed").checked, expected_version: card.version }) });
-    closeModals({ force: true }); state.cards.recipientSignature = []; state.cards.signingId = null; await loadCoupleCards(); toast("双方签名已完成，现在可以下载 PDF");
+    await api(`/api/v1/entertainment/cards/${encodeURIComponent(card.id)}/sign`, { method: "POST", body: JSON.stringify({ recipient_message: document.getElementById("cardRecipientMessage").value.trim(), signature_name: document.getElementById("cardRecipientSignatureName").value.trim(), signature: state.cards.recipientSignature, confirmed: document.getElementById("cardRecipientConfirmed").checked, expected_version: card.version }) });
+    closeModals({ force: true }); state.cards.recipientSignature = []; state.cards.signingId = null; document.getElementById("cardRecipientMessage").value = ""; await loadCoupleCards(); toast("留言和双方签名已收藏，现在可以下载 PDF");
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+document.getElementById("cardRecipientMessage").addEventListener("input", () => {
+  const card = state.cards.data?.cards?.find(item => item.id === state.cards.signingId);
+  if (card) renderCardSignSummary(card);
 });
 
 document.getElementById("beadImageInput").addEventListener("change", event => {
   loadBeadImage(event.target.files?.[0]);
   event.target.value = "";
+});
+document.getElementById("beadGenerationMode")?.addEventListener("change", async event => {
+  const ai = event.target.value === "ai";
+  const note = document.getElementById("beadModeNote");
+  if (!ai) {
+    note.textContent = "本机模式不会上传照片，也不产生外部接口费用；适合图标、卡通图和已经精修好的图片。";
+    return;
+  }
+  const boardSize = document.getElementById("beadBoardSize");
+  const colorCount = document.getElementById("beadColorCount");
+  if (Number(boardSize?.value || 0) < 58) boardSize.value = "58";
+  if (Number(colorCount?.value || 0) < 48) colorCount.value = "48";
+  note.textContent = "AI 模式会在你点击生成后，将本次照片发送给阿里云百炼精修。原图不保存；每次生成的精修版会仅对当前账号保存，旧版不会覆盖，需由你明确删除。每次重试会产生一次图片费用。";
+  try {
+    const status = await api("/api/v1/entertainment/beads/ai-status");
+    state.bead.aiConfigured = Boolean(status.configured);
+    if (!status.configured) throw new Error("服务器尚未配置百炼图片服务");
+    renderBeadAiVersions();
+    toast(`AI 人像精修可用 · ${status.model}`);
+  } catch (error) {
+    state.bead.aiConfigured = false; event.target.value = "local";
+    note.textContent = `AI 模式暂不可用：${error.message}。已切回本机生成。`;
+  }
+});
+document.getElementById("beadPaletteCatalog")?.addEventListener("change", async event => {
+  const previous = state.bead.catalogId;
+  event.target.disabled = true;
+  try {
+    await selectBeadCatalogue(event.target.value);
+    if (state.bead.image && state.bead.indices.length && previous !== event.target.value) {
+      generateSmartBeadVariants();
+      toast(`已按 ${state.bead.catalog.brand} ${state.bead.catalog.series} 重新生成三套图纸`);
+    }
+  } catch (error) {
+    event.target.value = previous; toast(error.message || "色卡切换失败");
+  } finally { event.target.disabled = false; }
 });
 for (const id of ["beadCropX", "beadCropY", "beadCropZoom", "beadBackgroundSensitivity"]) document.getElementById(id)?.addEventListener("input", updateBeadCropPreview);
 document.getElementById("beadBackgroundMode")?.addEventListener("change", event => {
@@ -9667,11 +10686,24 @@ document.getElementById("beadUploadZone").addEventListener("drop", event => {
 document.getElementById("beadCanvas").addEventListener("click", event => {
   if (!state.bead.indices.length) return;
   const bounds = event.currentTarget.getBoundingClientRect();
-  const x = Math.floor((event.clientX - bounds.left) / bounds.width * state.bead.size);
-  const y = Math.floor((event.clientY - bounds.top) / bounds.height * state.bead.size);
+  const insetRatio = Number(event.currentTarget.dataset.beadInset || 0);
+  const localX = ((event.clientX - bounds.left) / bounds.width - insetRatio) / Math.max(.01, 1 - insetRatio * 2);
+  const localY = ((event.clientY - bounds.top) / bounds.height - insetRatio) / Math.max(.01, 1 - insetRatio * 2);
+  const x = Math.floor(localX * state.bead.size);
+  const y = Math.floor(localY * state.bead.size);
   if (x < 0 || y < 0 || x >= state.bead.size || y >= state.bead.size) return;
-  state.bead.indices[y * state.bead.size + x] = state.bead.selectedColor;
+  const offset = y * state.bead.size + x;
+  const current = state.bead.indices[offset];
+  const meta = current >= 0 ? state.bead.paletteMeta[current] : null;
+  const inspector = document.getElementById("beadCellInspector");
+  if (inspector) inspector.textContent = meta
+    ? `第 ${y + 1} 行 · 第 ${x + 1} 列：${meta.code} ${meta.name}`
+    : `第 ${y + 1} 行 · 第 ${x + 1} 列：空白，不放豆`;
+  if (!document.querySelector(".bead-result-advanced")?.open) return;
+  state.bead.indices[offset] = state.bead.selectedColor;
   renderBeadPattern();
+  const selected = state.bead.paletteMeta[state.bead.selectedColor];
+  if (inspector && selected) inspector.textContent = `已修改第 ${y + 1} 行 · 第 ${x + 1} 列：${selected.code} ${selected.name}`;
 });
 
 document.querySelectorAll(".modal").forEach(modal => modal.addEventListener("click", event => { if (event.target === modal) closeModals(); }));
@@ -9684,7 +10716,7 @@ window.addEventListener("pagehide", () => stopVoiceResources({ discard: true }))
 installThemeDecorations();
 renderPlan();
 navigate(state.screen);
-initializeAuth();
+initializeApplication();
 
 // Lightweight same-origin sync for the local MVP. Production can replace this
 // polling loop with the WebSocket events defined in SRS.md.
@@ -9705,5 +10737,3 @@ setInterval(async () => {
     // Preserve the last usable local view during transient network failures.
   }
 }, 5000);
-
-if ("serviceWorker" in navigator && window.isSecureContext) serviceWorkerRegistration().catch(() => {});

@@ -31,6 +31,15 @@ def _json(value: str | None, default: Any) -> Any:
 
 class TravelAssistantMixin:
     @staticmethod
+    def _assistant_clarification(message: str, options: list[dict] | None = None) -> list[dict]:
+        """Return a compact, clickable follow-up instead of a text-only dead end."""
+        return [{
+            "type": "clarification",
+            "message": str(message)[:500],
+            "options": list(options or [])[:8],
+        }]
+
+    @staticmethod
     def _quote_source_metadata(row: dict) -> dict:
         mode = str(row.get("source_mode") or "").strip().lower()
         if bool(row.get("mock")) or mode == "mock":
@@ -89,7 +98,9 @@ class TravelAssistantMixin:
             str(card.get("draft_id"))
             for item in items
             for card in item.get("cards", [])
-            if card.get("type") in {"itinerary_change", "day_replan"} and card.get("draft_id")
+            if card.get("type") in {
+                "itinerary_change", "day_replan", "indoor_place_option", "place_replacement_option",
+            } and card.get("draft_id")
         }
         draft_statuses: dict[str, str] = {}
         if draft_ids:
@@ -527,7 +538,14 @@ class TravelAssistantMixin:
 
     def _assistant_itinerary_draft(self, trip_id: str, trip: dict, message: str, intent: Any, user_id: str, couple_id: str) -> list[dict]:
         if not intent.changes:
-            return [{"type": "clarification", "message": "请告诉我想调整到几点或停留多久，也可以直接写出行程名称。"}]
+            return self._assistant_clarification(
+                "我还不知道你想改时间、停留时长还是地点，请点选一项。",
+                [
+                    {"label": "调整时间", "prompt": "我要调整一项行程的开始时间"},
+                    {"label": "调整停留时长", "prompt": "我要调整一项行程的停留时长"},
+                    {"label": "更换景点或活动", "prompt": "我要换掉一个景点或活动"},
+                ],
+            )
         active = trip.get("active_variant") or "slow"
         available = []
         for variant in trip.get("variants", []):
@@ -539,7 +557,7 @@ class TravelAssistantMixin:
                 for item in day.get("items", []):
                     available.append((day, item))
         if not available:
-            return [{"type": "clarification", "message": "没有找到要调整的行程，请先在每日行程中选择一项。"}]
+            return self._assistant_clarification("没有找到可调整的行程，请先在每日行程中添加或解锁一项。")
         hint = str(getattr(intent, "item_hint", "") or "").strip()
         exact = [
             pair for pair in available
@@ -548,7 +566,13 @@ class TravelAssistantMixin:
         ]
         if len(exact) > 1:
             days = "、".join(f"第{pair[0]['day_number']}天" for pair in exact[:6])
-            return [{"type": "clarification", "message": f"这段旅行里有多条同名行程（{days}），请补充第几天后再调整。"}]
+            return self._assistant_clarification(
+                f"这段旅行里有多条同名行程（{days}），请补充第几天，或直接点选具体日期。",
+                [
+                    {"label": f"第{day['day_number']}天 · {item['title']}", "prompt": f"第{day['day_number']}天，{message}"}
+                    for day, item in exact[:8]
+                ],
+            )
         if len(exact) == 1:
             day, item = exact[0]
         else:
@@ -560,8 +584,16 @@ class TravelAssistantMixin:
             elif "晚上" in message or "夜间" in message:
                 time_candidates = [pair for pair in available if pair[1]["start_time"] >= "18:00"]
             if len(time_candidates) != 1:
-                choices = "；".join(f"第{pair[0]['day_number']}天 {pair[1]['start_time']} {pair[1]['title']}" for pair in time_candidates[:4])
-                return [{"type": "clarification", "message": f"还不能确定要修改哪一项，请写出行程名称或更具体的时段。可选：{choices}"}]
+                return self._assistant_clarification(
+                    "还不能确定要修改哪一项，请点选原行程。",
+                    [
+                        {
+                            "label": f"第{day['day_number']}天 {item['start_time']} · {item['title']}",
+                            "prompt": f"把第{day['day_number']}天的{item['title']}{message}",
+                        }
+                        for day, item in time_candidates[:8]
+                    ],
+                )
             day, item = time_candidates[0]
         impact = self.impact_analysis(item["id"], intent.changes, user_id=user_id)
         before = {key: item.get(key) for key in intent.changes}
@@ -595,7 +627,15 @@ class TravelAssistantMixin:
             except ValueError:
                 day_number = None
         if day_number is None:
-            return [{"type": "clarification", "message": "请告诉我是第几天，或先点击“更新当前位置”再调整今天。"}]
+            active = trip.get("active_variant") or "slow"
+            days = next((variant.get("days", []) for variant in trip.get("variants", []) if variant.get("style") == active), [])
+            return self._assistant_clarification(
+                "请先选择要重新安排哪一天。",
+                [
+                    {"label": f"第{day['day_number']}天 · {day.get('title') or day.get('date') or ''}", "prompt": f"第{day['day_number']}天，{message}"}
+                    for day in days[:8]
+                ],
+            )
         day = next(
             (
                 day
@@ -605,13 +645,16 @@ class TravelAssistantMixin:
             None,
         )
         if not day:
-            return [{"type": "clarification", "message": "这次旅行没有对应日期，请检查第几天。"}]
+            return self._assistant_clarification("这次旅行没有对应日期，请重新选择有效日期。")
         target_date = date.fromisoformat(str(day.get("date") or trip.get("start_date"))[:10])
         reference_date = context.local_time.date() if context else date.today()
         if target_date < reference_date:
-            return [{"type": "clarification", "message": "这一天已经过去，不能重新安排已发生的行程。"}]
+            return self._assistant_clarification("这一天已经过去，不能重新安排已发生的行程。")
         if target_date == reference_date and context is None:
-            return [{"type": "clarification", "message": "调整今天需要先点击“更新当前位置”，用于判断哪些项目已经开始；位置不会保存。"}]
+            return self._assistant_clarification(
+                "调整今天需要先点击“更新当前位置”，用于判断哪些项目已经开始；位置不会保存。",
+                [{"label": "更新当前位置", "action": "trip-live-refresh"}],
+            )
         if context:
             local_time = context.local_time
         else:
@@ -630,7 +673,7 @@ class TravelAssistantMixin:
         )
         if not preview["changes"]:
             message_text = preview["warnings"][0] if preview["warnings"] else "当前条件下没有需要调整的项目。"
-            return [{"type": "clarification", "message": message_text}]
+            return self._assistant_clarification(message_text)
         item_versions = {row["item_id"]: row["item_version"] for row in preview["changes"]}
         payload = {
             "day_number": int(day_number),
@@ -651,6 +694,208 @@ class TravelAssistantMixin:
                 ),
             )
         return [{"type": "day_replan", "draft_id": draft_id, "status": "draft", **preview, "expires_at": expires_at}]
+
+    def _assistant_place_replacement_cards(
+        self,
+        trip_id: str,
+        trip: dict,
+        day_number: int,
+        user_id: str,
+        couple_id: str,
+        *,
+        query: str,
+        message: str,
+        indoor_only: bool = False,
+        target_item_id: str = "",
+    ) -> tuple[list[dict], str]:
+        """Build real, confirm-before-write place choices for one itinerary item."""
+        active_style = trip.get("active_variant") or "slow"
+        day = next(
+            (
+                value
+                for variant in trip.get("variants", []) if variant.get("style") == active_style
+                for value in variant.get("days", []) if int(value.get("day_number") or 0) == int(day_number)
+            ),
+            None,
+        )
+        if not day:
+            return [], ""
+        indoor_words = ("博物馆", "美术馆", "科技馆", "水族馆", "展览", "剧院", "影院", "书店", "商场", "室内")
+        outdoor_words = ("公园", "古镇", "景区", "徒步", "露营", "观景", "漫步", "山", "湖", "海", "街", "广场", "植物园", "动物园", "乐园")
+        meal_words = ("早餐", "午餐", "晚餐", "餐厅", "用餐", "下午茶", "咖啡")
+        editable = [item for item in day.get("items", []) if not item.get("locked")]
+        exact_targets = [
+            item for item in editable
+            if str(item.get("title") or "") in message
+            or any(
+                token in str(item.get("title") or "")
+                for token in re.findall(r"[\u3400-\u9fffA-Za-z0-9]{2,}", message)
+                if token not in {"帮我", "换成", "替换", "一个", "景点", "地点", "活动", "项目", "附近", "推荐"}
+            )
+        ]
+        target = next((item for item in editable if item.get("id") == target_item_id), None)
+        if target is None and len(exact_targets) == 1:
+            target = exact_targets[0]
+        if target is None:
+            target = next(
+            (
+                item for item in editable
+                if indoor_only and any(word in str(item.get("title") or "") for word in outdoor_words)
+                and not any(word in str(item.get("title") or "") for word in indoor_words + meal_words)
+            ),
+            None,
+            )
+        if target is None:
+            target = next(
+                (
+                    item for item in editable
+                    if not any(word in str(item.get("title") or "") for word in meal_words)
+                ),
+                None,
+            )
+        if target is None:
+            return [], "当天没有可替换的未锁定室外项目；已有安排会继续保留。"
+
+        with self.connection() as db:
+            destination = db.execute(
+                "SELECT * FROM trip_destination_places WHERE trip_id=?", (trip_id,),
+            ).fetchone()
+        destination = dict(destination) if destination else {}
+        region_hint = str(
+            destination.get("city") or destination.get("district")
+            or destination.get("province") or trip.get("destination") or ""
+        ).strip()
+        search = self.search_destination_places(
+            {"query": ("博物馆" if indoor_only else query)[:120], "region_hint": region_hint[:120], "include_global": True},
+            user_id,
+        )
+        candidates = [
+            item for item in search.get("items", [])
+            if item.get("provider") != "manual"
+            and item.get("latitude") is not None and item.get("longitude") is not None
+            and str(item.get("name") or "").strip()
+        ][:6]
+        cards: list[dict] = []
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+        for candidate in candidates:
+            candidate_name = str(candidate.get("name") or "").strip()[:100]
+            note = (
+                "雨天室内备选；开放时间、预约要求和临时闭馆信息以地点官方最新说明为准。"
+                if indoor_only else
+                "旅行助手地点备选；开放时间、预约要求和临时调整以地点官方最新说明为准。"
+            )
+            preview = {
+                "title": candidate_name,
+                "day_number": int(day_number),
+                "replace_item_id": target["id"],
+                "replace_title": target["title"],
+                "before": {"title": target["title"], "note": target.get("note") or ""},
+                "after": {"title": candidate_name, "note": note},
+                "candidate_id": candidate.get("candidate_id"),
+                "name": candidate_name,
+                "address": candidate.get("formatted_address") or "",
+                "category": candidate.get("category") or ("室内地点" if indoor_only else "景点与活动"),
+                "provider": candidate.get("provider") or "地点服务",
+                "latitude": candidate.get("latitude"),
+                "longitude": candidate.get("longitude"),
+            }
+            draft_id, created = _id("travel_draft"), _now()
+            payload = {
+                "item_id": target["id"],
+                "changes": {"title": candidate_name, "note": note},
+                "candidate_id": candidate.get("candidate_id"),
+            }
+            with self.connection() as db:
+                db.execute(
+                    "INSERT INTO trip_assistant_action_drafts("
+                    "id,trip_id,couple_id,creator_id,action_type,payload_json,preview_json,expected_trip_version,"
+                    "expected_item_version,status,expires_at,created_at) "
+                    "VALUES (?,?,?,?, 'itinerary_change',?,?,?,?, 'draft',?,?)",
+                    (
+                        draft_id, trip_id, couple_id, user_id,
+                        json.dumps(payload, ensure_ascii=False), json.dumps(preview, ensure_ascii=False),
+                        trip["version"], target["version"], expires_at, created,
+                    ),
+                )
+            cards.append({
+                "type": "indoor_place_option" if indoor_only else "place_replacement_option",
+                "draft_id": draft_id, "status": "draft",
+                "replacement_kind": "indoor" if indoor_only else "place",
+                **preview, "expires_at": expires_at,
+            })
+        return cards, str(search.get("notice") or "")
+
+    def _assistant_indoor_place_cards(
+        self, trip_id: str, trip: dict, day_number: int, user_id: str, couple_id: str,
+    ) -> tuple[list[dict], str]:
+        return self._assistant_place_replacement_cards(
+            trip_id, trip, day_number, user_id, couple_id,
+            query="博物馆", message="", indoor_only=True,
+        )
+
+    def _assistant_itinerary_add_draft(
+        self, trip_id: str, trip: dict, intent: Any, user_id: str, couple_id: str,
+    ) -> list[dict]:
+        title = str(intent.item_hint or intent.query or "").strip()[:100]
+        title = re.sub(r"^(?:把|请把|帮我把)\s*", "", title)
+        title = re.sub(r"\s*(?:加入|添加|放到|放进).*$", "", title).strip()
+        if not title:
+            return self._assistant_clarification(
+                "我还不知道要加入哪个地点。你可以先搜索真实地点，再从结果卡片选择。",
+                [{"label": "搜索附近景点", "prompt": "搜索当前目的地附近好玩的景点和活动"}],
+            )
+        active_style = trip.get("active_variant") or "slow"
+        active_days = next(
+            (variant.get("days", []) for variant in trip.get("variants", []) if variant.get("style") == active_style),
+            [],
+        )
+        if intent.day_number is None:
+            return self._assistant_clarification(
+                f"请先选择把“{title}”加入哪一天。",
+                [
+                    {"label": f"第{day['day_number']}天 · {day.get('title') or day.get('date') or ''}", "prompt": f"把{title}加入第{day['day_number']}天行程"}
+                    for day in active_days[:8]
+                ],
+            )
+        day_number = int(intent.day_number)
+        day = next(
+            (
+                day
+                for day in active_days if int(day.get("day_number") or 0) == day_number
+            ),
+            None,
+        )
+        if not day:
+            return self._assistant_clarification(f"当前方案没有第 {day_number} 天，请重新选择有效日期。")
+        time_match = re.search(r"(?<!\d)((?:[01]?\d|2[0-3])[:：][0-5]\d)", intent.query)
+        start_time = time_match.group(1).replace("：", ":") if time_match else "15:00"
+        if len(start_time) == 4:
+            start_time = f"0{start_time}"
+        position = max((int(item.get("position") or 0) for item in day.get("items", [])), default=0) + 1
+        payload = {
+            "day_id": day["id"], "day_number": day_number, "title": title,
+            "start_time": start_time, "duration_minutes": 90, "position": position,
+        }
+        preview = {
+            "title": title, "day_number": day_number, "before": None,
+            "after": {"start_time": start_time, "duration_minutes": 90, "position": position},
+            "impact": {"warnings": ["地点和营业时间仍以外部平台最新信息为准。"]},
+        }
+        draft_id, created = _id("travel_draft"), _now()
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+        with self.connection() as db:
+            db.execute(
+                "INSERT INTO trip_assistant_action_drafts("
+                "id,trip_id,couple_id,creator_id,action_type,payload_json,preview_json,expected_trip_version,"
+                "expected_item_version,status,expires_at,created_at) "
+                "VALUES (?,?,?,?, 'itinerary_add',?,?,?,?, 'draft',?,?)",
+                (
+                    draft_id, trip_id, couple_id, user_id,
+                    json.dumps(payload, ensure_ascii=False), json.dumps(preview, ensure_ascii=False),
+                    trip["version"], 0, expires_at, created,
+                ),
+            )
+        return [{"type": "itinerary_add", "draft_id": draft_id, "status": "draft", **preview, "expires_at": expires_at}]
 
     def ask_trip_assistant(
         self, trip_id: str, message: object, user_id: str, idempotency_key: object,
@@ -679,6 +924,7 @@ class TravelAssistantMixin:
             cards = self._assistant_plan_cards(trip_id)
             content = "我按预算、强度和交通时间整理了五套方案，可以先查看，再决定采用哪一套。"
         elif intent.kind == "hotel_search":
+            replacing = bool(re.search(r"换|替换|改成|换成|不要这", text))
             quote_result = self.search_quotes({"trip_id": trip_id, "type": "hotel", "max_price_cents": intent.max_price_cents}, user_id)
             max_total = intent.max_price_cents
             if max_total:
@@ -688,52 +934,213 @@ class TravelAssistantMixin:
                     nights = 1
                 max_total *= nights
             cards = self._hotel_cards(quote_result, max_total)
+            if replacing:
+                for card in cards:
+                    card["selection_mode"] = "replace"
             notice = str(quote_result.get("notice") or "")
-            content = "已按这次旅行确认的地点查询酒店。" if cards else "没有找到符合当前预算的酒店，可以提高预算或换一个条件。"
+            content = (
+                "已查询可替换的酒店；点选后会替换当前酒店选择，并生成双方可见的新版本。"
+                if cards and replacing else
+                "已按这次旅行确认的地点查询酒店。" if cards else
+                "没有找到符合当前预算的酒店，可以提高预算或换一个条件。"
+            )
         elif intent.kind == "restaurant_search":
+            replacing = bool(re.search(r"换|替换|改成|换成|不要这", text))
             current = self.get_trip(trip_id, user_id)
             meal_item = None
             active = current.get("active_variant") or "slow"
-            variants = sorted(current.get("variants", []), key=lambda value: (value["style"] != active, value["style"] != "food"))
-            for variant in variants:
-                for day in variant.get("days", []):
-                    if intent.day_number and int(day["day_number"]) != intent.day_number:
-                        continue
-                    for item in day.get("items", []):
-                        if item["type"] != "meal" and not any(word in item["title"] for word in ("早餐", "早饭", "午餐", "午饭", "晚餐", "晚饭", "美食", "小吃")):
+            def collect_meals(variants: list[dict]) -> list[tuple[dict, dict, str]]:
+                found: list[tuple[dict, dict, str]] = []
+                for variant in variants:
+                    for day in variant.get("days", []):
+                        if intent.day_number and int(day["day_number"]) != intent.day_number:
                             continue
-                        title = item["title"]
-                        if "早" in title:
-                            item_meal = "breakfast"
-                        elif "午" in title:
-                            item_meal = "lunch"
-                        elif "晚" in title or "夜" in title:
-                            item_meal = "dinner"
-                        elif item["start_time"] < "10:30":
-                            item_meal = "breakfast"
-                        elif item["start_time"] < "14:00":
-                            item_meal = "lunch"
-                        elif item["start_time"] < "17:00":
-                            item_meal = "snack"
-                        else:
-                            item_meal = "dinner"
-                        if intent.meal_type and item_meal != intent.meal_type:
-                            continue
-                        meal_item = item
-                        break
-                    if meal_item:
-                        break
-                if meal_item:
-                    break
+                        for item in day.get("items", []):
+                            if item["type"] != "meal" and not any(word in item["title"] for word in ("早餐", "早饭", "午餐", "午饭", "晚餐", "晚饭", "美食", "小吃")):
+                                continue
+                            title = item["title"]
+                            if "早" in title:
+                                item_meal = "breakfast"
+                            elif "午" in title:
+                                item_meal = "lunch"
+                            elif "晚" in title or "夜" in title:
+                                item_meal = "dinner"
+                            elif item["start_time"] < "10:30":
+                                item_meal = "breakfast"
+                            elif item["start_time"] < "14:00":
+                                item_meal = "lunch"
+                            elif item["start_time"] < "17:00":
+                                item_meal = "snack"
+                            else:
+                                item_meal = "dinner"
+                            if intent.meal_type and item_meal != intent.meal_type:
+                                continue
+                            found.append((day, item, item_meal))
+                return found
+
+            active_variants = [variant for variant in current.get("variants", []) if variant.get("style") == active]
+            meal_candidates = collect_meals(active_variants)
+            if not meal_candidates and active != "food":
+                meal_candidates = collect_meals([
+                    variant for variant in current.get("variants", []) if variant.get("style") == "food"
+                ])
+            if len(meal_candidates) == 1 or (intent.day_number is not None and meal_candidates):
+                meal_item = meal_candidates[0][1]
+            elif len(meal_candidates) > 1:
+                meal_labels = {"breakfast": "早餐", "lunch": "午餐", "snack": "下午茶", "dinner": "晚餐"}
+                cards = self._assistant_clarification(
+                    "我找到多餐安排，请先点选要查询或替换的具体餐次。",
+                    [
+                        {
+                            "label": f"第{day['day_number']}天 · {meal_labels.get(meal_type, '用餐')}",
+                            "prompt": f"第{day['day_number']}天的{meal_labels.get(meal_type, '用餐')}{'换一家餐厅' if replacing else '推荐附近高分餐厅'}",
+                        }
+                        for day, _item, meal_type in meal_candidates[:8]
+                    ],
+                )
+                content = cards[0]["message"]
             if meal_item:
                 result = self.refresh_food_recommendations(trip_id, user_id, item_id=meal_item["id"], preview_only=True)
                 notice = result.get("notice", "")
                 current = result["trip"]
                 cards = self._restaurant_cards(current, intent)
-                content = "已按行程所在区域查找附近餐厅，评分和距离来自地点服务。" if cards else "当前范围没有找到符合条件的真实餐厅，可以放宽评分或距离。"
-            else:
+                if replacing:
+                    for card in cards:
+                        card["selection_mode"] = "replace"
+                content = (
+                    "已查询这一餐可替换的真实餐厅；点选后会替换原选择，其他行程不变。"
+                    if cards and replacing else
+                    "已按行程所在区域查找附近餐厅，评分和距离来自地点服务。" if cards else
+                    "当前范围没有找到符合条件的真实餐厅，可以放宽评分或距离。"
+                )
+            elif not cards:
                 content = "请先告诉我是第几天的早餐、午餐或晚餐，或者先在每日行程中添加餐次。"
-                cards = [{"type": "clarification", "message": content}]
+                cards = self._assistant_clarification(
+                    content,
+                    [
+                        {"label": "第1天早餐", "prompt": "找第1天早餐附近高分餐厅"},
+                        {"label": "第1天午餐", "prompt": "找第1天午餐附近高分餐厅"},
+                        {"label": "第1天晚餐", "prompt": "找第1天晚餐附近高分餐厅"},
+                    ],
+                )
+        elif intent.kind == "place_search":
+            replacing = bool(re.search(r"换|替换|改成|换成|不要这", text))
+            query = re.sub(
+                r"(?:帮我|请|查找|搜索|推荐|附近|有什么|好玩的|地方|景点|活动)",
+                " ",
+                intent.query,
+            )
+            query = re.sub(r"\s+", " ", query).strip() or "景点"
+            if replacing:
+                current = self.get_trip(trip_id, user_id)
+                active = current.get("active_variant") or "slow"
+                active_items = [
+                    (day, item)
+                    for variant in current.get("variants", []) if variant.get("style") == active
+                    for day in variant.get("days", [])
+                    for item in day.get("items", [])
+                    if not item.get("locked") and item.get("type") != "meal"
+                ]
+                replacement_day = intent.day_number
+                if replacement_day is None:
+                    matches = [
+                        (day, item) for day, item in active_items
+                        if str(item.get("title") or "") in text
+                        or any(token in str(item.get("title") or "") for token in re.findall(r"[\u3400-\u9fffA-Za-z0-9]{2,}", text))
+                    ]
+                    if len(matches) == 1:
+                        replacement_day = int(matches[0][0]["day_number"])
+                if replacement_day is None:
+                    cards = [
+                        {
+                            "type": "itinerary_item_choice", "item_id": item["id"],
+                            "day_number": int(day["day_number"]), "start_time": item.get("start_time"),
+                            "title": item.get("title"),
+                            "prompt": f"把第{int(day['day_number'])}天的{item.get('title')}换成其他附近景点",
+                        }
+                        for day, item in active_items[:8]
+                    ]
+                    content = "请先点选要替换的原行程，我再给出同一地区的真实地点卡片。"
+                else:
+                    search_keyword = "博物馆" if re.search(r"室内|雨|博物馆|展览", text) else "景点"
+                    day_items = [
+                        item for day, item in active_items if int(day["day_number"]) == int(replacement_day)
+                    ]
+                    explicit = [item for item in day_items if str(item.get("title") or "") in text]
+                    period_items = day_items
+                    if not explicit and ("上午" in text or "早上" in text):
+                        period_items = [item for item in day_items if str(item.get("start_time") or "") < "12:00"]
+                    elif not explicit and "下午" in text:
+                        period_items = [item for item in day_items if "12:00" <= str(item.get("start_time") or "") < "18:00"]
+                    elif not explicit and ("晚上" in text or "夜间" in text):
+                        period_items = [item for item in day_items if str(item.get("start_time") or "") >= "18:00"]
+                    target_options = explicit or period_items
+                    if len(target_options) != 1:
+                        cards = [
+                            {
+                                "type": "itinerary_item_choice", "item_id": item["id"],
+                                "day_number": int(replacement_day), "start_time": item.get("start_time"),
+                                "title": item.get("title"),
+                                "prompt": f"把第{int(replacement_day)}天的{item.get('title')}换成其他附近景点",
+                            }
+                            for item in target_options[:8]
+                        ]
+                        content = "这一天有多项安排，请先点选要替换的原行程。"
+                    else:
+                        cards, notice = self._assistant_place_replacement_cards(
+                            trip_id, current, int(replacement_day), user_id, couple["id"],
+                            query=search_keyword, message=text, target_item_id=str(target_options[0]["id"]),
+                        )
+                        content = (
+                            "已查询同一旅行地区的真实地点；点选后只替换对应行程，确认前不会写入。"
+                            if cards else "没有找到可安全替换的地点，请补充第几天或原行程名称。"
+                        )
+            else:
+                current = self.get_trip(trip_id, user_id)
+                active = current.get("active_variant") or "slow"
+                day_numbers = [
+                    int(day["day_number"])
+                    for variant in current.get("variants", []) if variant.get("style") == active
+                    for day in variant.get("days", [])
+                ][:8]
+                result = self.search_destination_places(
+                    {
+                        "query": query[:120],
+                        "region_hint": intent.scope[:120],
+                        "include_global": True,
+                    },
+                    user_id,
+                )
+                cards = [
+                    {
+                        "type": "place_result",
+                        "candidate_id": item.get("candidate_id"),
+                        "name": item.get("name"),
+                        "address": item.get("formatted_address"),
+                        "category": item.get("category"),
+                        "provider": item.get("provider"),
+                        "latitude": item.get("latitude"),
+                        "longitude": item.get("longitude"),
+                        "day_options": day_numbers,
+                    }
+                    for item in result.get("items", [])[:8]
+                ]
+                notice = str(result.get("notice") or "")
+                content = (
+                    "我按已经确认的旅行地区查询了真实地点，可以直接查看位置；需要加入行程时再告诉我要放到第几天。"
+                    if cards
+                    else "当前地点服务没有返回合适结果，可以换一个更具体的活动关键词。"
+                )
+        elif intent.kind == "itinerary_add":
+            current = self.get_trip(trip_id, user_id)
+            cards = self._assistant_itinerary_add_draft(
+                trip_id, current, intent, user_id, couple["id"],
+            )
+            content = (
+                "我已经把新增项目整理成修改预览，确认后才会写入共同旅行。"
+                if cards and cards[0]["type"] == "itinerary_add"
+                else cards[0]["message"]
+            )
         elif intent.kind == "itinerary_change":
             current = self.get_trip(trip_id, user_id)
             cards = self._assistant_itinerary_draft(trip_id, current, text, intent, user_id, couple["id"])
@@ -743,11 +1150,25 @@ class TravelAssistantMixin:
             cards = self._assistant_day_replan_draft(
                 trip_id, current, intent, text, user_id, couple["id"], live_context, weather_provider,
             )
-            content = "我只整理了指定日期尚未开始且未锁定的内容；确认后才会一起写入。" if cards[0]["type"] == "day_replan" else cards[0]["message"]
+            rainy = any(word in text for word in ("下雨", "雨天", "有雨", "阵雨", "下雪", "雪天", "有雪"))
+            indoor_cards: list[dict] = []
+            if rainy and intent.day_number is not None:
+                indoor_cards, indoor_notice = self._assistant_indoor_place_cards(
+                    trip_id, current, int(intent.day_number), user_id, couple["id"],
+                )
+                notice = "；".join(value for value in (notice, indoor_notice) if value)
+                cards.extend(indoor_cards)
+            if indoor_cards:
+                content = "已按雨雪天气整理当天安排，并查询了可直接选择的室内地点。每张卡都会先显示替换内容，确认后才修改共同旅行。"
+            else:
+                content = "我只整理了指定日期尚未开始且未锁定的内容；确认后才会一起写入。" if cards[0]["type"] == "day_replan" else cards[0]["message"]
         elif intent.kind == "next_stop":
             if not live_context:
                 content = "请先点击旅行中的“更新当前位置”，我不会在后台持续获取位置。"
-                cards = [{"type": "clarification", "message": content}]
+                cards = self._assistant_clarification(
+                    content,
+                    [{"label": "更新当前位置并推荐", "action": "trip-live-refresh"}],
+                )
             else:
                 current = self.get_trip(trip_id, user_id)
                 context = validate_live_context(live_context)
@@ -768,8 +1189,19 @@ class TravelAssistantMixin:
             content = "已生成双方可见的旅行回忆草稿；确认前不会进入时光轴。"
             cards = [{"type": "trip_recap", **draft}]
         else:
-            content = "我可以比较五套方案、查询酒店、找附近餐厅、推荐下一站、重排当天行程或生成旅行回忆草稿。"
-            cards = [{"type": "clarification", "message": content}]
+            content = "你可以直接点一个选项继续；查询会立即展示，修改仍会先给你预览。"
+            cards = [{
+                "type": "suggestion_set",
+                "message": "这次想让我帮你做什么？",
+                "options": [
+                    {"label": "比较五套方案", "prompt": "比较五套方案的预算、强度和交通时间"},
+                    {"label": "找附近好玩的", "prompt": "搜索当前目的地附近好玩的景点和活动"},
+                    {"label": "找附近高分餐厅", "prompt": "找第一天晚餐，4.5分以上，3公里内"},
+                    {"label": "查询酒店", "prompt": "查询目的地附近每晚800元以内的酒店"},
+                    {"label": "按天气调整", "prompt": "根据天气重新安排当天后续行程"},
+                    {"label": "生成旅行回忆", "prompt": "旅行结束后生成共同回忆草稿"},
+                ],
+            }]
         if notice:
             content = f"{content} {notice}"[:1000]
         assistant_id = _id("travel_msg")
@@ -804,6 +1236,8 @@ class TravelAssistantMixin:
                 raise ConflictError("旅行已经被另一方修改，请重新生成调整预览")
             if row["action_type"] == "itinerary_change":
                 result = self._confirm_itinerary_change(db, row, payload, user_id, couple["id"])
+            elif row["action_type"] == "itinerary_add":
+                result = self._confirm_itinerary_add(db, row, payload, user_id, couple["id"])
             elif row["action_type"] == "day_replan":
                 result = self._confirm_day_replan(db, row, payload, user_id, couple["id"])
             else:
@@ -816,6 +1250,49 @@ class TravelAssistantMixin:
             if cursor.rowcount != 1:
                 raise ConflictError("旅行助手动作草稿已被取消或确认")
         return {**result, "trip": self.get_trip(trip_id, user_id=user_id)}
+
+    def _confirm_itinerary_add(
+        self, db: Any, draft: Any, payload: dict, user_id: str, couple_id: str,
+    ) -> dict:
+        trip = db.execute(
+            "SELECT current_revision,version FROM trips WHERE id=? AND couple_id=? AND deleted_at IS NULL",
+            (draft["trip_id"], couple_id),
+        ).fetchone()
+        if not trip or int(trip["version"]) != int(draft["expected_trip_version"]):
+            raise ConflictError("旅行已经被另一方修改，请重新生成新增预览")
+        day = db.execute(
+            "SELECT d.id,v.trip_id FROM trip_days d JOIN plan_variants v ON v.id=d.variant_id "
+            "WHERE d.id=? AND v.trip_id=?",
+            (payload.get("day_id"), draft["trip_id"]),
+        ).fetchone()
+        if not day:
+            raise ConflictError("旅行日期已经变化，请重新生成新增预览")
+        title = str(payload.get("title") or "").strip()[:100]
+        start_time = str(payload.get("start_time") or "")
+        duration = int(payload.get("duration_minutes") or 90)
+        position = int(payload.get("position") or 1)
+        if not title or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start_time):
+            raise ValueError("新增行程内容或时间无效")
+        if not 15 <= duration <= 1440 or position < 1:
+            raise ValueError("新增行程时长或顺序无效")
+        item_id = _id("item")
+        db.execute(
+            "INSERT INTO itinerary_items(id,day_id,type,title,start_time,duration_minutes,cost_cents,note,details_json,locked,position,version) "
+            "VALUES (?,?,'activity',?,?,?,0,?,'{}',1,?,1)",
+            (item_id, day["id"], title, start_time, duration, "由旅行助手建议，经用户确认加入。", position),
+        )
+        revision = int(trip["current_revision"]) + 1
+        now, revision_id = _now(), _id("revision")
+        diff = {"operation": "add", "item_id": item_id, "day_number": int(payload.get("day_number") or 1), "after": {"title": title, "start_time": start_time, "duration_minutes": duration}}
+        db.execute("UPDATE trips SET current_revision=?,version=version+1,updated_at=? WHERE id=?", (revision, now, draft["trip_id"]))
+        db.execute("DELETE FROM approvals WHERE trip_id=?", (draft["trip_id"],))
+        db.execute(
+            "INSERT INTO plan_revisions(id,trip_id,revision,parent_revision,author_type,diff_json,reason,created_at) VALUES (?,?,?,?, 'user',?,?,?)",
+            (revision_id, draft["trip_id"], revision, revision - 1, json.dumps(diff, ensure_ascii=False), "旅行助手新增建议，经用户确认", now),
+        )
+        self._audit(db, "trip.item_added", "itinerary_item", item_id, diff, actor_id=user_id)
+        self._event(db, couple_id, user_id, "life.updated", draft["trip_id"], {"resource": "trip", "revision": revision})
+        return {"revision_id": revision_id, "revision": revision, "diff": diff, "item_id": item_id}
 
     def _confirm_itinerary_change(
         self, db: Any, draft: Any, payload: dict, user_id: str, couple_id: str,
@@ -864,6 +1341,41 @@ class TravelAssistantMixin:
             db.execute("DELETE FROM itinerary_item_places WHERE itinerary_item_id=?", (item_id,))
         set_sql = ", ".join(f"{key}=?" for key in updates)
         db.execute(f"UPDATE itinerary_items SET {set_sql},locked=1,version=version+1 WHERE id=?", (*updates.values(), item_id))
+        candidate_id = str(payload.get("candidate_id") or "").strip()
+        if candidate_id:
+            candidate_row = db.execute(
+                "SELECT payload_json,expires_at FROM place_search_candidates WHERE id=? AND user_id=?",
+                (candidate_id, draft["creator_id"]),
+            ).fetchone()
+            if not candidate_row or candidate_row["expires_at"] < _now():
+                raise ConflictError("地点候选已过期，请重新查询后选择")
+            place = _json(candidate_row["payload_json"], {})
+            provider = str(place.get("provider") or "")
+            latitude, longitude = place.get("latitude"), place.get("longitude")
+            if provider not in {"amap", "google_maps", "manual"} or latitude is None or longitude is None:
+                raise ValueError("地点候选缺少可确认的地图坐标")
+            db.execute(
+                """INSERT INTO itinerary_item_places(
+                    itinerary_item_id,trip_id,provider,provider_place_id,name,formatted_address,country,province,city,
+                    district,latitude,longitude,category,confirmed_by,confirmed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(itinerary_item_id) DO UPDATE SET provider=excluded.provider,
+                    provider_place_id=excluded.provider_place_id,name=excluded.name,formatted_address=excluded.formatted_address,
+                    country=excluded.country,province=excluded.province,city=excluded.city,district=excluded.district,
+                    latitude=excluded.latitude,longitude=excluded.longitude,category=excluded.category,
+                    confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at""",
+                (
+                    item_id, draft["trip_id"], provider, str(place.get("provider_place_id") or ""),
+                    str(place.get("name") or updates.get("title") or "")[:100], str(place.get("formatted_address") or "")[:500],
+                    str(place.get("country") or "")[:100], str(place.get("province") or "")[:100],
+                    str(place.get("city") or "")[:100], str(place.get("district") or "")[:100],
+                    float(latitude), float(longitude), str(place.get("category") or "")[:100], user_id, _now(),
+                ),
+            )
+            diff["confirmed_place"] = {
+                "name": str(place.get("name") or ""), "provider": provider,
+                "provider_place_id": str(place.get("provider_place_id") or ""),
+            }
         revision = int(trip["current_revision"]) + 1
         revision_id = _id("revision")
         now = _now()

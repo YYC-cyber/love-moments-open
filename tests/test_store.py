@@ -229,7 +229,7 @@ class LoveMomentsStoreTests(unittest.TestCase):
             "title": "演示甲发来一条消息",
             "body": "打开恋屿查看新消息。",
             "url": "/?screen=chat",
-            "tag": "message-msg_12345678",
+            "tag": "message-msg_test123",
         }, ttl_seconds=3600)
         self.assertTrue(queued["queued"])
         with self.store.connection() as db:

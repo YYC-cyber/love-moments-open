@@ -415,12 +415,19 @@ class LocalTravelPlanner(TravelPlannerProvider):
         context: dict | None = None,
     ) -> list[GeneratedPlan]:
         context = context or {}
+        parsed_start_date: date | None = None
         try:
             start_date = date.fromisoformat(str(context.get("start_date", "")))
+            parsed_start_date = start_date
             end_date = date.fromisoformat(str(context.get("end_date", "")))
             day_count = max(1, min((end_date - start_date).days + 1, 61))
         except ValueError:
             day_count = 3
+        weather_rows = {
+            str(row.get("date")): row
+            for row in (context.get("weather_forecast") or {}).get("items", [])
+            if isinstance(row, dict) and row.get("date")
+        }
         base = [
             ("slow", "松弛浪漫", "本地安全模板：保留充足相处时间，具体地点需由用户确认", 0.965, "松弛", 72),
             ("classic", "经典充实", "本地安全模板：按经典路线节奏编排，具体地点需由用户确认", 1.03, "适中", 105),
@@ -432,13 +439,26 @@ class LocalTravelPlanner(TravelPlannerProvider):
             "slow": [("10:00", "已确认区域周边慢游"), ("15:00", "双人休息与自由探索")],
             "classic": [("09:00", "当地代表地点（待选择）"), ("14:00", "邻近文化体验（待选择）")],
             "value": [("09:30", "免费或低价体验（待选择）"), ("14:30", "公共交通可达街区（待选择）")],
-            "food": [],
+            # Keep one explicitly editable activity per day so the safe local
+            # fallback never degrades a travel plan into three meals only. The
+            # store fills breakfast/lunch/dinner around this item and preserves
+            # the matching day's weather context.
+            "food": [("15:00", "当日游玩地点待确认")],
             "nature": [("09:00", "附近自然体验（待选择）"), ("16:30", "日落或散步地点（待选择）")],
         }
         plans = []
         for style, name, summary, ratio, intensity, transport in base:
             items = []
             for day_number in range(1, day_count + 1):
+                day_date = date.fromordinal(parsed_start_date.toordinal() + day_number - 1).isoformat() if parsed_start_date else ""
+                weather = weather_rows.get(day_date, {})
+                weather_label = str(weather.get("label") or "天气预报暂不可用")
+                rain = int(weather.get("precipitation_probability") or 0)
+                weather_fit = (
+                    f"{weather_label}，降水概率 {rain}%，优先室内并减少户外停留"
+                    if rain >= 50 or any(token in weather_label for token in ("雨", "雪", "雷"))
+                    else f"{weather_label}，适合按当前节奏游览"
+                )
                 for time, title in templates[style]:
                     items.append({
                         "day_number": day_number,
@@ -448,7 +468,7 @@ class LocalTravelPlanner(TravelPlannerProvider):
                         "duration_minutes": 90,
                         "cost_cents": 0,
                         "note": "此项是可编辑占位，不代表真实店名或景点；请搜索真实地点后替换。",
-                        "details": {},
+                        "details": {"weather_date": day_date, "weather_fit": weather_fit},
                     })
             plans.append(GeneratedPlan(style, name, summary, int(budget_cents * ratio), intensity, transport, items))
         return plans
@@ -514,6 +534,75 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
             for plan in self.fallback.generate_variants(destination, budget_cents, context)
         ]
 
+    @staticmethod
+    def _decode_model_json(content: str) -> tuple[dict, bool]:
+        """Decode a model JSON object and repair only unambiguous syntax slips.
+
+        Compatible providers occasionally wrap JSON in a Markdown fence, add
+        prose after the object, leave a trailing comma, or omit quotes around
+        an ASCII field name.  These repairs do not invent itinerary data; the
+        resulting object still has to pass the full travel contract below.
+        """
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("模型没有返回最终行程内容")
+        raw = content.strip().lstrip("\ufeff")
+        candidates = [raw]
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            candidates.append(fenced.group(1).strip())
+        object_start = raw.find("{")
+        object_end = raw.rfind("}")
+        if 0 <= object_start < object_end:
+            candidates.append(raw[object_start:object_end + 1])
+
+        last_error: json.JSONDecodeError | None = None
+        for candidate in dict.fromkeys(candidates):
+            try:
+                value = json.loads(candidate)
+                if not isinstance(value, dict):
+                    raise ValueError("模型返回的顶层结构必须是对象")
+                return value, candidate != raw
+            except json.JSONDecodeError as exc:
+                last_error = exc
+
+            repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+            repaired = re.sub(
+                r'([,{]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)',
+                r'\1"\2"\3',
+                repaired,
+            )
+            if repaired == candidate:
+                continue
+            try:
+                value = json.loads(repaired)
+                if not isinstance(value, dict):
+                    raise ValueError("模型返回的顶层结构必须是对象")
+                return value, True
+            except json.JSONDecodeError as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise ValueError("模型返回结构无效")
+
+    @staticmethod
+    def _provider_failure_message(exc: Exception) -> str:
+        if isinstance(exc, QuotaExceededError):
+            return str(exc).strip() or "模型额度暂不可用"
+        if isinstance(exc, error.HTTPError):
+            labels = {
+                400: "模型请求参数未被服务接受",
+                401: "大模型密钥无效或已失效",
+                402: "大模型账户余额或额度不足",
+                403: "大模型账户没有调用权限",
+                429: "大模型服务限流或额度已用完",
+            }
+            return labels.get(exc.code, f"大模型服务返回 HTTP {exc.code}")
+        if isinstance(exc, (error.URLError, TimeoutError)):
+            return "大模型网络连接或响应超时"
+        if isinstance(exc, json.JSONDecodeError):
+            return f"模型返回的 JSON 格式错误（第 {exc.pos} 个字符附近）"
+        return str(exc).strip() or "模型返回结构无效"
+
     def _generate_style_variants(
         self,
         destination: str,
@@ -530,6 +619,10 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
         """
         styles = ["slow", "classic", "value", "food", "nature"]
         plans: list[GeneratedPlan] = []
+        fallback_by_style = {
+            plan.style: plan
+            for plan in self.fallback.generate_variants(destination, budget_cents, context)
+        }
         for style in styles:
             compact_prompt = {
                 "task": "只生成一套情侣多日旅行方案。每天主题、区域和活动必须不同；不得跨天重复同一地点。",
@@ -541,6 +634,7 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                 "preferences": context.get("preferences", {}),
                 "partner_preferences": context.get("partner_preferences", {}),
                 "confirmed_destination_place": context.get("destination_place", {}),
+                "weather_forecast": context.get("weather_forecast", {}),
                 "required_style": style,
                 "logistics": {
                     "departure_city": context.get("departure_city", ""),
@@ -553,10 +647,16 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                 },
                 "requirements": (
                     "非 food 方案首末日2至3个项目，完整游览日3至8个真实且具体的POI或主题乐园分区/项目；同一标题只能出现一次。"
-                    "food 方案每天早中晚三餐。首日和末日按交通时间减量；相邻项目应在同一区域，避免折返。"
+                    "food 方案在完整游览日安排早中晚三餐，并且每天至少有1个真实景点、游玩项目、文化体验或夜游活动；首末日只安排抵达后、返程前真实可执行的用餐与活动，绝不能整天只有三餐。"
+                    "首日和末日按交通时间减量；相邻项目应在同一区域，避免折返。"
+                    "逐日严格对应weather_forecast中的date安排：雨雪、雷雨或高降水概率日优先室内项目，晴好日安排户外项目；不得把不同日期的天气混用。"
+                    "若weather_forecast.available为false，必须明确天气暂不可用，不得虚构预报。"
+                    "即使尚无逐日预报，也必须按旅行月份判断季节风险；索道、滑雪、漂流、露营、滑草等季节性项目不得承诺开放，"
+                    "必须在seasonal_note写明核验要求，并在backup_plan给出同区域、同时间段可直接替换的室内或低风险活动。"
                     "每一天必须有独立且不重复的day_themes主题。不得使用‘待选择、附近景点、自由探索’等占位名称。"
                     "每个项目必须提供details：2至3项具体可做活动、2至3项好玩亮点、针对这趟情侣旅行的推荐原因、"
-                    "1至3项实用提醒、最佳体验时段、是否需要预约的文字说明，以及用于查附近餐厅的具体area_hint；不得复述标题或写空泛套话。"
+                    "1至3项实用提醒、最佳体验时段、是否需要预约的文字说明、weather_date、weather_fit，"
+                    "以及用于查附近餐厅的具体area_hint；不得复述标题或写空泛套话。"
                 ),
                 "output": {"plans": [{**item_schema, "style": style}]},
             }
@@ -572,6 +672,9 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
             }
             if "api.deepseek.com" in self.base_url.lower():
                 style_payload["thinking"] = {"type": "disabled"}
+            one_plan: list[GeneratedPlan] | None = None
+            repaired_json = False
+            last_error: Exception | None = None
             for style_attempt in range(2):
                 attempt_payload = style_payload
                 if style_attempt:
@@ -586,42 +689,59 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                             style_payload["messages"][1],
                         ],
                     }
-                if self.before_request:
-                    suffix = " retry" if style_attempt else ""
-                    self.before_request(f"travel plan {style} recovery{suffix}")
-                req = request.Request(
-                    f"{self.base_url}/chat/completions",
-                    data=json.dumps(attempt_payload, ensure_ascii=False).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                    method="POST",
-                )
-                with request.urlopen(req, timeout=self.timeout, context=TRUSTED_SSL_CONTEXT) as response:
-                    result = json.loads(response.read().decode("utf-8"))
                 try:
+                    if self.before_request:
+                        suffix = " retry" if style_attempt else ""
+                        self.before_request(f"travel plan {style} recovery{suffix}")
+                    req = request.Request(
+                        f"{self.base_url}/chat/completions",
+                        data=json.dumps(attempt_payload, ensure_ascii=False).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with request.urlopen(req, timeout=self.timeout, context=TRUSTED_SSL_CONTEXT) as response:
+                        result = json.loads(response.read().decode("utf-8"))
                     content = result["choices"][0]["message"].get("content")
-                    if not isinstance(content, str) or not content.strip():
-                        raise ValueError(f"{style} 方案没有返回内容")
+                    decoded, repaired_json = self._decode_model_json(content)
                     one_plan = self._validate(
-                        json.loads(content), day_count, expected_styles=[style],
+                        decoded, day_count, expected_styles=[style],
                         destination_place=context.get("destination_place") or None,
+                        weather_forecast=context.get("weather_forecast") or None,
                     )
                     present_days = {int(item["day_number"]) for item in one_plan[0].items}
                     if present_days != set(range(1, day_count + 1)):
                         raise ValueError(f"{style} 方案没有覆盖全部日期")
-                except (KeyError, ValueError, TypeError, OverflowError, UnicodeError, json.JSONDecodeError):
+                except (
+                    QuotaExceededError, error.HTTPError, error.URLError, TimeoutError,
+                    KeyError, ValueError, TypeError, OverflowError, UnicodeError, json.JSONDecodeError,
+                ) as exc:
+                    one_plan = None
+                    last_error = exc
+                    if isinstance(exc, error.HTTPError) and exc.code in {401, 402, 403, 429}:
+                        break
+                    if isinstance(exc, QuotaExceededError):
+                        break
                     if style_attempt == 0:
                         continue
-                    raise
-                plans.extend(one_plan)
-                break
-        return [
-            replace(
-                plan,
-                generation_source="ai",
-                generation_message=f"由 {self.model} 分套生成并通过结构校验",
-            )
-            for plan in plans
-        ]
+                if one_plan:
+                    break
+
+            if one_plan:
+                message = f"由 {self.model} 分套生成并通过结构校验"
+                if repaired_json:
+                    message += "（已自动修复轻微 JSON 格式问题）"
+                plans.extend(
+                    replace(plan, generation_source="ai", generation_message=message)
+                    for plan in one_plan
+                )
+            else:
+                reason = self._provider_failure_message(last_error or ValueError("模型返回结构无效"))
+                plans.append(replace(
+                    fallback_by_style[style],
+                    generation_source="rules",
+                    generation_message=f"{style} 方案连续两次未通过校验：{reason[:180]}；仅该方案使用本地安全模板",
+                ))
+        return plans
 
     def generate_variants(
         self,
@@ -646,6 +766,7 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
             "preferences": context.get("preferences", {}),
             "partner_preferences": context.get("partner_preferences", {}),
             "confirmed_destination_place": context.get("destination_place", {}),
+            "weather_forecast": context.get("weather_forecast", {}),
             "logistics": {
                 "departure_city": context.get("departure_city", ""),
                 "arrival_city": context.get("arrival_city", "") or destination,
@@ -663,9 +784,12 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                 "主题乐园不能每天只写乐园总名，应细化为真实园区、分区、演出或项目；乐园总名最多出现一次。",
                 "首日结合抵达时间，末日结合返程时间；时间未知时首末日也要比中间日更松弛。",
                 "同一天的项目按地理邻近和时间顺序排列，优先步行或短程交通，避免跨区往返。",
-                "非food方案首末日安排2至3个项目，完整游览日安排3至8个具体项目；food方案每天安排早餐、午餐、晚餐并写清用餐区域。",
+                "非food方案首末日安排2至3个项目，完整游览日安排3至8个具体项目；food方案也必须是完整旅行：完整游览日除早餐、午餐、晚餐外至少安排1个真实游玩项目，首末日仅安排抵达后或返程前可执行的用餐和活动，不能整天只有吃饭。",
                 "只写确信真实存在的地点或项目；不得使用待选择、待确认、附近景点、当地代表地点、自由探索等占位名称。",
                 "五套方案必须体现主题差异，不能只是交换同一批地点的顺序。",
+                "逐日使用weather_forecast中同日期预报：高降水、雷雨、暴雪或极端温度日应安排室内或短距离项目，并把户外重点移到更合适的日期。",
+                "若weather_forecast.available为false，必须写明天气预报暂不可用，不得自行编造天气。",
+                "按旅行日期判断季节可行性。索道、滑雪、漂流、露营、滑草、户外乐园等受季节或天气影响的项目不得承诺开放；必须写核验说明和同区域备选。",
                 "每个项目都要写可点开的详情：2至3个具体活动、2至3个好玩亮点、结合情侣偏好和当天路线的推荐原因、1至3个实用提醒、最佳体验时段、预约说明和具体区域area_hint。不得只复述标题。",
             ],
             "output": {
@@ -692,6 +816,10 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                             "practical_tips": ["排队、交通、拍照或安全提醒"],
                             "best_time": "最佳体验时段",
                             "reservation_note": "是否需要预约以及如何确认",
+                            "weather_date": "与day_number对应的YYYY-MM-DD日期",
+                            "weather_fit": "结合当天真实预报说明该项目为何适合或采用了什么室内备选",
+                            "seasonal_note": "结合旅行月份说明开放、结冰、低温或停运等需要核验的事项",
+                            "backup_plan": "原项目不开放或天气不适合时，同区域同时间段可直接替换的具体活动",
                             "area_hint": "用于路线和附近餐馆检索的具体景区、街区或商圈",
                             "location_scope": "该项目所属的国家·城市·区县或已确认景区"
                         }
@@ -750,9 +878,11 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                         if finish_reason == "length":
                             raise ValueError("模型输出额度被推理内容耗尽，未返回最终行程")
                         raise ValueError("模型没有返回最终行程内容")
+                    decoded, repaired_json = self._decode_model_json(content)
                     plans = self._validate(
-                        json.loads(content), day_count,
+                        decoded, day_count,
                         destination_place=context.get("destination_place") or None,
+                        weather_forecast=context.get("weather_forecast") or None,
                     )
                 except (KeyError, ValueError, TypeError, OverflowError, UnicodeError, json.JSONDecodeError):
                     if attempt == 0:
@@ -764,7 +894,11 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                     replace(
                         plan,
                         generation_source="ai",
-                        generation_message=f"由 {self.model} 生成并通过结构校验" + ("（第二次尝试）" if attempt else ""),
+                        generation_message=(
+                            f"由 {self.model} 生成并通过结构校验"
+                            + ("（已自动修复轻微 JSON 格式问题）" if repaired_json else "")
+                            + ("（第二次尝试）" if attempt else "")
+                        ),
                     )
                     for plan in plans
                 ]
@@ -802,6 +936,9 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
             "严格遵守预算、节奏、必去点、饮食和住宿偏好。只返回正确闭合的紧凑JSON，"
             "不包含Markdown或解释；每个项目包含day_number且按时间递增，day_themes逐日唯一。"
             "每个项目的details必须具体说明可做活动、好玩亮点、推荐原因、实用提醒、最佳时段和预约要求；"
+            "如果输入含逐日天气预报，必须按date与day_number一一对应调整室内外项目，并在weather_fit解释；不得虚构天气。"
+            "无逐日预报时仍要按旅行月份检查季节可行性；受天气或季节影响的项目必须在seasonal_note提示出发前核验，"
+            "并在backup_plan提供同区域、同时间段的具体替代活动，不能把可能停运的项目写成确定开放。"
             "推荐原因必须与该地点、情侣偏好或当天路线有关，area_hint要写可用于检索附近餐馆的真实景区、街区或商圈，不能使用‘值得一去’等空话。"
         )
 
@@ -811,6 +948,7 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
         day_count: int = 3,
         expected_styles: list[str] | None = None,
         destination_place: dict | None = None,
+        weather_forecast: dict | None = None,
     ) -> list[GeneratedPlan]:
         expected_styles = expected_styles or ["slow", "classic", "value", "food", "nature"]
         rows = value.get("plans")
@@ -866,6 +1004,14 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                 if len(activities) < 2 or len(highlights) < 2 or not reason:
                     raise ValueError("模型行程详情不完整")
                 location_scope = str(raw_details.get("location_scope", "")).strip()[:160]
+                weather_date = str(raw_details.get("weather_date", "")).strip()[:10]
+                weather_fit = str(raw_details.get("weather_fit", "")).strip()[:200]
+                forecast_items = (weather_forecast or {}).get("items", []) if (weather_forecast or {}).get("available") else []
+                if forecast_items:
+                    dates_by_day = [str(entry.get("date", "")) for entry in forecast_items if isinstance(entry, dict)]
+                    expected_weather_date = dates_by_day[day_number - 1] if day_number <= len(dates_by_day) else ""
+                    if not expected_weather_date or weather_date != expected_weather_date or not weather_fit:
+                        raise ValueError("模型没有按旅行日期使用逐日天气预报")
                 if destination_place:
                     terms = []
                     for field in ("name", "city", "district", "province", "country"):
@@ -893,6 +1039,10 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                         "practical_tips": detail_list("practical_tips", 3, 100),
                         "best_time": str(raw_details.get("best_time", "")).strip()[:80],
                         "reservation_note": str(raw_details.get("reservation_note", "")).strip()[:160],
+                        "weather_date": weather_date,
+                        "weather_fit": weather_fit,
+                        "seasonal_note": str(raw_details.get("seasonal_note", "")).strip()[:200],
+                        "backup_plan": str(raw_details.get("backup_plan", "")).strip()[:240],
                         "area_hint": str(raw_details.get("area_hint", "")).strip()[:100],
                         "location_scope": location_scope,
                     },
@@ -902,9 +1052,19 @@ class OpenAICompatibleTravelPlanner(TravelPlannerProvider):
                 buckets[item["day_number"]].append(item)
             if any(not bucket for bucket in buckets.values()):
                 raise ValueError(f"{style} 方案没有覆盖每一天")
-            minimum = 1 if style == "food" else 2
+            minimum = 2
             if any(len(bucket) < minimum for bucket in buckets.values()):
                 raise ValueError(f"{style} 方案每天至少需要 {minimum} 个有效项目")
+            if style == "food":
+                meal_words = ("早餐", "早点", "早茶", "午餐", "午饭", "晚餐", "晚饭", "夜宵")
+                for bucket in buckets.values():
+                    non_meals = [
+                        item for item in bucket
+                        if str(item.get("type", "")) != "meal"
+                        and not any(word in item["title"] for word in meal_words)
+                    ]
+                    if not non_meals:
+                        raise ValueError("food 方案每天不能只有三餐，至少需要一个真实游玩或观光项目")
             for bucket in buckets.values():
                 if [item["start_time"] for item in bucket] != sorted(item["start_time"] for item in bucket):
                     raise ValueError(f"{style} 方案同一天的时间顺序错误")

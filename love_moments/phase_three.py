@@ -116,6 +116,46 @@ def _meal_type(start_time: str) -> str:
     return "dinner"
 
 
+def _is_meal_itinerary(item: Any) -> bool:
+    """Identify meal cards without treating a nearby attraction as a meal by time alone."""
+    item_type = str(item["type"] or "")
+    title = str(item["title"] or "")
+    return item_type == "meal" or bool(re.search(
+        r"早餐|早饭|早点|早茶|午餐|午饭|晚餐|晚饭|夜宵|下午茶|餐厅|餐馆|饭店|小吃|用餐|厨房|restaurant|breakfast|lunch|dinner",
+        title,
+        re.I,
+    ))
+
+
+def _place_photo_match_score(query: str, candidate: dict) -> int:
+    """Conservatively match a real map photo to an itinerary place."""
+    def compact(value: object) -> str:
+        text = re.sub(r"[\s·•（）()\-—_/]+", "", str(value or "").lower())
+        for suffix in ("旅游度假区", "风景名胜区", "风景区", "旅游区", "景区", "公园", "广场"):
+            text = text.replace(suffix, "")
+        return text
+
+    left, right = compact(query), compact(candidate.get("name"))
+    if not left or not right:
+        return 0
+    if left == right:
+        base = 100
+    elif min(len(left), len(right)) >= 4 and (left in right or right in left):
+        base = 85
+    else:
+        base = 0
+        for size in range(min(8, len(left), len(right)), 3, -1):
+            if any(left[index:index + size] in right for index in range(len(left) - size + 1)):
+                base = 60 + size
+                break
+    category = str(candidate.get("category") or "")
+    if re.search(r"风景名胜|公园景点|自然地物|博物馆|展览馆|动物园|植物园", category):
+        base += 15
+    if re.search(r"生活服务|售票处|住宿服务|停车场|卫生间|商店|服务中心", category):
+        base -= 25
+    return max(0, base)
+
+
 def _is_china_place(place: dict[str, Any] | None) -> bool:
     return bool(place) and str(place.get("country") or "").strip().lower() in CHINA_COUNTRY_NAMES
 
@@ -256,6 +296,30 @@ class PhaseThreeMixin:
             row = db.execute("SELECT * FROM trip_generation_jobs WHERE id=?", (job_id,)).fetchone()
         return self._public_trip_generation_job(row, user_id)
 
+    def create_trip_regeneration_job(
+        self, trip_id: str, payload: dict, user_id: str, idempotency_key: object,
+    ) -> dict:
+        """Queue regeneration for an existing trip without blocking the browser."""
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            trip = db.execute(
+                "SELECT id FROM trips WHERE id=? AND couple_id=? AND deleted_at IS NULL",
+                (trip_id, couple["id"]),
+            ).fetchone()
+            if not trip:
+                raise KeyError("旅行不存在")
+            place = db.execute(
+                "SELECT 1 FROM trip_destination_places WHERE trip_id=?", (trip_id,),
+            ).fetchone()
+            if not place:
+                raise ValueError("请先从高德候选中确认具体目的地，再重新生成五套方案")
+        request = {
+            "_operation": "regenerate",
+            "_trip_id": trip_id,
+            "preserve_manual": bool(payload.get("preserve_manual", True)),
+        }
+        return self.create_trip_generation_job(request, user_id, idempotency_key)
+
     def _public_trip_generation_job(self, row: sqlite3.Row | dict, user_id: str) -> dict:
         value = dict(row)
         result = {key: value.get(key) for key in (
@@ -311,10 +375,24 @@ class PhaseThreeMixin:
         value["payload"] = _json(value.pop("payload_json"), {})
         return value
 
-    def run_trip_generation_job(self, job: dict) -> dict:
+    def run_trip_generation_job(self, job: dict, weather_provider: object | None = None) -> dict:
         job_id = str(job["id"])
         try:
-            trip = self.create_trip(job.get("payload") or {}, str(job["user_id"]), creation_job_id=job_id)
+            payload = job.get("payload") or {}
+            if payload.get("_operation") == "regenerate":
+                trip = self.regenerate_trip(
+                    str(payload.get("_trip_id") or ""),
+                    user_id=str(job["user_id"]),
+                    preserve_manual=bool(payload.get("preserve_manual", True)),
+                    weather_provider=weather_provider,
+                )
+            else:
+                trip = self.create_trip(
+                    payload,
+                    str(job["user_id"]),
+                    creation_job_id=job_id,
+                    weather_provider=weather_provider,
+                )
             now = _now()
             with self.connection() as db:
                 db.execute(
@@ -633,7 +711,46 @@ class PhaseThreeMixin:
              place["longitude"], place["category"], user_id, now),
         )
 
-    def create_trip(self, payload: dict, user_id: str, creation_job_id: str | None = None) -> dict:
+    @staticmethod
+    def _trip_weather_context(
+        weather_provider: object | None,
+        destination_place: dict | None,
+        start_date: str,
+        end_date: str,
+    ) -> dict:
+        """Fetch a bounded weather snapshot without making trip creation fragile.
+
+        Open-Meteo only supports a short forecast window. Trips outside that
+        window must still be editable, but the planner is told explicitly that
+        no forecast is available so it cannot pretend to have checked weather.
+        """
+        if weather_provider is None:
+            return {"available": False, "reason": "天气服务未启用", "items": []}
+        place = destination_place or {}
+        if place.get("latitude") is None or place.get("longitude") is None:
+            return {"available": False, "reason": "目的地尚未确认坐标", "items": []}
+        try:
+            result = weather_provider.forecast(
+                place.get("latitude"), place.get("longitude"), start_date, end_date,
+            )
+        except (TypeError, ValueError):
+            return {"available": False, "reason": "旅行日期超出可用预报范围", "items": []}
+        if not result or not isinstance(result.get("items"), list) or not result["items"]:
+            return {"available": False, "reason": "天气服务暂时没有返回该日期预报", "items": []}
+        return {
+            "available": True,
+            "source": str(result.get("source") or "Open-Meteo"),
+            "timezone": str(result.get("timezone") or "auto"),
+            "items": result["items"],
+        }
+
+    def create_trip(
+        self,
+        payload: dict,
+        user_id: str,
+        creation_job_id: str | None = None,
+        weather_provider: object | None = None,
+    ) -> dict:
         destination = str(payload.get("destination", "")).strip()
         if not destination or len(destination) > 120:
             raise ValueError("目的地长度需为 1–120 位")
@@ -707,6 +824,9 @@ class PhaseThreeMixin:
             "preferences": preference,
             "partner_preferences": payload.get("partner_preferences") if isinstance(payload.get("partner_preferences"), dict) else {},
             "destination_place": destination_place or {},
+            "weather_forecast": self._trip_weather_context(
+                weather_provider, destination_place, start_date, end_date,
+            ),
         }
         plans = self.planner.generate_variants(destination, budget_cents, planning_context)
         if len(plans) < 5:
@@ -819,6 +939,13 @@ class PhaseThreeMixin:
             row = db.execute("SELECT * FROM trips WHERE id=? AND couple_id=? AND deleted_at IS NULL", (trip_id, couple["id"])).fetchone()
             if not row:
                 raise KeyError("旅行不存在")
+            existing_place = db.execute(
+                "SELECT * FROM trip_destination_places WHERE trip_id=?", (trip_id,),
+            ).fetchone()
+            if not destination_place and existing_place:
+                destination_place = dict(existing_place)
+            if not destination_place:
+                raise ValueError("请先从高德候选中确认具体目的地，再保存并重新生成五套方案")
             if payload.get("expected_version") is None or int(payload["expected_version"]) != int(row["version"]):
                 raise ConflictError("旅行已经被另一方修改，请刷新后重试")
             if not departure_city or not arrival_city:
@@ -836,7 +963,7 @@ class PhaseThreeMixin:
                 "UPDATE trips SET title=?,destination=?,departure_city=?,arrival_city=?,travelers=?,rooms=?,hotel_budget_cents=?,version=version+1,updated_at=? WHERE id=?",
                 (title, destination, departure_city, arrival_city, travelers, rooms, hotel_budget_cents, now, trip_id),
             )
-            if destination_place:
+            if payload.get("destination_candidate_id"):
                 self._save_destination_place(db, trip_id, destination_place, user_id, now)
             self._audit(db, "trip.logistics_updated", "trip", trip_id, {"destination": destination, "departure_city": departure_city, "arrival_city": arrival_city, "destination_resolved": bool(destination_place)}, actor_id=user_id)
             self._event(db, couple["id"], user_id, "life.updated", trip_id, {"resource": "trip", "operation": "updated"})
@@ -1037,6 +1164,91 @@ class PhaseThreeMixin:
             "cache_hours": 24,
         }
 
+    def resolve_itinerary_photo(self, trip_id: str, item_id: str, user_id: str) -> dict:
+        """Resolve and cache a trustworthy AMap photo for one attraction card."""
+        with self.connection() as db:
+            couple, _ = self._couple_context(db, user_id)
+            item = db.execute(
+                "SELECT i.*,t.destination,p.city,p.district,p.province,p.country "
+                "FROM itinerary_items i JOIN trip_days d ON d.id=i.day_id "
+                "JOIN plan_variants v ON v.id=d.variant_id JOIN trips t ON t.id=v.trip_id "
+                "LEFT JOIN trip_destination_places p ON p.trip_id=t.id "
+                "WHERE i.id=? AND t.id=? AND t.couple_id=? AND t.deleted_at IS NULL",
+                (item_id, trip_id, couple["id"]),
+            ).fetchone()
+            if not item:
+                raise KeyError("行程地点不存在")
+            details = _json(item["details_json"], {})
+            cached = details.get("place_photo") if isinstance(details, dict) else None
+            checked_at = str(details.get("place_photo_checked_at") or "") if isinstance(details, dict) else ""
+            checked = None
+            if checked_at:
+                try:
+                    checked = datetime.fromisoformat(checked_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+                except ValueError:
+                    checked = None
+            if (
+                isinstance(cached, dict)
+                and int(cached.get("match_version") or 0) >= 2
+                and str(cached.get("url") or "").startswith("https://")
+                and checked is not None
+                and datetime.now(timezone.utc) - checked < timedelta(days=7)
+            ):
+                return {"status": "available", "photo": cached, "cached": True}
+            if details.get("place_photo_status") == "unavailable" and checked_at:
+                if checked is not None and datetime.now(timezone.utc) - checked < timedelta(hours=24):
+                    return {"status": "unavailable", "photo": None, "cached": True}
+            item_value = dict(item)
+            title = str(item["title"] or "").strip()
+            item_type = str(item["type"] or "").lower()
+            excluded = item_type in {"meal", "transport", "hotel", "flight", "train"} or _is_meal_itinerary(item)
+            excluded = excluded or bool(re.search(r"出发|抵达|返程|返回|入住|退房|机场|火车站|高铁站|车站", title))
+            if excluded:
+                return {"status": "not_applicable", "photo": None, "cached": True}
+            region_hint = str(item_value.get("city") or item_value.get("district") or item_value.get("province") or item_value.get("destination") or "")
+
+        provider = map_provider_from_env(self.external_request_guard("amap"))
+        if provider.is_mock or provider.name != "amap":
+            return {"status": "unavailable", "photo": None, "cached": False, "message": "高德地点图片服务未配置"}
+        try:
+            candidates = provider.search_places(title, region_hint, 8)
+        except RuntimeError as exc:
+            return {"status": "unavailable", "photo": None, "cached": False, "message": str(exc)}
+        ranked = sorted(
+            (( _place_photo_match_score(title, value), value) for value in candidates if value.get("image_url")),
+            key=lambda pair: pair[0], reverse=True,
+        )
+        best = ranked[0][1] if ranked and ranked[0][0] >= 64 else None
+        now = _now()
+        with self.connection() as db:
+            # Re-check ownership before persisting a result obtained outside the transaction.
+            owned = db.execute(
+                "SELECT i.details_json FROM itinerary_items i JOIN trip_days d ON d.id=i.day_id "
+                "JOIN plan_variants v ON v.id=d.variant_id JOIN trips t ON t.id=v.trip_id "
+                "WHERE i.id=? AND t.id=? AND t.couple_id=? AND t.deleted_at IS NULL",
+                (item_id, trip_id, couple["id"]),
+            ).fetchone()
+            if not owned:
+                raise KeyError("行程地点不存在")
+            details = _json(owned["details_json"], {})
+            details["place_photo_checked_at"] = now
+            if best:
+                photo = {
+                    "url": best["image_url"], "source": "amap", "source_label": "高德地点实景图",
+                    "place_name": best["name"], "provider_place_id": best.get("provider_place_id", ""),
+                    "match_version": 2,
+                }
+                details["place_photo"], details["place_photo_status"] = photo, "available"
+                status = "available"
+            else:
+                details.pop("place_photo", None)
+                details["place_photo_status"], photo, status = "unavailable", None, "unavailable"
+            db.execute(
+                "UPDATE itinerary_items SET details_json=? WHERE id=?",
+                (json.dumps(details, ensure_ascii=False, separators=(",", ":")), item_id),
+            )
+        return {"status": status, "photo": photo, "cached": False}
+
     def confirm_itinerary_place(
         self, trip_id: str, item_id: str, candidate_id: object, user_id: str,
         expected_version: object = None,
@@ -1196,20 +1408,9 @@ class PhaseThreeMixin:
         ).fetchall()
         for day in days:
             rows = db.execute("SELECT * FROM itinerary_items WHERE day_id=? ORDER BY position", (day["id"],)).fetchall()
-            # Older builds created one generic snack/place per day. Remove an
-            # unchosen afternoon-snack placeholder so the upgraded plan has an
-            # unambiguous breakfast/lunch/dinner structure. A selected or locked
-            # item is always preserved.
-            for row in rows:
-                selected = db.execute(
-                    "SELECT 1 FROM trip_food_recommendations WHERE itinerary_item_id=? AND selected_at IS NOT NULL LIMIT 1",
-                    (row["id"],),
-                ).fetchone()
-                if _meal_type(row["start_time"]) == "snack" and not row["locked"] and not selected:
-                    db.execute("DELETE FROM trip_food_recommendations WHERE itinerary_item_id=?", (row["id"],))
-                    db.execute("DELETE FROM itinerary_items WHERE id=?", (row["id"],))
-            rows = db.execute("SELECT * FROM itinerary_items WHERE day_id=? ORDER BY position", (day["id"],)).fetchall()
-            existing = {_meal_type(row["start_time"]) for row in rows}
+            # Time alone cannot decide whether a row is a meal: a 15:00 museum
+            # or performance must never be deleted as an "afternoon snack".
+            existing = {_meal_type(row["start_time"]) for row in rows if _is_meal_itinerary(row)}
             position = max((int(row["position"]) for row in rows), default=0)
             for meal, start_time in REQUIRED_MEALS:
                 if meal in existing:
@@ -1260,6 +1461,7 @@ class PhaseThreeMixin:
                     "JOIN plan_variants v ON v.id=d.variant_id WHERE v.trip_id=? AND v.style='food' ORDER BY d.position, i.position",
                     (trip_id,),
                 ).fetchall()
+                items = [item for item in items if _is_meal_itinerary(item)]
         if not items:
             raise ValueError("美食方案还没有可推荐餐馆的时段")
         search_area = str(search_area or "").strip()[:120]

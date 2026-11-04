@@ -1217,7 +1217,7 @@ CREATE TABLE IF NOT EXISTS trip_assistant_action_drafts (
     trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
     couple_id TEXT NOT NULL REFERENCES couples(id) ON DELETE CASCADE,
     creator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    action_type TEXT NOT NULL CHECK(action_type IN ('itinerary_change','day_replan')),
+    action_type TEXT NOT NULL CHECK(action_type IN ('itinerary_change','day_replan','itinerary_add')),
     payload_json TEXT NOT NULL,
     preview_json TEXT NOT NULL,
     expected_trip_version INTEGER NOT NULL,

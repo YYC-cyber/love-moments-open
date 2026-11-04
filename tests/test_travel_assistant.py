@@ -44,6 +44,16 @@ class TravelAssistantIntentTests(unittest.TestCase):
         self.assertEqual(intent.kind, "general")
         self.assertEqual(intent.scope, "上海市·浦东新区·上海迪士尼度假区")
 
+    def test_place_search_and_itinerary_add_are_distinct(self) -> None:
+        searched = self.provider.interpret("附近有什么好玩的景点", self.context, [])
+        replaced = self.provider.interpret("把第二天下午的景点换一个", self.context, [])
+        added = self.provider.interpret("把奇想花园加入第2天行程", self.context, [])
+        self.assertEqual(searched.kind, "place_search")
+        self.assertEqual((replaced.kind, replaced.day_number), ("place_search", 2))
+        self.assertEqual(added.kind, "itinerary_add")
+        self.assertEqual(added.day_number, 2)
+        self.assertEqual(added.item_hint, "奇想花园")
+
     def test_live_trip_intents_are_distinct_and_delay_is_extracted(self) -> None:
         rainy = self.provider.interpret("第二天可能下雨，换成室内项目", self.context, [])
         delayed = self.provider.interpret("今天晚了 60 分钟，重新安排后面的内容", self.context, [])

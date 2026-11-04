@@ -24,15 +24,15 @@
         <span class="eyebrow ink">PRIVATE SPACE FOR TWO</span>
         <h1>登录你们的<br>共同小岛</h1>
         <p class="auth-lead">使用恋屿账号和密码登录，不连接微信或其他社交账号。</p>
-        <div class="auth-tabs"><button class="active" data-auth-mode="login">登录</button><button data-auth-mode="register">注册</button></div>
+        <div class="auth-tabs"><button class="active" data-auth-mode="login" disabled>登录</button><button data-auth-mode="register" disabled>注册</button></div>
         <form id="authForm">
-          <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required></label>
-          <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required></label>
-          <button class="primary-button" id="authSubmit">登录</button>
+          <label class="field"><span>账号</span><input id="authUsername" autocomplete="username" placeholder="3–30 位字母、数字或下划线" required disabled></label>
+          <label class="field"><span>密码</span><input id="authPassword" type="password" autocomplete="current-password" placeholder="新账号至少 10 位，并组合字母、数字或符号" required disabled></label>
+          <button class="primary-button" id="authSubmit" disabled>登录</button>
         </form>
-        <div class="auth-progress" id="authProgress" role="status" aria-live="polite" hidden>
+        <div class="auth-progress" id="authProgress" role="status" aria-live="polite">
           <div class="auth-progress-track"><i id="authProgressBar"></i></div>
-          <span id="authProgressText">正在准备登录…</span>
+          <span id="authProgressText">正在确认页面版本…</span>
         </div>
         <a class="entry-notice" id="entryNotice" href="#" hidden>
           <strong>当前打开的是备用入口</strong><span>备用入口目前暂停，请前往正在使用的正式地址。</span>
@@ -530,7 +530,7 @@
 
         <article class="bead-maker card" aria-labelledby="beadMakerTitle">
           <div class="bead-maker-heading">
-            <div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>照片只在当前设备处理，不会上传服务器；保存的板图也仅属于当前账号和设备。</p></div>
+            <div><span class="pill rose">首个小游戏</span><h2 id="beadMakerTitle">照片转拼豆板图</h2><p>本机模式不上传照片；只有你主动选择 AI 精修并点击生成时，才会按次发送给百炼。板图草稿仍只保存在当前账号和设备。</p></div>
             <span class="bead-mascot" aria-hidden="true">▦</span>
           </div>
 
@@ -545,11 +545,18 @@
             <button type="button" class="quiet bead-change-image" data-action="bead-pick-image" hidden>更换照片</button>
           </div>
 
+          <label class="bead-purpose"><span>先选你手里的豆子品牌和尺寸</span><select id="beadPaletteCatalog" aria-describedby="beadPaletteStatus"><option value="">正在读取可用色卡…</option></select></label>
+          <p class="form-note bead-palette-status" id="beadPaletteStatus">不同品牌的 H2、W01 等色号不能混用；切换后会按对应色卡重新生成图纸。</p>
+          <label class="bead-purpose"><span>想做成什么</span><select id="beadPurpose"><option value="collectible" selected>高清收藏画 · 自动保留人物/宠物细节</option><option value="standard">普通摆件 · 清楚且更容易制作</option><option value="charm">小挂件 · 简化成可爱图案</option></select></label>
+          <div class="bead-smart-note" id="beadSmartNote"><strong>智能模式已准备</strong><span>会自动处理单人、双人、宠物以及人与宠物同框，生成 3 套可选方案。</span></div>
+          <details class="bead-advanced" id="beadAdvancedSettings">
+            <summary>高级设置（一般不需要调整）</summary>
           <div class="bead-settings">
-            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29" selected>29 × 29 · 单板常用</option><option value="32">32 × 32 · 细节更多</option><option value="50">50 × 50 · 大幅作品</option><option value="58">58 × 58 · 四块 29 板</option><option value="87">87 × 87 · 九块 29 板</option></select></label>
-            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24" selected>24 色 · 日常推荐</option><option value="36">36 色 · 细节丰富</option><option value="48">48 色 · 明暗更细</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
+            <label><span>生成方式</span><select id="beadGenerationMode"><option value="local">本机生成 · 免费快速</option><option value="ai">AI 精修 · 人像效果更好</option></select></label>
+            <label><span>板图尺寸</span><select id="beadBoardSize"><option value="16">16 × 16 · 小挂件</option><option value="29">29 × 29 · 图标/单板</option><option value="32">32 × 32 · 简单头像</option><option value="50">50 × 50 · 中等作品</option><option value="58" selected>58 × 58 · 人像推荐</option><option value="87">87 × 87 · 高清人像</option></select></label>
+            <label><span>最多颜色</span><select id="beadColorCount"><option value="8">8 色 · 最省豆</option><option value="12">12 色 · 简洁易做</option><option value="24">24 色 · 卡通推荐</option><option value="36">36 色 · 细节丰富</option><option value="48" selected>48 色 · 人像推荐</option><option value="60">60 色 · 高级细节</option><option value="72">72 色 · 最大还原</option></select></label>
             <label><span>取景方式</span><select id="beadCropMode"><option value="cover" selected>铺满方板</option><option value="portrait">主体特写</option><option value="contain">保留完整照片</option></select></label>
-            <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
+            <label><span>画面处理</span><select id="beadDetailMode"><option value="detail" selected>细节清晰 · 人像/宠物</option><option value="easy">易制作 · 保轮廓少碎色</option><option value="balanced">均衡柔和 · 通用</option><option value="simple">色块简洁 · 图标</option></select></label>
             <label><span>人物明暗</span><select id="beadToneMode"><option value="auto" selected>主体整体提亮 · 推荐</option><option value="bright">强力提亮暗部</option><option value="original">保持原图明暗</option></select></label>
             <label><span>照片背景</span><select id="beadBackgroundMode"><option value="keep" selected>保留原背景</option><option value="remove">本机智能去背景</option></select></label>
           </div>
@@ -559,20 +566,35 @@
             <label><span>主体大小 <output data-bead-crop-output="beadCropZoom">100%</output></span><input id="beadCropZoom" type="range" min="100" max="180" value="100"></label>
             <label id="beadBackgroundSensitivityRow" hidden><span>去背景力度 <output data-bead-crop-output="beadBackgroundSensitivity">42</output></span><input id="beadBackgroundSensitivity" type="range" min="18" max="90" value="42"></label>
           </div>
-          <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>生成拼豆板图</button>
-          <p class="form-note">清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光；配合去背景时只处理保留下来的主体像素。去背景在本机完成，纯色背景效果最好。</p>
+          </details>
+          <button type="button" class="primary-button bead-generate" data-action="bead-generate" disabled>一键智能生成</button>
+          <div class="bead-ai-progress" id="beadAiProgress" hidden role="status" aria-live="polite"><span></span><strong>AI 正在精修照片</strong><small>一般需要 20～60 秒，请保持页面打开。</small></div>
+          <p class="form-note" id="beadModeNote">人像建议至少使用 58 × 58 和 48 色；29 × 29 只适合图标或小挂件。清晰度主要由板图尺寸决定，颜色数量负责还原明暗。“主体整体提亮”会抬高人物暗部并保护高光。</p>
         </article>
 
         <section class="bead-result card" id="beadResult" hidden aria-live="polite">
           <div class="bead-result-heading"><div><span class="eyebrow ink">BEAD PATTERN</span><h2>制作板图</h2><p id="beadResultSummary"></p></div><button type="button" class="quiet" data-action="bead-reset-edits">恢复生成结果</button></div>
-          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="580" height="580" aria-label="拼豆网格图，选择颜色后可点击单格修改"></canvas></div>
+          <div class="bead-variant-choices" id="beadVariantChoices" aria-label="智能生成的三套板图"></div>
+          <div class="bead-board-toolbar"><span id="beadCellInspector">四边有坐标，三版每格都写入色号；放大后可清楚查看</span><button type="button" class="quiet" data-action="bead-toggle-zoom" aria-pressed="false">放大查看全部色号</button></div>
+          <div class="bead-canvas-wrap"><canvas id="beadCanvas" width="1740" height="1740" aria-label="四边标注行列坐标、每格标注实体豆色号的拼豆施工图；放大后可点格子查看"></canvas></div>
+          <div class="bead-legend" id="beadLegend" aria-label="图纸色号、颜色和所需数量"></div>
+          <details class="bead-ironing-guide"><summary>这张图怎么烫最好看</summary><div id="beadIroningAdvice"></div></details>
+          <details class="bead-result-advanced"><summary>高级编辑（可选）</summary>
           <p class="bead-edit-hint">点击下方色块选色，再点板图中的格子即可修正颜色。</p>
           <div class="bead-quick-actions"><button type="button" class="quiet" data-action="bead-replace-rare" hidden>一键替换冷门色</button></div>
           <div class="bead-palette" id="beadPalette" aria-label="拼豆颜色和数量"></div>
+          </details>
+          <div class="bead-ai-actions" id="beadAiActions" hidden><p>不满意可以从原始照片重新生成，不会反复加工上一版。每次重试会产生一次百炼图片费用。</p><button type="button" class="secondary-button" data-action="bead-ai-retry">AI 重新生成一版</button></div>
           <div class="bead-result-actions">
             <button type="button" class="secondary-button" data-action="bead-save">保存到本机</button>
             <button type="button" class="primary-button" data-action="bead-export">导出高清图纸</button>
           </div>
+        </section>
+
+        <section class="bead-ai-library card" id="beadAiLibrary" hidden aria-labelledby="beadAiLibraryTitle">
+          <div class="bead-library-heading"><div><span class="eyebrow ink">AI VERSIONS</span><h2 id="beadAiLibraryTitle">AI 精修版本</h2></div><small>仅自己可见 · 不会自动删除</small></div>
+          <p class="form-note">每次生成和重试都会保存成独立版本。旧版会一直保留，只有你明确点击“删除”才会移除。</p>
+          <div id="beadAiVersionList" class="bead-ai-version-list"><div class="empty-view"><p>还没有 AI 精修版本。</p></div></div>
         </section>
 
         <section class="bead-library card" aria-labelledby="beadLibraryTitle">
@@ -618,8 +640,10 @@
             <div class="wheel-heading"><div><span class="pill rose">24 种实用卡</span><h2>给 TA 做一张正式的小约定</h2><p>发卡人先手写签名，收卡人阅读后再次签名；双签完成才能下载 PDF。</p></div></div>
             <form id="coupleCardForm">
               <h3>1 · 选择卡片类型</h3><div id="cardTemplateGrid" class="card-template-grid"></div>
-              <label id="customCardTitleField" class="field" hidden><span>自定义卡名</span><input id="customCardTitle" maxlength="30" placeholder="例如：周末赖床卡"></label>
-              <label class="field"><span>想对 TA 说的话</span><textarea id="coupleCardMessage" maxlength="500" required></textarea></label>
+              <div class="card-writing-fields">
+                <label id="customCardTitleField" class="field"><span>卡片标题（可以自己改）</span><input id="customCardTitle" maxlength="30" placeholder="例如：只属于我们的周末卡" required></label>
+                <label class="field"><span>亲手写给 TA 的话</span><textarea id="coupleCardMessage" maxlength="500" placeholder="在这里写下你真正想说的话；选择模板只会给你一个开头，不会限制内容。" required></textarea></label>
+              </div>
               <h3>2 · 选择 Kitty 卡面</h3><div id="cardStyleGrid" class="card-style-grid"></div>
               <div id="cardLivePreview" class="couple-card-preview" aria-live="polite"></div>
               <h3>3 · 发卡人手写签名</h3>
@@ -646,7 +670,7 @@
 
   <div class="modal" id="coupleCardSignModal" role="dialog" aria-modal="true" aria-labelledby="coupleCardSignTitle" aria-hidden="true">
     <div class="sheet scroll-sheet card-sign-sheet"><button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SIGN TOGETHER</span><h2 id="coupleCardSignTitle">签收这张卡</h2><div id="cardSignSummary"></div>
-      <form id="coupleCardSignForm"><label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardRecipientSignatureName" maxlength="20" readonly required></label><div class="signature-board"><p>请收卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardRecipientSignature" width="640" height="220" aria-label="收卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="recipient">清空重签</button></div><label class="check-field"><input id="cardRecipientConfirmed" type="checkbox" required><span>我已完整阅读，自愿签署；每次兑现仍以双方当下意愿为准。</span></label><button type="submit" class="primary-button">完成双方签名</button></form>
+      <form id="coupleCardSignForm"><label class="field"><span>写给发卡人的回信（可选，会留在卡片上）</span><textarea id="cardRecipientMessage" maxlength="240" placeholder="例如：好呀，我们一起慢慢实现。"></textarea></label><label class="field"><span>签署人（由当前账号确认，仅作身份标注）</span><input id="cardRecipientSignatureName" maxlength="20" readonly required></label><div class="signature-board"><p>请收卡人本人在下面用手指真实手写；上方姓名文字不能代替签名。</p><canvas id="cardRecipientSignature" width="640" height="220" aria-label="收卡人真实手写签名板"></canvas><button type="button" class="quiet" data-action="clear-signature" data-signature="recipient">清空重签</button></div><label class="check-field"><input id="cardRecipientConfirmed" type="checkbox" required><span>我已完整阅读，自愿签署；每次兑现仍以双方当下意愿为准。</span></label><button type="submit" class="primary-button">留言并完成双方签名</button></form>
     </div>
   </div>
 
@@ -917,7 +941,7 @@
 
   <div class="modal" id="editModal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle" aria-hidden="true">
     <div class="sheet scroll-sheet">
-      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SMART REVISION</span><h2 id="editModalTitle">调整第一天</h2>
+      <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">SMART REVISION</span><h2 id="editModalTitle">调整行程项目</h2>
       <form id="tripItemEditForm">
         <label class="field"><span>地点 / 活动</span><input id="editItemTitle" maxlength="160" required></label>
         <label class="field"><span>开始时间</span><input id="editItemTime" type="time" required></label>
@@ -1050,9 +1074,18 @@
   </div>
 
   <div class="modal" id="accountModal" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-hidden="true">
-    <div class="sheet scroll-sheet">
+    <div class="sheet scroll-sheet account-center-sheet">
       <button class="sheet-close" data-action="close-modal" aria-label="关闭">×</button><span class="eyebrow ink">PRIVACY & DEVICES</span><h2 id="accountModalTitle">账号与共同空间</h2>
       <div id="accountIdentityCard" class="account-identity-card" aria-live="polite"></div>
+      <nav class="account-center-menu" id="accountCenterMenu" aria-label="个人中心分类">
+        <button type="button" data-action="open-account-section" data-account-section="profile"><span>♡</span><b>个人资料</b><small>昵称、头像和修改记录</small><i>›</i></button>
+        <button type="button" data-action="open-account-section" data-account-section="appearance"><span>🎀</span><b>外观与主题</b><small>主题、字体、贴纸和布局</small><i>›</i></button>
+        <button type="button" data-action="open-account-section" data-account-section="notifications"><span>◌</span><b>通知与设备</b><small>锁屏提醒和登录设备</small><i>›</i></button>
+        <button type="button" data-action="open-account-section" data-account-section="privacy"><span>⌾</span><b>隐私与数据</b><small>AI 授权、离线操作和媒体</small><i>›</i></button>
+        <button type="button" data-action="open-account-section" data-account-section="security"><span>◇</span><b>账号与维护</b><small>密码、导出、后台和安全操作</small><i>›</i></button>
+      </nav>
+      <section class="account-center-panel" data-account-panel="profile" hidden>
+        <header class="account-panel-heading"><button type="button" data-action="back-account-center">‹</button><div><small>PERSONAL PROFILE</small><h3>个人资料</h3></div></header>
       <form id="avatarProfileForm" class="avatar-profile-form">
         <div class="profile-preview" aria-live="polite">
           <span class="avatar xl" id="profilePreviewAvatar">♡</span>
@@ -1069,6 +1102,9 @@
         <h3 id="profileHistoryTitle">资料修改记录</h3>
         <div id="profileHistoryList" class="device-list"><p class="form-note">正在读取双方的资料修改记录…</p></div>
       </section>
+      </section>
+      <section class="account-center-panel" data-account-panel="appearance" hidden>
+        <header class="account-panel-heading"><button type="button" data-action="back-account-center">‹</button><div><small>APPEARANCE</small><h3>外观与主题</h3></div></header>
       <form id="themeProfileForm" class="theme-profile-form">
         <fieldset>
           <legend>我的界面风格</legend>
@@ -1095,8 +1131,11 @@
         <button class="secondary-button">保存显示偏好</button>
         <p class="form-note">全部偏好只影响自己的界面，不影响伴侣或共同记录。角色插画为新制作的非官方私人贴纸；未安装贴纸时仍可使用主题配色。</p>
       </form>
+      </section>
+      <section class="account-center-panel" data-account-panel="notifications" hidden>
+        <header class="account-panel-heading"><button type="button" data-action="back-account-center">‹</button><div><small>NOTIFICATIONS & DEVICES</small><h3>通知与设备</h3></div></header>
       <p class="form-note account-session-note">同一浏览器的普通标签页会共享登录账号；切换账号后，其他标签页会自动同步刷新。需要两人同时登录时，请使用两台设备，或一个普通窗口加一个无痕窗口。</p>
-      <div id="deviceList" class="device-list"></div>
+      <div id="deviceList" class="device-list"><p class="form-note">进入后读取当前账号的登录设备…</p></div>
       <section class="push-settings" aria-labelledby="pushSettingsTitle">
         <h3 id="pushSettingsTitle">消息与来电提醒</h3>
         <p id="pushStatus" class="push-status">正在检查当前设备…</p>
@@ -1109,6 +1148,9 @@
         <div id="pushDiagnostics" class="push-diagnostics" aria-live="polite"></div>
         <p class="form-note">iPhone/iPad 需 iOS/iPadOS 16.4 以上、先添加到主屏幕并使用 HTTPS。聊天、共同留言和来电只显示通用隐私文案，点击后进入对应页面；来电不是系统全屏 CallKit。</p>
       </section>
+      </section>
+      <section class="account-center-panel" data-account-panel="privacy" hidden>
+        <header class="account-panel-heading"><button type="button" data-action="back-account-center">‹</button><div><small>PRIVACY & DATA</small><h3>隐私与数据</h3></div></header>
       <section class="push-settings" aria-labelledby="privacyUsageTitle">
         <h3 id="privacyUsageTitle">AI 用量与内容授权</h3>
         <div id="privacyUsage" aria-live="polite"><p class="form-note">正在读取本月真实用量…</p></div>
@@ -1120,6 +1162,18 @@
         <div id="offlineSyncStatus" class="device-list" aria-live="polite"><p class="form-note">正在检查当前设备的离线操作…</p></div>
         <p class="form-note">消息和采购勾选在断网时只保存在当前设备。需要处理的项目不会静默丢失；丢弃前会再次确认。</p>
       </section>
+      <section class="account-media-section" aria-labelledby="accountMediaTitle">
+        <h3 id="accountMediaTitle">私有媒体库</h3>
+        <p class="form-note">原图和缩略图都需要登录及情侣权限。只能清理自己上传且未被消息、瞬间使用的文件。</p>
+        <div id="accountMediaList" class="account-media-list"></div>
+        <details class="account-media-trash"><summary>图片回收站</summary><div id="accountMediaTrash" class="account-media-list"></div></details>
+      </section>
+      </section>
+      <section class="account-center-panel" data-account-panel="security" hidden>
+        <header class="account-panel-heading"><button type="button" data-action="back-account-center">‹</button><div><small>ACCOUNT & MAINTENANCE</small><h3>账号与维护</h3></div></header>
+      <a class="admin-entry" href="/admin"><span>◇</span><div><strong>自用后台与异常检测</strong><small>管理员账号可查看运行、备份、设备和安全状态</small></div><b>›</b></a>
+      <button class="primary-button" data-action="export-account">下载完整 ZIP 数据</button>
+      <p class="form-note">导出包含你有权访问的 JSON 与媒体，不包含密码、会话令牌或对方的私密内容。</p>
       <form id="changePasswordForm" class="account-password-form">
         <h3>更换登录密码</h3>
         <label class="field"><span>当前密码</span><input id="currentPassword" type="password" autocomplete="current-password" required></label>
@@ -1128,17 +1182,11 @@
         <button class="secondary-button">保存新密码</button>
         <p class="form-note">更换成功后，除当前设备外的登录会自动失效。</p>
       </form>
-      <section class="account-media-section" aria-labelledby="accountMediaTitle">
-        <h3 id="accountMediaTitle">私有媒体库</h3>
-        <p class="form-note">原图和缩略图都需要登录及情侣权限。只能清理自己上传且未被消息、瞬间使用的文件。</p>
-        <div id="accountMediaList" class="account-media-list"></div>
-        <details class="account-media-trash"><summary>图片回收站</summary><div id="accountMediaTrash" class="account-media-list"></div></details>
-      </section>
-      <a class="admin-entry" href="/admin"><span>◇</span><div><strong>自用后台与异常检测</strong><small>管理员账号可查看运行、备份、设备和安全状态</small></div><b>›</b></a>
-      <button class="primary-button" data-action="export-account">下载完整 ZIP 数据</button>
-      <p class="form-note">导出包含你有权访问的 JSON 与媒体，不包含密码、会话令牌或对方的私密内容。</p>
+      <details class="account-danger-zone"><summary>解绑与注销</summary><p class="form-note">这些操作会改变双方访问权限，只有明确需要时再打开。</p>
       <button class="secondary-button danger-text" data-action="unlink-couple">解除情侣关系</button>
       <button class="secondary-button danger-text" data-action="delete-account">注销我的账号</button>
+      </details>
+      </section>
     </div>
   </div>
 
@@ -1162,6 +1210,11 @@
     <div><strong>恋屿有新版本</strong><span>点击更新后会重新打开页面，尚未提交的表单不会自动保存。</span></div>
     <button class="primary-button" data-action="apply-app-update">立即更新</button>
     <button class="sheet-close" data-action="dismiss-app-update" aria-label="稍后更新">×</button>
+  </aside>
+  <aside class="trip-generation-banner" id="tripGenerationBanner" role="status" aria-live="polite" hidden>
+    <span class="trip-generation-spinner" aria-hidden="true"></span>
+    <div><strong id="tripGenerationTitle">旅行方案正在后台生成</strong><span id="tripGenerationMessage">你可以继续使用其他页面</span></div>
+    <button type="button" data-action="open-trip-generation">查看</button>
   </aside>
   <div class="toast" id="toast" role="status"></div>
   <script src="../../static/app.js"></script>

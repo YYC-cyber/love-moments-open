@@ -29,6 +29,8 @@ from love_moments.ocr import real_ocr_configured
 from love_moments.quota import QuotaExceededError
 from love_moments.webpush import WebPushService
 from love_moments.life_assistant import life_assistant_from_env
+from love_moments.bead_ai import BailianBeadProvider, bead_ai_status
+from love_moments.bead_palettes import BeadPaletteRepository
 
 
 ROOT = Path(__file__).resolve().parent
@@ -54,6 +56,7 @@ WEATHER = OpenMeteoWeather()
 TURN = TurnCredentialProvider()
 RTC = ShengwangRtcProvider()
 ADMIN = AdminService(lambda: STORE, ROOT)
+BEAD_PALETTES = BeadPaletteRepository.from_environment(ROOT)
 SESSION_COOKIE = "lm_session"
 PUBLIC_FILES = {
     "/static/index.html",
@@ -77,10 +80,10 @@ PRIVATE_THEME_FILES = {
     "daniel": "daniel-stickers-v1.png",
     "kitty_pages": "kitty-page-stickers-v2.png",
     "daniel_pages": "daniel-page-stickers-v2.png",
-    "kitty_cards_1": "kitty-couple-cards-1-v2.webp",
-    "kitty_cards_2": "kitty-couple-cards-2-v2.webp",
-    "kitty_cards_3": "kitty-couple-cards-3-v2.webp",
-    "kitty_cards_4": "kitty-couple-cards-4-v2.webp",
+    "kitty_cards_1": "kitty-couple-cards-1-v3.webp",
+    "kitty_cards_2": "kitty-couple-cards-2-v3.webp",
+    "kitty_cards_3": "kitty-couple-cards-3-v3.webp",
+    "kitty_cards_4": "kitty-couple-cards-4-v3.webp",
 }
 
 
@@ -138,6 +141,7 @@ class RequestLimiter:
 
 AUTH_LIMITER = RequestLimiter()
 PUSH_TEST_LIMITER = RequestLimiter(limit=3, window_seconds=60)
+BEAD_AI_LIMITER = RequestLimiter(limit=6, window_seconds=600)
 
 
 class ProviderFailureTracker:
@@ -314,7 +318,7 @@ class TripGenerationWorker:
             try:
                 job = STORE.claim_trip_generation_job()
                 if job:
-                    STORE.run_trip_generation_job(job)
+                    STORE.run_trip_generation_job(job, WEATHER)
                     continue
             except Exception as error:
                 PROVIDER_FAILURES.failure("trip-generation", "旅行生成后台任务", error)
@@ -1369,6 +1373,22 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             self._send_json(STORE.list_couple_cards(user["id"]), headers={"Cache-Control": "no-store"})
             return
+        elif path == "/api/v1/entertainment/beads/ai-status":
+            self._require_user()
+            self._send_json(bead_ai_status(), headers={"Cache-Control": "no-store"})
+            return
+        elif path == "/api/v1/entertainment/beads/palettes":
+            self._require_user()
+            self._send_json(BEAD_PALETTES.list(), headers={"Cache-Control": "private, max-age=300"})
+            return
+        elif match := re.fullmatch(r"/api/v1/entertainment/beads/palettes/([a-z0-9][a-z0-9._-]{1,63})", path):
+            self._require_user()
+            self._send_json(BEAD_PALETTES.get(match.group(1)), headers={"Cache-Control": "private, max-age=300"})
+            return
+        elif path == "/api/v1/entertainment/beads/ai-previews":
+            user = self._require_user()
+            self._send_json(STORE.list_bead_ai_previews(user["id"]), headers={"Cache-Control": "no-store"})
+            return
         elif match := re.fullmatch(r"/api/v1/entertainment/cards/([^/]+)/pdf", path):
             self._send_couple_card_pdf(match.group(1), self._require_user())
             return
@@ -1420,6 +1440,38 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     user_id=user["id"],
                 )
                 self._send_json(result, 201)
+                return
+            elif path == "/api/v1/entertainment/beads/ai-preview":
+                user = self._require_user()
+                if not BEAD_AI_LIMITER.allow(f"bead-ai:{user['id']}"):
+                    self._send_json({"error": "生成得太频繁，请十分钟后再试", "code": "BEAD_AI_RATE_LIMIT"}, 429)
+                    return
+                mime_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                try:
+                    attempt = int(self.headers.get("X-Bead-Attempt", "1") or 1)
+                except ValueError as error:
+                    raise ValueError("重试次数格式无效") from error
+                final_quality = self.headers.get("X-Bead-Quality", "preview").strip().lower() == "final"
+                result = BailianBeadProvider().enhance(
+                    self._read_bytes(10 * 1024 * 1024),
+                    mime_type,
+                    attempt=attempt,
+                    final_quality=final_quality,
+                )
+                preview = STORE.save_bead_ai_preview(
+                    result.image,
+                    result.mime_type,
+                    result.model,
+                    result.attempt,
+                    user["id"],
+                )
+                self._send_json({
+                    "model": result.model,
+                    "attempt": result.attempt,
+                    "source": "真实百炼图片编辑",
+                    "stored": True,
+                    "preview": preview,
+                })
                 return
             payload = self._read_json()
             if path == "/api/v1/auth/register":
@@ -1819,10 +1871,17 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     })
                 self._send_json(result)
             elif path == "/api/v1/trips":
-                self._send_json(STORE.create_trip(payload, user["id"]), 201)
+                self._send_json(STORE.create_trip(payload, user["id"], weather_provider=WEATHER), 201)
             elif path == "/api/v1/trip-generation-jobs":
                 job = STORE.create_trip_generation_job(
                     payload, user["id"], self.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
+                )
+                TRIP_GENERATION_WORKER.wake()
+                self._send_json(job, 202 if job["status"] in {"queued", "running"} else 200)
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/generation-jobs", path):
+                job = STORE.create_trip_regeneration_job(
+                    match.group(1), payload, user["id"],
+                    self.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
                 )
                 TRIP_GENERATION_WORKER.wake()
                 self._send_json(job, 202 if job["status"] in {"queued", "running"} else 200)
@@ -1875,7 +1934,12 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/restore", path):
                 self._send_json(STORE.restore_trip(match.group(1), payload.get("expected_version"), user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/generate", path):
-                self._send_json(STORE.regenerate_trip(match.group(1), user_id=user["id"], preserve_manual=bool(payload.get("preserve_manual", True))))
+                self._send_json(STORE.regenerate_trip(
+                    match.group(1),
+                    user_id=user["id"],
+                    preserve_manual=bool(payload.get("preserve_manual", True)),
+                    weather_provider=WEATHER,
+                ))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/compose", path):
                 self._send_json(STORE.compose_plan(match.group(1), payload.get("selected_item_ids", []), user_id=user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/approve", path):
@@ -1956,6 +2020,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
                     if os.getenv("AMAP_WEB_KEY", "").strip():
                         PROVIDER_FAILURES.failure("amap", "高德餐馆搜索", error)
                     raise
+            elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/itinerary-items/([^/]+)/photo", path):
+                self._send_json(STORE.resolve_itinerary_photo(match.group(1), match.group(2), user["id"]))
             elif match := re.fullmatch(r"/api/v1/trips/([^/]+)/itinerary-items/([^/]+)/place", path):
                 self._send_json(STORE.confirm_itinerary_place(
                     match.group(1), match.group(2), payload.get("candidate_id"), user["id"], payload.get("expected_version"),
@@ -2277,6 +2343,8 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
             user = self._require_user()
             if match := re.fullmatch(r"/api/v1/entertainment/wheel/options/([^/]+)", path):
                 self._send_json(STORE.delete_wheel_option(match.group(1), payload.get("expected_version"), user["id"]))
+            elif match := re.fullmatch(r"/api/v1/entertainment/beads/ai-previews/([^/]+)", path):
+                self._send_json(STORE.delete_bead_ai_preview(match.group(1), user["id"]))
             elif match := re.fullmatch(r"/api/v1/media/uploads/([^/]+)", path):
                 self._send_json(STORE.cancel_media_upload(match.group(1), user["id"]))
             elif path == "/api/v1/push/subscriptions":
@@ -2353,7 +2421,7 @@ class LoveMomentsHandler(SimpleHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-            "img-src 'self' data: blob:; media-src 'self' blob:; "
+            "img-src 'self' data: blob: https://store.is.autonavi.com https://aos-comment.amap.com; media-src 'self' blob:; "
             "connect-src 'self' https://*.agora.io:* wss://*.agora.io:* https://*.sd-rtn.com:* wss://*.sd-rtn.com:*; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
         )

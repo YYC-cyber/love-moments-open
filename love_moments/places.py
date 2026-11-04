@@ -56,6 +56,8 @@ def normalize_place_candidate(value: dict) -> dict:
         "latitude": latitude,
         "longitude": longitude,
         "category": _text(value.get("category"), 120),
+        "image_url": _text(value.get("image_url"), 800),
+        "image_source": _text(value.get("image_source"), 40),
     }
 
 

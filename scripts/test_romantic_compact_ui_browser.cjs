@@ -103,27 +103,57 @@ async function navigateAllSurfaces(page, label) {
     tablet.on("pageerror", error => errors.push("test1: " + error.message));
     await Promise.all([login(phone, origin, "test"), login(tablet, origin, "test1")]);
 
-    await phone.evaluate(async () => {
-      const response = await fetch("/api/v1/account/profile", {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ui_layout_mode: "iphone13" }),
-      });
-      if (!response.ok) throw new Error("无法保存 iPhone 13 布局");
-      location.reload();
-    });
+    assert(await phone.locator(".avatar-a").first().textContent() === "唐", "唐账号的本人头像身份错误");
+    assert(await tablet.locator(".avatar-a").first().textContent() === "超", "超账号的本人头像身份错误");
+    await phone.locator(".avatar-pair").click();
+    await phone.locator("#accountModal.open").waitFor();
+    assert((await phone.locator("#accountIdentityCard").textContent()).includes("我 · 当前登录账号"), "账号页没有明确标注本人身份");
+    await phone.locator('[data-action="open-account-section"][data-account-section="profile"]').click();
+    await phone.locator("#avatarLabelInput").fill("🌙");
+    await phone.getByRole("button", { name: "保存个人资料", exact: true }).click();
+    await phone.waitForFunction(() => document.querySelector(".avatar-a")?.textContent === "🌙");
+    await tablet.waitForFunction(() => document.querySelector(".avatar-b")?.textContent === "🌙");
+    await phone.locator('[data-account-panel="profile"] [data-action="back-account-center"]').click();
+    await phone.locator('[data-action="open-account-section"][data-account-section="appearance"]').click();
+    await phone.locator('#themeProfileForm input[value="kitty"]').check();
+    await phone.locator('#themeProfileForm input[name="layoutMode"][value="iphone13"]').check();
+    await phone.locator("#themeProfileForm > button").click();
+    await phone.waitForFunction(() => document.body.dataset.uiTheme === "kitty");
     await phone.waitForFunction(() => document.body.dataset.uiLayout === "iphone13");
+    await phone.waitForFunction(() => !document.querySelector("#themeProfileForm > button")?.disabled);
+    await phone.locator("#accountModal .sheet-close").click();
+    await phone.locator("#accountModal").waitFor({ state: "hidden" });
+
+    await tablet.locator(".avatar-pair").click();
+    await tablet.locator("#accountModal.open").waitFor();
+    await tablet.locator('[data-action="open-account-section"][data-account-section="appearance"]').click();
+    await tablet.locator('#themeProfileForm input[value="daniel"]').check();
+    await tablet.locator('#themeProfileForm input[name="layoutMode"][value="adaptive"]').check();
+    await tablet.locator("#themeProfileForm > button").click();
+    await tablet.waitForFunction(() => document.body.dataset.uiTheme === "daniel");
+    await tablet.waitForFunction(() => !document.querySelector("#themeProfileForm > button")?.disabled);
+    assert(await phone.evaluate(() => document.body.dataset.uiTheme) === "kitty", "伴侣修改主题不应改变我的主题");
+    assert(await tablet.evaluate(() => document.body.dataset.uiLayout) === "adaptive", "平板账号没有保留通用自适应布局");
+    await tablet.locator("#accountModal .sheet-close").click();
+    await tablet.locator("#accountModal").waitFor({ state: "hidden" });
 
     await navigateAllSurfaces(phone, "390×844");
     await navigateAllSurfaces(tablet, "768×1024");
     const phoneGeometry = await phone.evaluate(() => ({
+      layout: document.body.dataset.uiLayout,
       shell: Math.round(document.querySelector(".phone-shell").getBoundingClientRect().width),
       navButton: Math.round(document.querySelector(".bottom-nav button").getBoundingClientRect().height),
       inputFont: getComputedStyle(document.querySelector("#chatInput")).fontSize,
     }));
-    assert(phoneGeometry.shell === 390, "iPhone 13 页面宽度错误：" + JSON.stringify(phoneGeometry));
-    assert(phoneGeometry.navButton >= 44, "iPhone 13 导航点击区域不足 44pt：" + JSON.stringify(phoneGeometry));
-    assert(parseFloat(phoneGeometry.inputFont) >= 16, "iPhone 输入框会触发自动缩放：" + JSON.stringify(phoneGeometry));
+    assert(phoneGeometry.layout === "iphone13" && phoneGeometry.shell === 390, "iPhone 13 布局没有使用 390pt 页面宽度：" + JSON.stringify(phoneGeometry));
+    assert(phoneGeometry.navButton >= 44, "iPhone 13 底部导航点击区域不足 44pt：" + JSON.stringify(phoneGeometry));
+    assert(parseFloat(phoneGeometry.inputFont) >= 16, "iPhone 13 输入框会触发 Safari 自动缩放：" + JSON.stringify(phoneGeometry));
 
+    await phone.locator('.bottom-nav [data-nav="home"]').click();
+    await phone.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    assert(await phone.evaluate(() => window.scrollY > 100), "手机页面没有形成可验证的纵向滚动");
+    await phone.locator('.bottom-nav [data-nav="chat"]').click();
+    await phone.waitForFunction(() => window.scrollY <= 2);
     await phone.locator('.bottom-nav [data-nav="home"]').click();
     assert(await phone.locator(".home-more").evaluate(node => !node.open), "首页低频动态默认没有收起");
     await phone.locator(".home-more > summary").click();
@@ -159,6 +189,15 @@ async function navigateAllSurfaces(page, label) {
     const tabTops = await phone.locator('[data-screen="trip"] .section-tabs button').evaluateAll(nodes => nodes.map(node => Math.round(node.getBoundingClientRect().top)));
     assert(new Set(tabTops).size === 1, "旅行子导航发生换行");
 
+    await phone.evaluate(async () => {
+      const response = await fetch("/api/v1/account/profile", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ui_layout_mode: "adaptive" }),
+      });
+      if (!response.ok) throw new Error("无法恢复通用布局");
+      location.reload();
+    });
+    await phone.waitForFunction(() => document.body.dataset.uiLayout === "adaptive");
     await phone.setViewportSize({ width: 1440, height: 900 });
     await navigateAllSurfaces(phone, "1440×900");
     assert(errors.length === 0, "页面脚本错误：" + errors.join(" | "));

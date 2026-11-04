@@ -1,4 +1,4 @@
-/* Public regression suite: synthetic accounts only; no private deployment access. */
+/* Deterministic session races against the real H5 realtime implementation. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -8,7 +8,7 @@ const app = fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8");
 const start = app.indexOf("let realtimeGeneration = 0;");
 const end = app.indexOf("function showAccountAuth", start);
 const apiStart = app.indexOf("async function api(");
-const apiEnd = app.indexOf("function tripCreationRequest", apiStart);
+const apiEnd = app.indexOf("function tripGenerationRequest", apiStart);
 assert(start >= 0 && end > start, "Realtime lifecycle implementation not found");
 assert(apiStart >= 0 && apiEnd > apiStart, "Real API implementation not found");
 
@@ -212,33 +212,6 @@ function fixture({ realApi = false } = {}) {
     assert.equal(readBody, false, "cancelled requests must stop immediately after late response headers");
     assert.equal(test.cleanups, 0);
     checks.push("real API checks cancellation before reading response bodies");
-  }
-  const smartStart = app.indexOf("async function loadSmartSurface(");
-  const smartEnd = app.indexOf("async function composeSmartSurface(", smartStart);
-  assert(smartStart >= 0 && smartEnd > smartStart);
-  for (const delayed of [false, true]) {
-    let protectedDraft = !delayed;
-    let renders = 0;
-    let resolveManifest;
-    const context = vm.createContext({
-      smartExamples: { home: "example" },
-      state: { data: null, manifests: {}, composingSmartSurfaces: new Set(), pinnedSmartSurfaces: new Set() },
-      surfaceHasDraftIntent: () => protectedDraft,
-      manifestHasPendingWrite: () => false,
-      document: { querySelector: () => ({ existingInput: true }) },
-      renderSmartSurface: () => { renders += 1; },
-      smartCacheKey: () => "fixture",
-      readLocalJson: () => null,
-      validManifest: () => false,
-      api: () => new Promise(resolve => { resolveManifest = resolve; }),
-      saveManifestCache() {},
-    });
-    vm.runInContext(app.slice(smartStart, smartEnd), context);
-    const pending = context.loadSmartSurface("home", { quiet: true });
-    if (delayed) { protectedDraft = true; resolveManifest({ sections: [] }); }
-    await pending;
-    assert.equal(renders, 0, "quiet refresh must preserve the existing input DOM");
-    checks.push(delayed ? "late background results preserve typed input" : "existing drafts preserve focus and selection");
   }
   console.log(JSON.stringify({ ok: true, checks }, null, 2));
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from love_moments.intelligent_ui import ConflictError
+from love_moments.providers import GeneratedPlan, LocalTravelPlanner
 from love_moments.schema import SCHEMA_VERSION
 from love_moments.store import DEMO_PARTNER, DEMO_USER, LoveMomentsStore
 from tests import VALID_PNG
@@ -92,7 +93,7 @@ class PhaseThreeStoreTests(unittest.TestCase):
                 }, DEMO_USER)
 
         busy = self.store.create_calendar_entry({
-            "entry_type": "event", "title": "演示甲的安排",
+            "entry_type": "event", "title": "唐的安排",
             "starts_at": "2026-11-02T14:00:00+08:00",
             "ends_at": "2026-11-02T16:00:00+08:00", "all_day": False,
             "participant_ids": [DEMO_USER], "blocks_time": True,
@@ -118,7 +119,7 @@ class PhaseThreeStoreTests(unittest.TestCase):
 
         candidate = self._manual_place_candidate()
         self.store.create_calendar_entry({
-            "entry_type": "event", "title": "演示乙的安排",
+            "entry_type": "event", "title": "超的安排",
             "starts_at": "2026-11-02T14:00:00+08:00",
             "ends_at": "2026-11-02T16:00:00+08:00", "all_day": False,
             "participant_ids": [DEMO_PARTNER], "blocks_time": True,
@@ -277,6 +278,79 @@ class PhaseThreeStoreTests(unittest.TestCase):
         partner_trip = self.store.get_trip(trip["id"], user_id=DEMO_PARTNER)
         self.assertEqual(next(item for item in partner_trip["quotes"] if item["selected_at"])["id"], manual["id"])
 
+    def test_trip_logistics_cannot_claim_regeneration_without_confirmed_place(self) -> None:
+        unresolved = self.store.create_trip({
+            "destination": "云上草原国际山地旅游度假区",
+            "start_date": "2026-12-04", "end_date": "2026-12-06", "budget": 5200,
+        }, DEMO_USER)
+        payload = {
+            "departure_city": "杭州", "arrival_city": "湖州市",
+            "travelers": 2, "rooms": 1, "hotel_budget": 1200,
+            "expected_version": unresolved["version"],
+        }
+        with self.assertRaisesRegex(ValueError, "高德候选"):
+            self.store.update_trip_logistics(unresolved["id"], payload, DEMO_USER)
+
+        candidate = self.store.search_destination_places({
+            "query": "云上草原国际山地旅游度假区", "region_hint": "湖州市", "include_global": False,
+        }, DEMO_USER)["items"][0]
+        resolved = self.store.update_trip_logistics(
+            unresolved["id"], {**payload, "destination_candidate_id": candidate["candidate_id"]}, DEMO_USER,
+        )
+        self.assertFalse(resolved["needs_destination_detail"])
+        self.assertIsNotNone(resolved["destination_place"])
+
+        retained = self.store.update_trip_logistics(resolved["id"], {
+            **payload, "hotel_budget": 1300, "expected_version": resolved["version"],
+        }, DEMO_USER)
+        self.assertFalse(retained["needs_destination_detail"])
+        self.assertEqual(retained["destination_place"]["provider_place_id"], resolved["destination_place"]["provider_place_id"])
+
+    def test_itinerary_photo_is_real_matched_cached_and_skips_meals(self) -> None:
+        trip = self.store.create_trip({
+            "destination": "杭州", "start_date": "2026-11-01", "end_date": "2026-11-02", "budget": 3000,
+        }, DEMO_USER)
+        variant = next(value for value in trip["variants"] if value["style"] == "classic")
+        activity = next(item for day in variant["days"] for item in day["items"] if item["type"] != "meal")
+        with self.store.connection() as db:
+            db.execute("UPDATE itinerary_items SET title='西湖风景名胜区' WHERE id=?", (activity["id"],))
+
+        class FakeAmap:
+            name, is_mock, calls = "amap", False, 0
+
+            def search_places(self, keyword, region_hint, limit):
+                self.calls += 1
+                return [{
+                    "provider": "amap", "provider_place_id": "wrong-service", "name": "西湖风景名胜区游客服务中心",
+                    "formatted_address": "杭州市西湖区", "country": "中国", "province": "浙江省",
+                    "city": "杭州市", "district": "西湖区", "latitude": 30.2, "longitude": 120.1,
+                    "category": "生活服务;服务中心", "image_url": "https://store.is.autonavi.com/showpic/wrong",
+                    "image_source": "amap",
+                }, {
+                    "provider": "amap", "provider_place_id": "west-lake", "name": "西湖风景名胜区",
+                    "formatted_address": "杭州市西湖区", "country": "中国", "province": "浙江省",
+                    "city": "杭州市", "district": "西湖区", "latitude": 30.2, "longitude": 120.1,
+                    "category": "风景名胜", "image_url": "https://store.is.autonavi.com/showpic/west-lake",
+                    "image_source": "amap",
+                }]
+
+        provider = FakeAmap()
+        with patch("love_moments.phase_three.map_provider_from_env", return_value=provider) as provider_factory:
+            first = self.store.resolve_itinerary_photo(trip["id"], activity["id"], DEMO_USER)
+            second = self.store.resolve_itinerary_photo(trip["id"], activity["id"], DEMO_PARTNER)
+        self.assertTrue(callable(provider_factory.call_args.args[0]), "高德实景图查询必须接入统一免费额度守卫")
+        self.assertEqual(first["status"], "available")
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(second["photo"]["source_label"], "高德地点实景图")
+        self.assertEqual(second["photo"]["provider_place_id"], "west-lake")
+
+        meal = next((item for day in variant["days"] for item in day["items"] if item["type"] == "meal"), None)
+        if meal:
+            skipped = self.store.resolve_itinerary_photo(trip["id"], meal["id"], DEMO_USER)
+            self.assertEqual(skipped["status"], "not_applicable")
+
     def test_serpapi_quotes_use_database_quota_when_legacy_counter_is_unwritable(self) -> None:
         """Production is read-only, so store-backed requests must not write the legacy JSON counter."""
         candidate = self.store.search_destination_places(
@@ -433,7 +507,7 @@ class PhaseThreeStoreTests(unittest.TestCase):
         active = next(variant for variant in trip["variants"] if variant["style"] == trip["active_variant"])
         items = [day["items"] for day in active["days"] if len(day["items"]) >= 2]
         self.assertGreaterEqual(len(items), 2)
-        now = "2024-02-14T00:00:00+00:00"
+        now = "2026-10-16T00:00:00+00:00"
         with self.store.connection() as db:
             for day_index, day_items in enumerate(items[:2]):
                 for item_index, item in enumerate(day_items[:2]):
@@ -476,8 +550,8 @@ class PhaseThreeStoreTests(unittest.TestCase):
             "destination": "苏州", "start_date": "2026-12-20", "end_date": "2026-12-22",
             "budget": 4200, "preferences": {"pace": "松弛"},
         }
-        first = self.store.create_trip_generation_job(payload, DEMO_USER, "trip-request-1234567890")
-        duplicate = self.store.create_trip_generation_job(payload, DEMO_USER, "trip-request-1234567890")
+        first = self.store.create_trip_generation_job(payload, DEMO_USER, "trip-request-test12390")
+        duplicate = self.store.create_trip_generation_job(payload, DEMO_USER, "trip-request-test12390")
         self.assertEqual(first["id"], duplicate["id"])
         claimed = self.store.claim_trip_generation_job()
         self.assertEqual(claimed["id"], first["id"])
@@ -491,7 +565,34 @@ class PhaseThreeStoreTests(unittest.TestCase):
         self.assertEqual(rerun["trip_id"], completed["trip_id"])
         self.assertEqual(len([item for item in self.store.list_trips(DEMO_USER) if item["id"] == completed["trip_id"]]), 1)
         with self.assertRaises(ConflictError):
-            self.store.create_trip_generation_job({**payload, "destination": "无锡"}, DEMO_USER, "trip-request-1234567890")
+            self.store.create_trip_generation_job({**payload, "destination": "无锡"}, DEMO_USER, "trip-request-test12390")
+
+    def test_existing_trip_regeneration_runs_as_durable_background_job(self) -> None:
+        candidate = self.store.search_destination_places({
+            "query": "西湖风景名胜区", "region_hint": "杭州市", "include_global": False,
+        }, DEMO_USER)["items"][0]
+        trip = self.store.create_trip({
+            "destination": "西湖风景名胜区", "destination_candidate_id": candidate["candidate_id"],
+            "start_date": "2026-12-24", "end_date": "2026-12-26", "budget": 5200,
+        }, DEMO_USER)
+        original_revision = trip["current_revision"]
+        first = self.store.create_trip_regeneration_job(
+            trip["id"], {"preserve_manual": True}, DEMO_USER, "trip-regenerate-test12390",
+        )
+        duplicate = self.store.create_trip_regeneration_job(
+            trip["id"], {"preserve_manual": True}, DEMO_USER, "trip-regenerate-test12390",
+        )
+        self.assertEqual(first["id"], duplicate["id"])
+        claimed = self.store.claim_trip_generation_job()
+        self.assertEqual(claimed["id"], first["id"])
+        completed = self.store.run_trip_generation_job(claimed)
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["trip_id"], trip["id"])
+        result = self.store.get_trip_generation_job(first["id"], DEMO_USER)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["trip"]["id"], trip["id"])
+        self.assertEqual(len(result["trip"]["variants"]), 5)
+        self.assertGreater(result["trip"]["current_revision"], original_revision)
 
     def test_selected_hotel_coordinates_are_kept_and_added_to_daily_routes(self) -> None:
         trip = self.store.create_trip({
@@ -499,7 +600,7 @@ class PhaseThreeStoreTests(unittest.TestCase):
         }, DEMO_USER)
         active = next(item for item in trip["variants"] if item["style"] == trip["active_variant"])
         itinerary_items = [item for day in active["days"] for item in day["items"]]
-        now = "2024-02-14T00:00:00+00:00"
+        now = "2026-10-16T00:00:00+00:00"
         with self.store.connection() as db:
             for index, item in enumerate(itinerary_items):
                 db.execute(
@@ -613,7 +714,10 @@ class PhaseThreeStoreTests(unittest.TestCase):
         trip = self.store.create_trip({"destination": "云南", "start_date": "2026-11-13", "end_date": "2026-11-15", "budget": 4000}, DEMO_USER)
         self.store.select_variant(trip["id"], "food", DEMO_USER)
         generated_food = next(item for item in trip["variants"] if item["style"] == "food")
-        self.assertTrue(all({_meal["start_time"] for _meal in day["items"]} == {"08:00", "12:00", "18:30"} for day in generated_food["days"]))
+        for day in generated_food["days"]:
+            meal_items = [item for item in day["items"] if item["type"] == "meal"]
+            self.assertEqual({item["start_time"] for item in meal_items}, {"08:00", "12:00", "18:30"})
+            self.assertTrue(any(item["type"] != "meal" for item in day["items"]))
         with patch("love_moments.phase_three.map_provider_from_env", return_value=FakeFoodMap()):
             result = self.store.refresh_food_recommendations(
                 trip["id"], DEMO_USER, day_areas={"1": "昆明老街", "2": "大理古城", "3": "丽江古城"},
@@ -622,14 +726,59 @@ class PhaseThreeStoreTests(unittest.TestCase):
         self.assertGreaterEqual(result["count"], 4)
         food = next(item for item in result["trip"]["variants"] if item["style"] == "food")
         all_items = [item for day in food["days"] for item in day["items"]]
-        self.assertTrue(all(" · " in item["title"] for item in all_items))
-        recommendation = all_items[0]["food_recommendations"][0]
+        meal_items = [item for item in all_items if item["type"] == "meal"]
+        attraction_items = [item for item in all_items if item["type"] != "meal"]
+        self.assertTrue(all(" · " in item["title"] for item in meal_items))
+        self.assertTrue(all(item["food_recommendations"] for item in meal_items))
+        self.assertTrue(all(not item["food_recommendations"] for item in attraction_items))
+        recommendation = meal_items[0]["food_recommendations"][0]
         selected = self.store.select_food_recommendation(trip["id"], recommendation["id"], DEMO_USER)
         partner = self.store.get_trip(trip["id"], DEMO_PARTNER)
         partner_food = next(item for item in partner["variants"] if item["style"] == "food")
         partner_rows = [shop for day in partner_food["days"] for item in day["items"] for shop in item["food_recommendations"]]
         self.assertTrue(any(shop["id"] == recommendation["id"] and shop["selected_at"] for shop in partner_rows))
         self.assertEqual(selected["status"], "pending_approval")
+
+    def test_food_plan_keeps_model_attractions_while_filling_three_meals(self) -> None:
+        plans = LocalTravelPlanner().generate_variants(
+            "望仙谷", 300000, {"start_date": "2026-11-13", "end_date": "2026-11-14"},
+        )
+        attraction_titles = {"悬崖民宿群观景步道", "揽月桥夜景"}
+        food = GeneratedPlan(
+            style="food", name="美食寻味", summary="边玩边吃", budget_cents=300000,
+            intensity="适中", transport_minutes=60,
+            items=[
+                {"day_number": 1, "start_time": "10:00", "title": "悬崖民宿群观景步道", "type": "place", "duration_minutes": 120, "cost_cents": 0, "note": "上午游览", "details": {}},
+                {"day_number": 2, "start_time": "15:00", "title": "揽月桥夜景", "type": "place", "duration_minutes": 120, "cost_cents": 0, "note": "傍晚游览", "details": {}},
+            ],
+            day_themes={1: "峡谷与村落", 2: "夜景与返程"}, generation_source="ai",
+        )
+        plans = [food if plan.style == "food" else plan for plan in plans]
+        with patch.object(self.store.planner, "generate_variants", return_value=plans):
+            trip = self.store.create_trip({
+                "destination": "望仙谷", "start_date": "2026-11-13", "end_date": "2026-11-14", "budget": 3000,
+            }, DEMO_USER)
+        saved_food = next(variant for variant in trip["variants"] if variant["style"] == "food")
+        for day in saved_food["days"]:
+            meals = [item for item in day["items"] if item["type"] == "meal"]
+            places = [item for item in day["items"] if item["type"] != "meal"]
+            self.assertEqual({item["start_time"] for item in meals}, {"08:00", "12:00", "18:30"})
+            self.assertEqual(len(places), 1)
+            self.assertIn(places[0]["title"], attraction_titles)
+
+    def test_food_plan_does_not_add_destination_meals_before_late_arrival(self) -> None:
+        plans = LocalTravelPlanner().generate_variants(
+            "云上草原", 300000, {"start_date": "2026-12-04", "end_date": "2026-12-06"},
+        )
+        with patch.object(self.store.planner, "generate_variants", return_value=plans):
+            trip = self.store.create_trip({
+                "destination": "云上草原", "start_date": "2026-12-04", "end_date": "2026-12-06",
+                "outbound_time": "2026-12-04T20:00:00", "return_time": "2026-12-06T20:00:00",
+                "budget": 3000,
+            }, DEMO_USER)
+        food = next(variant for variant in trip["variants"] if variant["style"] == "food")
+        first_day_meals = [item for item in food["days"][0]["items"] if item["type"] == "meal"]
+        self.assertEqual([item["start_time"] for item in first_day_meals], ["18:30"])
 
     def test_small_scenic_destination_uses_nearby_three_meals_each_day(self) -> None:
         calls = []
@@ -654,12 +803,14 @@ class PhaseThreeStoreTests(unittest.TestCase):
             result = self.store.refresh_food_recommendations(trip["id"], DEMO_USER, day_areas={"2": "上饶站"}, day_number=2)
         food = next(item for item in result["trip"]["variants"] if item["style"] == "food")
         for day in food["days"]:
-            self.assertEqual({_meal["start_time"] for _meal in day["items"]}, {"08:00", "12:00", "18:30"})
-            self.assertTrue(all(_meal["food_recommendations"] for _meal in day["items"]))
+            meal_items = [item for item in day["items"] if item["type"] == "meal"]
+            self.assertEqual({item["start_time"] for item in meal_items}, {"08:00", "12:00", "18:30"})
+            self.assertTrue(all(item["food_recommendations"] for item in meal_items))
+            self.assertTrue(any(item["type"] != "meal" for item in day["items"]))
         self.assertTrue(calls)
         self.assertTrue(all(city == "上饶市" for _, city, _, _ in calls))
         self.assertEqual({near for _, _, _, near in calls}, {"望仙谷", "上饶站"})
-        self.assertTrue(all(shop["distance_meters"] <= 5000 for day in food["days"] for meal in day["items"] for shop in meal["food_recommendations"]))
+        self.assertTrue(all(shop["distance_meters"] <= 5000 for day in food["days"] for meal in day["items"] if meal["type"] == "meal" for shop in meal["food_recommendations"]))
 
     def test_any_plan_meal_can_query_nearby_high_rated_restaurants(self) -> None:
         calls = []

@@ -293,11 +293,11 @@ class HttpApiTests(unittest.TestCase):
         marker = f"HTTP回忆-{uuid.uuid4().hex}"
         shared = main.STORE.create_moment({
             "title": marker, "body": "双方可查正文", "visibility": "shared",
-            "occurred_at": "2024-02-14T12:00:00+00:00",
+            "occurred_at": "2026-10-16T12:00:00+00:00",
         }, DEMO_USER)
         private = main.STORE.create_moment({
             "title": marker + "-私密", "body": "不可泄露", "visibility": "private",
-            "occurred_at": "2024-02-14T13:00:00+00:00",
+            "occurred_at": "2026-10-16T13:00:00+00:00",
         }, DEMO_USER)
 
         partner_result = self.post(chao, "/memories/search", {"q": marker, "limit": 20})
@@ -383,14 +383,14 @@ class HttpApiTests(unittest.TestCase):
         self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
         moment = main.STORE.create_moment({
             "title": "HTTP 纪念册", "body": "只走受保护的本地 PDF", "visibility": "shared",
-            "occurred_at": "2024-02-14T12:00:00+00:00",
+            "occurred_at": "2026-10-16T12:00:00+00:00",
         }, DEMO_USER)
         preview = self.post(tang, "/album-exports/preview", {
-            "template": "year", "year": 2024, "audience": "shared",
+            "template": "year", "year": 2026, "audience": "shared",
         })
         chosen = next(item for item in preview["items"] if item["resource_id"] == moment["id"])
         job = self.post(tang, "/album-exports", {
-            "template": "year", "year": 2024, "audience": "shared",
+            "template": "year", "year": 2026, "audience": "shared",
             "selection": [{"resource_type": "moment", "resource_id": moment["id"]}],
             "expected_versions": {f"moment:{moment['id']}": chosen["version"]},
         }, {"Idempotency-Key": f"http-album-{uuid.uuid4().hex}"})
@@ -433,13 +433,13 @@ class HttpApiTests(unittest.TestCase):
         self.post(chao, "/auth/login", {"username": "test1", "password": "test123"})
         moment = main.STORE.create_moment({
             "title": "HTTP 合并", "body": "旧正文", "visibility": "shared",
-            "occurred_at": "2024-02-14T12:00:00+00:00",
+            "occurred_at": "2026-10-16T12:00:00+00:00",
         }, DEMO_USER)
         first = self.put(tang, f"/memories/moment/{moment['id']}/descriptions/me", {
-            "body": "演示甲的视角", "visibility": "shared", "expected_version": 0,
+            "body": "唐的视角", "visibility": "shared", "expected_version": 0,
         })
         second = self.put(chao, f"/memories/moment/{moment['id']}/descriptions/me", {
-            "body": "演示乙的视角", "visibility": "shared", "expected_version": 0,
+            "body": "超的视角", "visibility": "shared", "expected_version": 0,
         })
         proposal = self.post(tang, f"/memories/moments/{moment['id']}/merge-proposal", {
             "body": "共同确认的正文", "expected_parent_version": moment["version"],
@@ -1031,6 +1031,26 @@ class HttpApiTests(unittest.TestCase):
         logged_in = self.post(opener, "/auth/login", {"username": "password_user", "password": "new-password-456"})
         self.assertEqual(logged_in["user"]["username"], "password_user")
 
+    def test_registration_without_nickname_can_update_nickname_after_login(self) -> None:
+        opener = self.opener()
+        username = f"profile_{uuid.uuid4().hex[:10]}"
+
+        registered = self.post(opener, "/auth/register", {
+            "username": username,
+            "password": "profile-password-123",
+        })
+        self.assertEqual(registered["user"]["nickname"], username)
+
+        updated = self.put(opener, "/account/profile", {
+            "nickname": "新的昵称",
+            "avatar_label": "新",
+        })
+        self.assertEqual(updated["user"]["nickname"], "新的昵称")
+        self.assertEqual(updated["user"]["avatar_label"], "新")
+        with opener.open(self.base + "/auth/me") as response:
+            current = json.load(response)
+        self.assertEqual(current["user"]["nickname"], "新的昵称")
+
     def test_authenticated_user_can_update_only_their_avatar_label(self) -> None:
         opener = self.opener()
         username = f"avatar_{uuid.uuid4().hex[:10]}"
@@ -1098,7 +1118,7 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(job["status"], "pending")
         payload = json.loads(job["payload_json"])
         self.assertEqual(payload["body"], "对方正在呼叫你，点击进入恋屿接听。")
-        self.assertNotIn("演示甲", job["payload_json"])
+        self.assertNotIn("唐", job["payload_json"])
         with patch.object(main.PUSH, "send", return_value=response):
             dispatched = main.process_push_outbox_once()
         self.assertEqual(dispatched["delivered"], 1)
@@ -1183,7 +1203,7 @@ class HttpApiTests(unittest.TestCase):
         self.register_push_device(tang, "moment-tang")
         self.register_push_device(chao, "moment-chao")
         shared = self.post(tang, "/moments", {"title": "双方可见的新回忆", "body": "正文不进通知", "visibility": "shared"})
-        private = self.post(tang, "/moments", {"title": "只给演示甲看的回忆", "body": "不能泄露", "visibility": "private"})
+        private = self.post(tang, "/moments", {"title": "只给唐看的回忆", "body": "不能泄露", "visibility": "private"})
         delayed = self.post(tang, "/moments", {
             "title": "稍后才公开", "body": "现在不能泄露", "visibility": "delayed",
             "reveal_at": "2099-01-01T00:00:00+00:00",
@@ -1331,15 +1351,15 @@ class HttpApiTests(unittest.TestCase):
         with second.open(self.base + f"/shared-content/wishlist_item/{wish['id']}") as response:
             partner_detail = json.load(response)
         self.assertEqual(partner_detail["title"], marker)
-        first_comment = self.post(first, f"/shared-content/wishlist_item/{wish['id']}/comments", {"body": "演示甲的评论"})
-        reply = self.post(second, f"/shared-content/wishlist_item/{wish['id']}/comments", {"body": "演示乙的回复"})
+        first_comment = self.post(first, f"/shared-content/wishlist_item/{wish['id']}/comments", {"body": "唐的评论"})
+        reply = self.post(second, f"/shared-content/wishlist_item/{wish['id']}/comments", {"body": "超的回复"})
 
         with first.open(self.base + f"/shared-content/wishlist_item/{wish['id']}") as response:
             creator_detail = json.load(response)
         with second.open(self.base + f"/shared-content/wishlist_item/{wish['id']}") as response:
             partner_detail = json.load(response)
-        self.assertEqual([item["body"] for item in creator_detail["comments"]], ["演示甲的评论", "演示乙的回复"])
-        self.assertEqual([item["body"] for item in partner_detail["comments"]], ["演示甲的评论", "演示乙的回复"])
+        self.assertEqual([item["body"] for item in creator_detail["comments"]], ["唐的评论", "超的回复"])
+        self.assertEqual([item["body"] for item in partner_detail["comments"]], ["唐的评论", "超的回复"])
         self.assertTrue(creator_detail["comments"][0]["mine"])
         self.assertTrue(partner_detail["comments"][1]["mine"])
 
@@ -1430,6 +1450,9 @@ class HttpApiTests(unittest.TestCase):
     def test_realtime_sse_stream_emits_scoped_event(self) -> None:
         opener = self.opener()
         self.post(opener, "/auth/login", {"username": "test", "password": "test123"})
+        # The shared suite can contain more than one visible page of historic
+        # events.  Start at the actual pre-create tail so this test verifies
+        # the new SSE event instead of rereading an arbitrary earlier page.
         with main.STORE.connection() as db:
             cursor = int(db.execute("SELECT COALESCE(MAX(sequence),0) FROM realtime_events").fetchone()[0])
         created = self.post(opener, "/messages", {
@@ -1991,12 +2014,14 @@ class HttpApiTests(unittest.TestCase):
         with urllib.request.urlopen(root + "/") as response:
             html = response.read().decode("utf-8")
             self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+            self.assertIn("https://store.is.autonavi.com", response.headers["Content-Security-Policy"])
+            self.assertIn("https://aos-comment.amap.com", response.headers["Content-Security-Policy"])
             self.assertNotIn("fonts.googleapis.com", response.headers["Content-Security-Policy"])
             self.assertNotIn("fonts.gstatic.com", response.headers["Content-Security-Policy"])
             self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
             self.assertIn("两个人分别注册自己的独立账号", html)
             self.assertIn("请使用你们各自注册的账号", html)
-            self.assertNotIn("test / 12345678", html)
+            self.assertNotIn("test / test123", html)
         with urllib.request.urlopen(root + "/api/health") as response:
             health = json.load(response)
         self.assertEqual(health["schema_version"], SCHEMA_VERSION)

@@ -223,7 +223,16 @@ def mirror_backup_to_qiniu(folder: str | Path) -> dict[str, Any]:
     key = hashlib.sha256(secret.encode("utf-8")).digest()
     import base64
     encrypted = Fernet(base64.urlsafe_b64encode(key)).encrypt(archive.getvalue())
-    storage = QiniuKodoMediaStorage(*values, endpoint=os.getenv("QINIU_S3_ENDPOINT", ""))
+    try:
+        upload_timeout = int(os.getenv("BACKUP_QINIU_TIMEOUT_SECONDS", "180"))
+    except ValueError:
+        upload_timeout = 180
+    upload_timeout = min(max(upload_timeout, 30), 900)
+    storage = QiniuKodoMediaStorage(
+        *values,
+        endpoint=os.getenv("QINIU_S3_ENDPOINT", ""),
+        timeout=upload_timeout,
+    )
     prefix = os.getenv("BACKUP_QINIU_PREFIX", "private-disaster-backups").strip().strip("/") or "private-disaster-backups"
     object_key = f"{prefix}/{source.name}.tar.gz.fernet"
     stored = storage.put(object_key, encrypted, "application/octet-stream")
